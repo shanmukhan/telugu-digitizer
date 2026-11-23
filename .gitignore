@@ -1,0 +1,30 @@
+# Virtual environments and local runtime tools
+.venv/
+.tools/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Source books, rendered pages, gold transcriptions, and run artifacts
+data/originals/*
+!data/originals/.gitkeep
+data/pages/*
+!data/pages/.gitkeep
+data/gold/*
+!data/gold/.gitkeep
+data/manifests/*
+!data/manifests/.gitkeep
+!data/manifests/manifest.example.json
+
+models/*
+!models/.gitkeep
+
+artifacts/*
+!artifacts/.gitkeep
+
+# OS / Editor
+.DS_Store
+*.swp
