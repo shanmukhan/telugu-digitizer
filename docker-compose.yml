@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: telugu-digitizer-postgres
+    environment:
+      POSTGRES_DB: telugu_digitizer
+      POSTGRES_USER: telugu_digitizer
+      POSTGRES_PASSWORD: telugu_digitizer
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telugu_digitizer -d telugu_digitizer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

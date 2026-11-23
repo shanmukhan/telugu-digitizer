@@ -113,3 +113,43 @@ Outputs are written atomically to `artifacts/benchmark/<run-id>/`:
 ```bash
 .venv/bin/pytest -v
 ```
+
+---
+
+## 4. Phase 2 — PDF Processing Backend (FastAPI + PostgreSQL + Alembic)
+
+### Start local PostgreSQL & run migrations
+
+Without Docker (using project-local `.tools/postgres`):
+
+```bash
+.venv/bin/python scripts/manage_local_pg.py start
+.venv/bin/alembic upgrade head
+```
+
+Or with Docker Compose:
+
+```bash
+docker compose up -d postgres
+.venv/bin/alembic upgrade head
+```
+
+### Start the localhost FastAPI server
+
+```bash
+.venv/bin/python scripts/run_api.py
+```
+
+The API binds to `http://127.0.0.1:8000` by default (OpenAPI docs at `http://127.0.0.1:8000/docs`).
+
+Key Phase 2 endpoints under `/api/v1`:
+- `GET /api/v1/health`
+- `POST /api/v1/books` (multipart PDF upload, SHA-256 deduplication, page classification, 300-DPI rendering)
+- `GET /api/v1/books` / `GET /api/v1/books/{book_id}` / `DELETE /api/v1/books/{book_id}`
+- `GET /api/v1/books/{book_id}/pages`
+- `GET /api/v1/books/{book_id}/pages/{page_number}/image`
+- `GET /api/v1/books/{book_id}/pages/{page_number}/digital-text`
+- `POST /api/v1/books/{book_id}/ocr-runs` (idempotent & restartable background execution)
+- `GET /api/v1/ocr-runs/{run_id}` / `POST /api/v1/ocr-runs/{run_id}/resume`
+- `GET /api/v1/ocr-runs/{run_id}/pages/{page_number}`
+

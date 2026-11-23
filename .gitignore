@@ -25,6 +25,9 @@ models/*
 artifacts/*
 !artifacts/.gitkeep
 
+workspace/*
+!workspace/.gitkeep
+
 # OS / Editor
 .DS_Store
 *.swp
