@@ -5,38 +5,70 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
 from src.api.schemas import (
+    BlockEditRequest,
+    BlockEditResponse,
     BookListResponse,
+    BookOCRRunsResponse,
+    BookOCRRunSummary,
     BookPagesResponse,
     BookSummaryResponse,
     BookUploadResponse,
+    CorrectionListResponse,
+    CorrectionMemoryRecord,
+    CorrectionRejectRequest,
+    CorrectionSearchResponse,
+    CorrectionStatusRequest,
+    CorrectionSuggestionItem,
     DigitalTextPageResponse,
+    ExportCreateRequest,
+    ExportListResponse,
+    ExportRecordResponse,
     HealthResponse,
     OCRBlockResponse,
     OCRRunCreateRequest,
     OCRRunCreateResponse,
     OCRRunStatusResponse,
     PageOCRResponse,
+    PageReviewResponse,
+    PageReviewStatusRequest,
+    PageReviewStatusResponse,
     PageSummaryResponse,
 )
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
-from src.db.models import Book, BookPage, ModelRegistry, OCRBlock, OCRRun, ProcessingJob
+from src.db.models import Book, BookPage, DocumentExport, ModelRegistry, OCRBlock, OCRRun, ProcessingJob
 from src.services.book_service import (
     delete_book_and_artifacts,
     get_book_with_counts,
     import_pdf_book,
     list_books_with_counts,
 )
+from src.services.correction_service import (
+    approve_correction,
+    list_corrections,
+    reject_correction,
+    search_corrections,
+    update_correction_status,
+)
+from src.services.export_service import create_book_export, list_book_exports
 from src.services.ocr_service import (
     OCRJobExecutor,
     create_or_reuse_ocr_runs,
     resume_ocr_run,
+)
+from src.services.review_service import (
+    get_page_review_payload,
+    list_book_ocr_runs,
+    submit_block_edit,
+    update_page_review_status,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -132,6 +164,29 @@ def delete_book(
 ) -> Response:
     delete_book_and_artifacts(db=db, storage=storage, book_id=book_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/books/{book_id}/pdf")
+def get_book_pdf(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> Response:
+    book = db.get(Book, book_id)
+    if book is None:
+        raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
+    if not storage.exists(book.source_storage_key):
+        raise AppError("PDF_FILE_MISSING", "Source PDF file is missing from storage.", status_code=404)
+    return Response(content=storage.read_bytes(book.source_storage_key), media_type="application/pdf")
+
+
+@router.get("/books/{book_id}/ocr-runs", response_model=BookOCRRunsResponse)
+def get_book_ocr_runs(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> BookOCRRunsResponse:
+    items = [BookOCRRunSummary(**row) for row in list_book_ocr_runs(db, book_id)]
+    return BookOCRRunsResponse(book_id=book_id, items=items)
 
 
 @router.get("/books/{book_id}/pages", response_model=BookPagesResponse)
@@ -352,3 +407,248 @@ def get_ocr_run_page(
             for b in blocks
         ],
     )
+
+
+@router.get("/books/{book_id}/pages/{page_number}/review", response_model=PageReviewResponse)
+def get_page_review(
+    book_id: uuid.UUID,
+    page_number: int,
+    db: Annotated[Session, Depends(get_db)],
+    primary_run_id: uuid.UUID | None = None,
+    comparator_run_id: uuid.UUID | None = None,
+) -> PageReviewResponse:
+    payload = get_page_review_payload(
+        db=db,
+        book_id=book_id,
+        page_number=page_number,
+        primary_run_id=primary_run_id,
+        comparator_run_id=comparator_run_id,
+    )
+    return PageReviewResponse(**payload)
+
+
+@router.post("/ocr-blocks/{block_id}/edits", response_model=BlockEditResponse, status_code=status.HTTP_201_CREATED)
+def post_block_edit(
+    block_id: uuid.UUID,
+    payload: BlockEditRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BlockEditResponse:
+    result = submit_block_edit(
+        db=db,
+        block_id=block_id,
+        edited_text=payload.edited_text,
+        action=payload.action,
+        review_note=payload.review_note,
+        reviewer_id=payload.reviewer_id,
+        add_to_correction_memory=payload.add_to_correction_memory,
+        memory_scope=payload.memory_scope,
+        correction_type=payload.correction_type,
+        incorrect_span=payload.incorrect_span,
+        corrected_span=payload.corrected_span,
+    )
+    return BlockEditResponse(**result)
+
+
+@router.patch("/books/{book_id}/pages/{page_number}/review-status", response_model=PageReviewStatusResponse)
+def patch_page_review_status(
+    book_id: uuid.UUID,
+    page_number: int,
+    payload: PageReviewStatusRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> PageReviewStatusResponse:
+    result = update_page_review_status(
+        db=db,
+        book_id=book_id,
+        page_number=page_number,
+        review_status=payload.review_status,
+        primary_run_id=payload.primary_run_id,
+    )
+    return PageReviewStatusResponse(**result)
+
+
+def _serialize_correction_record(row) -> CorrectionMemoryRecord:
+    return CorrectionMemoryRecord(
+        correction_id=row.id,
+        language_code=row.language_code,
+        incorrect_text=row.incorrect_text,
+        corrected_text=row.corrected_text,
+        left_context=row.left_context,
+        right_context=row.right_context,
+        correction_type=row.correction_type,
+        scope=row.scope,
+        book_id=row.book_id,
+        source_ocr_block_id=row.source_ocr_block_id,
+        status=row.status,
+        approved_count=row.approved_count,
+        rejected_count=row.rejected_count,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/corrections/search", response_model=CorrectionSearchResponse)
+def search_correction_memory(
+    incorrect_text: str,
+    db: Annotated[Session, Depends(get_db)],
+    left_context: str | None = None,
+    right_context: str | None = None,
+    book_id: uuid.UUID | None = None,
+) -> CorrectionSearchResponse:
+    items = [
+        CorrectionSuggestionItem(**row)
+        for row in search_corrections(
+            db=db,
+            incorrect_text=incorrect_text,
+            left_context=left_context,
+            right_context=right_context,
+            book_id=book_id,
+        )
+    ]
+    return CorrectionSearchResponse(items=items)
+
+
+@router.get("/corrections", response_model=CorrectionListResponse)
+def get_correction_memory_list(
+    db: Annotated[Session, Depends(get_db)],
+    book_id: uuid.UUID | None = None,
+    status_filter: str | None = None,
+    q: str | None = None,
+) -> CorrectionListResponse:
+    rows = list_corrections(db=db, book_id=book_id, status=status_filter, query=q)
+    return CorrectionListResponse(items=[_serialize_correction_record(r) for r in rows])
+
+
+@router.post("/corrections/{correction_id}/approve", response_model=CorrectionMemoryRecord)
+def post_approve_correction(
+    correction_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> CorrectionMemoryRecord:
+    return _serialize_correction_record(approve_correction(db, correction_id))
+
+
+@router.post("/corrections/{correction_id}/reject", response_model=CorrectionMemoryRecord)
+def post_reject_correction(
+    correction_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    payload: CorrectionRejectRequest | None = None,
+) -> CorrectionMemoryRecord:
+    disable = bool(payload.disable) if payload else False
+    return _serialize_correction_record(reject_correction(db, correction_id, disable=disable))
+
+
+@router.patch("/corrections/{correction_id}/status", response_model=CorrectionMemoryRecord)
+def patch_correction_status(
+    correction_id: uuid.UUID,
+    payload: CorrectionStatusRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> CorrectionMemoryRecord:
+    return _serialize_correction_record(update_correction_status(db, correction_id, payload.status))
+
+
+def _serialize_export_record(row: DocumentExport) -> ExportRecordResponse:
+    return ExportRecordResponse(
+        export_id=row.id,
+        book_id=row.book_id,
+        transcript_version_id=row.transcript_version_id,
+        format=row.format,
+        layout_mode=row.layout_mode,
+        text_version=row.text_version,
+        font_family=row.font_family,
+        filename=row.filename,
+        status=row.status,
+        is_fully_reviewed=row.is_fully_reviewed,
+        validation=row.validation or {},
+        download_url=f"/api/v1/exports/{row.id}/download",
+        manifest_url=f"/api/v1/exports/{row.id}/manifest",
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/books/{book_id}/exports",
+    response_model=ExportRecordResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_create_export(
+    book_id: uuid.UUID,
+    payload: ExportCreateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> ExportRecordResponse:
+    row = create_book_export(
+        db=db,
+        storage=storage,
+        book_id=book_id,
+        export_format=payload.format,
+        layout_mode=payload.layout_mode,
+        text_version=payload.text_version,
+        primary_run_id=payload.primary_run_id,
+        font_family=payload.font_family,
+        body_font_size=payload.body_font_size,
+        include_page_numbers=payload.include_page_numbers,
+        include_table_of_contents=payload.include_table_of_contents,
+    )
+    return _serialize_export_record(row)
+
+
+@router.get("/books/{book_id}/exports", response_model=ExportListResponse)
+def get_book_exports(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> ExportListResponse:
+    rows = list_book_exports(db, book_id)
+    return ExportListResponse(book_id=book_id, items=[_serialize_export_record(r) for r in rows])
+
+
+@router.get("/exports/{export_id}", response_model=ExportRecordResponse)
+def get_export_metadata(
+    export_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> ExportRecordResponse:
+    row = db.get(DocumentExport, export_id)
+    if row is None:
+        raise AppError("EXPORT_NOT_FOUND", f"Export {export_id} not found.", status_code=404)
+    return _serialize_export_record(row)
+
+
+@router.get("/exports/{export_id}/download")
+def download_export_file(
+    export_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> Response:
+    row = db.get(DocumentExport, export_id)
+    if row is None:
+        raise AppError("EXPORT_NOT_FOUND", f"Export {export_id} not found.", status_code=404)
+    if not storage.exists(row.storage_key):
+        raise AppError("EXPORT_FILE_MISSING", "Generated export file is missing from storage.", status_code=404)
+
+    content = storage.read_bytes(row.storage_key)
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if row.format == "docx"
+        else "text/plain; charset=utf-8"
+    )
+    ascii_fallback = "".join(ch if ch.isascii() and ch not in '\\"' else "_" for ch in row.filename)
+    if not ascii_fallback.strip("_."):
+        ascii_fallback = f"export.{row.format}"
+    disposition = f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(row.filename)}"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
+    )
+
+
+@router.get("/exports/{export_id}/manifest")
+def get_export_manifest(
+    export_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> dict:
+    row = db.get(DocumentExport, export_id)
+    if row is None:
+        raise AppError("EXPORT_NOT_FOUND", f"Export {export_id} not found.", status_code=404)
+    if not storage.exists(row.manifest_storage_key):
+        raise AppError("EXPORT_MANIFEST_MISSING", "Export manifest sidecar is missing.", status_code=404)
+    return storage.read_json(row.manifest_storage_key)

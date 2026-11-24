@@ -321,3 +321,29 @@ class DocumentTextBlock(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )
+
+
+class DocumentExport(Base):
+    __tablename__ = "exports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    book_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False
+    )
+    transcript_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_text_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    format: Mapped[str] = mapped_column(String(20), nullable=False)
+    layout_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    text_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    font_family: Mapped[str] = mapped_column(String(80), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="completed")
+    is_fully_reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    options: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
+    )

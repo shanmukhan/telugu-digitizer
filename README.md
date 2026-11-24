@@ -153,3 +153,58 @@ Key Phase 2 endpoints under `/api/v1`:
 - `GET /api/v1/ocr-runs/{run_id}` / `POST /api/v1/ocr-runs/{run_id}/resume`
 - `GET /api/v1/ocr-runs/{run_id}/pages/{page_number}`
 
+---
+
+## 5. Phase 3 — Human Review UI (React + TypeScript + PDF.js)
+
+### Build & serve via FastAPI (`http://127.0.0.1:8000`)
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+.venv/bin/python scripts/run_api.py
+```
+
+When `frontend/dist/` is built, opening `http://127.0.0.1:8000` launches the React Review Studio directly from FastAPI.
+
+### Development mode (`http://127.0.0.1:5173`)
+
+Run FastAPI on `:8000` in one terminal and Vite dev server (proxying `/api` to `:8000`) in another:
+
+```bash
+cd frontend && npm run dev
+```
+
+### Frontend tests
+
+```bash
+cd frontend && npm test
+```
+
+---
+
+## 6. Phase 4 — Correction Memory & Contextual Suggestions
+
+Phase 4 endpoints under `/api/v1`:
+- `POST /api/v1/ocr-blocks/{block_id}/edits` (`add_to_correction_memory`, `memory_scope`: `book_only` or `global_suggestion`, `correction_type`)
+- `GET /api/v1/corrections/search` (context-aware suggestion lookup with conflict detection)
+- `GET /api/v1/corrections` (browse and filter active/disabled/rejected records)
+- `POST /api/v1/corrections/{correction_id}/approve` / `/reject`
+- `PATCH /api/v1/corrections/{correction_id}/status` (`active`, `disabled`, `superseded`, `rejected`)
+
+---
+
+## 7. Phase 5 — DOCX and TXT Export
+
+Phase 5 endpoints under `/api/v1`:
+- `POST /api/v1/books/{book_id}/exports` (`format`: `docx` or `txt`, `layout_mode`: `editable_flow` or `page_preserving`, `text_version`: `human_approved` or `raw_ocr`)
+- `GET /api/v1/books/{book_id}/exports`
+- `GET /api/v1/exports/{export_id}` / `/download` / `/manifest`
+
+All exports run UTF-8 and `python-docx` round-trip verification before saving and emit an `export-manifest.json` sidecar under `workspace/exports/<book_id>/<export_id>/`.
+
+
+
+

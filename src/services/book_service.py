@@ -221,4 +221,5 @@ def delete_book_and_artifacts(
     storage.delete_prefix(f"originals/{book_id}")
     storage.delete_prefix(f"pages/{book_id}")
     storage.delete_prefix(f"ocr/{book_id}")
+    storage.delete_prefix(f"exports/{book_id}")
     log_event(LOGGER, logging.INFO, "Deleted book and storage artifacts", book_id=str(book_id))
