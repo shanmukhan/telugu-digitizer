@@ -114,3 +114,17 @@ The project uses a self-contained PostgreSQL 18 cluster in `.tools/postgres` / `
   - Auto-collapsible **Import PDF** card once a book is loaded (`+ Import PDF` toggle) so **Books**, **Run OCR Engines**, and **Pages** appear above the fold.
   - Direct page-number jump input (`Page [N] / Total`), page status filter (`All` / `Pending` / `Approved`), human-readable badges/labels (`Scanned`, `Pending Review`, `PaddleOCR PP-OCRv5`, `Tesseract 5 Telugu`), compact toolbar controls (`role="toolbar"`), elevated studio styling, and `forced-colors` / `prefers-reduced-motion` support.
 - **Tests added:** `frontend/src/components/OcrStatusBar.test.tsx`.
+
+---
+
+## 6. Bidirectional Block Sync Between Scan Viewer and Proofreading Editor
+
+### Feature Added
+Added IntelliJ "Select Opened File"-style navigation between text boxes on the left scan viewer and corresponding line cards in the right proofreading editor:
+- **Toolbar sync controls (`SourcePageViewer.tsx`, `ReviewEditorPanel.tsx`):**
+  - `⌖ Sync → Editor` in `SourcePageViewer` scrolls the Proofreading Editor smoothly to the currently selected scan box (turning off `Flagged Only` if the target line was hidden).
+  - `⌖ Sync → Scan` in `ReviewEditorPanel` (plus a per-card `⌖ Find on scan` button) switches back to `Scan + Boxes` if needed and scrolls the scan viewport to center the target OCR polygon at the current zoom scale.
+  - `Auto-Sync` (`aria-pressed`) toggle synchronizes selection automatically in both directions when enabled.
+- **Scroll completion & reduced motion (`frontend/src/utils/scrollSync.ts`, `frontend/src/styles/app.css`):**
+  - Uses native scroll promises where available with a `scrollend` + idle-timer fallback (`scrollIntoViewAsync` / `scrollContainerToAsync`), pulsing `.sync-flash` highlights once scrolling settles, `prefers-reduced-motion` safety, and polite ARIA `role="status"` announcements.
+- **Tests:** `frontend/src/components/BlockSync.test.tsx`.

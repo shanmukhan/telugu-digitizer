@@ -828,6 +828,37 @@ progress.ocr-progress-bar:dir(rtl):indeterminate {
   stroke-width: 4;
 }
 
+.overlay-poly.sync-flash {
+  fill: rgba(29, 78, 216, 0.38);
+  stroke: #0b57d0;
+  stroke-width: 6;
+  animation: sync-poly-pulse 0.75s ease-in-out 2;
+}
+
+@keyframes sync-poly-pulse {
+  0%,
+  100% {
+    fill: rgba(29, 78, 216, 0.24);
+  }
+  50% {
+    fill: rgba(37, 99, 235, 0.45);
+  }
+}
+
+.sync-trigger-btn:not(:disabled) {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-ink);
+  font-weight: 600;
+}
+
+.sync-card-btn {
+  border-color: var(--border);
+  background: var(--surface-elevated);
+  color: var(--info-ink);
+  font-weight: 600;
+}
+
 .block-card {
   border: 1px solid var(--border);
   border-radius: 0.6rem;
@@ -847,6 +878,21 @@ progress.ocr-progress-bar:dir(rtl):indeterminate {
 
 .block-card.selected {
   box-shadow: 0 0 0 2px var(--primary);
+}
+
+.block-card.sync-flash {
+  animation: sync-card-pulse 0.75s ease-in-out 2;
+}
+
+@keyframes sync-card-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--primary);
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--focus-ring);
+    background: var(--primary-soft);
+  }
 }
 
 .telugu-text {
@@ -937,7 +983,9 @@ dialog::backdrop {
     --progress-bar-indeterminate-animation-duration: 10s;
   }
 
-  .status-dot.pulse {
+  .status-dot.pulse,
+  .overlay-poly.sync-flash,
+  .block-card.sync-flash {
     animation: none;
   }
 

@@ -47,6 +47,13 @@ export function App() {
   const [selectedPrimaryRunId, setSelectedPrimaryRunId] = useState<string | null>(null);
   const [review, setReview] = useState<PageReviewPayload | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [autoSyncBlocks, setAutoSyncBlocks] = useState(false);
+  const [syncRequest, setSyncRequest] = useState<{
+    target: "scan" | "editor";
+    blockId: string;
+    seq: number;
+  } | null>(null);
+  const syncSeqCounterRef = useRef(0);
   const [activeView, setActiveView] = useState<"review" | "memory" | "export">("review");
 
   const [uploadExpanded, setUploadExpanded] = useState(true);
@@ -501,6 +508,32 @@ export function App() {
     [mergedRuns, activeRunIds],
   );
 
+  const triggerSync = useCallback((target: "scan" | "editor", blockId: string) => {
+    syncSeqCounterRef.current += 1;
+    setSyncRequest({ target, blockId, seq: syncSeqCounterRef.current });
+  }, []);
+
+  const handleSelectFromScan = useCallback(
+    (blockId: string) => {
+      setSelectedBlockId(blockId);
+      if (autoSyncBlocks) {
+        triggerSync("editor", blockId);
+      }
+    },
+    [autoSyncBlocks, triggerSync],
+  );
+
+  const handleSelectFromEditor = useCallback(
+    (blockId: string) => {
+      const changed = blockId !== selectedBlockId;
+      setSelectedBlockId(blockId);
+      if (autoSyncBlocks && changed) {
+        triggerSync("scan", blockId);
+      }
+    },
+    [autoSyncBlocks, selectedBlockId, triggerSync],
+  );
+
   return (
     <div className="app-shell">
       <a href="#main-review" className="skip-link visually-hidden">
@@ -875,10 +908,19 @@ export function App() {
                 heightPx={review.height_px}
                 blocks={review.blocks}
                 selectedBlockId={selectedBlockId}
-                onSelectBlock={setSelectedBlockId}
+                syncTarget={syncRequest?.target === "scan" ? syncRequest : null}
+                autoSync={autoSyncBlocks}
+                onSelectBlock={handleSelectFromScan}
+                onSyncToEditor={() => {
+                  if (selectedBlockId) {
+                    triggerSync("editor", selectedBlockId);
+                  }
+                }}
+                onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
                 onNavigatePage={(p) => {
                   setSelectedPageNumber(p);
                   setSelectedBlockId(null);
+                  setSyncRequest(null);
                 }}
               />
 
@@ -887,8 +929,20 @@ export function App() {
                 selectedBlockId={selectedBlockId}
                 busyBlockId={busyBlockId}
                 ocrRunning={isOcrRunning}
+                syncTarget={syncRequest?.target === "editor" ? syncRequest : null}
+                autoSync={autoSyncBlocks}
                 onQuickStartOcr={() => handleStartOcr()}
-                onSelectBlock={setSelectedBlockId}
+                onSelectBlock={handleSelectFromEditor}
+                onLocateBlockOnScan={(blockId) => {
+                  setSelectedBlockId(blockId);
+                  triggerSync("scan", blockId);
+                }}
+                onSyncToScan={() => {
+                  if (selectedBlockId) {
+                    triggerSync("scan", selectedBlockId);
+                  }
+                }}
+                onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
                 onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
                 onSaveEdit={handleSaveBlockEdit}
                 onAcceptSuggestion={handleAcceptSuggestion}

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
 import { formatEngineLabel } from "../utils/formatters";
+import { scrollIntoViewAsync } from "../utils/scrollSync";
 
 interface UndoEntry {
   blockId: string;
@@ -19,7 +20,12 @@ interface ReviewEditorPanelProps {
   selectedBlockId: string | null;
   busyBlockId: string | null;
   ocrRunning?: boolean;
+  syncTarget?: { blockId: string; seq: number } | null;
+  autoSync?: boolean;
   onSelectBlock: (blockId: string) => void;
+  onLocateBlockOnScan?: (blockId: string) => void;
+  onSyncToScan?: () => void;
+  onToggleAutoSync?: () => void;
   onSelectPrimaryRun: (runId: string) => void;
   onQuickStartOcr?: () => Promise<void>;
   onSaveEdit: (
@@ -44,7 +50,12 @@ export function ReviewEditorPanel({
   selectedBlockId,
   busyBlockId,
   ocrRunning = false,
+  syncTarget = null,
+  autoSync = false,
   onSelectBlock,
+  onLocateBlockOnScan,
+  onSyncToScan,
+  onToggleAutoSync,
   onSelectPrimaryRun,
   onQuickStartOcr,
   onSaveEdit,
@@ -59,6 +70,11 @@ export function ReviewEditorPanel({
   const [filterFlagged, setFilterFlagged] = useState(false);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
+  const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string>("");
+  const paneBodyRef = useRef<HTMLDivElement>(null);
+  const syncSeqRef = useRef(0);
+  const lastHandledSyncSeqRef = useRef<number | null>(null);
 
   useEffect(() => {
     const nextDrafts: Record<string, string> = {};
@@ -138,6 +154,44 @@ export function ReviewEditorPanel({
     (r) => r.status === "completed" || r.status === "partial",
   );
 
+  useEffect(() => {
+    if (!syncTarget) return;
+    if (lastHandledSyncSeqRef.current === syncTarget.seq) return;
+    const existsInPage = review.blocks.some((b) => b.block_id === syncTarget.blockId);
+    if (!existsInPage) return;
+
+    const isVisible = visibleBlocks.some((b) => b.block_id === syncTarget.blockId);
+    if (!isVisible && filterFlagged) {
+      setFilterFlagged(false);
+      return;
+    }
+
+    const scroller = paneBodyRef.current;
+    if (!scroller) return;
+    const escapedId =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(syncTarget.blockId)
+        : syncTarget.blockId.replace(/"/g, '\\"');
+    const cardEl = scroller.querySelector<HTMLElement>(`[data-block-id="${escapedId}"]`);
+    if (!cardEl) return;
+
+    lastHandledSyncSeqRef.current = syncTarget.seq;
+    const targetBlk = review.blocks.find((b) => b.block_id === syncTarget.blockId);
+    const token = ++syncSeqRef.current;
+    setFlashingBlockId(null);
+    void scrollIntoViewAsync(cardEl, scroller).then(() => {
+      if (syncSeqRef.current !== token) return;
+      setFlashingBlockId(syncTarget.blockId);
+      setSyncNotice(`Synced editor to line ${(targetBlk?.block_index ?? 0) + 1}.`);
+    });
+  }, [syncTarget, review.blocks, visibleBlocks, filterFlagged]);
+
+  useEffect(() => {
+    if (!flashingBlockId) return;
+    const timer = window.setTimeout(() => setFlashingBlockId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [flashingBlockId]);
+
   return (
     <section
       className="pane"
@@ -188,6 +242,32 @@ export function ReviewEditorPanel({
           Flagged Only ({flaggedCount})
         </button>
 
+        {onSyncToScan && (
+          <div className="toolbar-group" role="group" aria-label="Scan sync controls">
+            <button
+              type="button"
+              className="btn-compact sync-trigger-btn"
+              disabled={!selectedBlockId}
+              title="Scroll source scan to the selected line"
+              aria-label="Sync to selected block on scan"
+              onClick={onSyncToScan}
+            >
+              ⌖ Sync → Scan
+            </button>
+            {onToggleAutoSync && (
+              <button
+                type="button"
+                className="btn-compact"
+                aria-pressed={autoSync}
+                title="Automatically scroll opposite pane when selecting a block"
+                onClick={onToggleAutoSync}
+              >
+                Auto-Sync
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="toolbar-group" role="group" aria-label="Edit history">
           <button type="button" className="btn-compact" disabled={undoStack.length === 0} onClick={() => void handleUndo()}>
             Undo
@@ -223,7 +303,11 @@ export function ReviewEditorPanel({
         </div>
       </div>
 
-      <div className="pane-body">
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {syncNotice}
+      </p>
+
+      <div ref={paneBodyRef} className="pane-body">
         {review.page_kind === "digital_text" && (
           <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
             <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
@@ -262,6 +346,7 @@ export function ReviewEditorPanel({
           const draftText = drafts[block.block_id] ?? block.current_text;
           const isDirty = draftText !== block.current_text;
           const isSelected = block.block_id === selectedBlockId;
+          const isFlashing = block.block_id === flashingBlockId;
           const isFlagged =
             block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
           const isBusy = busyBlockId === block.block_id;
@@ -271,10 +356,12 @@ export function ReviewEditorPanel({
           return (
             <article
               key={block.block_id}
+              data-block-id={block.block_id}
               className={[
                 "block-card",
                 isFlagged ? "flagged" : "",
                 isSelected ? "selected" : "",
+                isFlashing ? "sync-flash" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -300,6 +387,21 @@ export function ReviewEditorPanel({
                 {block.is_edited && <span className="badge ok">✓ Edited</span>}
                 {block.latest_action === "approved" && (
                   <span className="badge ok">✓ Block Approved</span>
+                )}
+                {onLocateBlockOnScan && (
+                  <button
+                    type="button"
+                    className="btn-compact sync-card-btn"
+                    style={{ marginInlineStart: "auto" }}
+                    aria-label={`Locate line ${block.block_index + 1} on scan`}
+                    title="Scroll source scan to this line"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onLocateBlockOnScan(block.block_id);
+                    }}
+                  >
+                    ⌖ Find on scan
+                  </button>
                 )}
               </div>
 

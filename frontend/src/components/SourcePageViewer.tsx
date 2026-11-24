@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { ReviewBlock } from "../types/api";
+import { scrollContainerToAsync } from "../utils/scrollSync";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -13,8 +14,12 @@ interface SourcePageViewerProps {
   heightPx: number | null;
   blocks: ReviewBlock[];
   selectedBlockId: string | null;
+  syncTarget?: { blockId: string; seq: number } | null;
+  autoSync?: boolean;
   onSelectBlock: (blockId: string) => void;
   onNavigatePage: (pageNumber: number) => void;
+  onSyncToEditor?: () => void;
+  onToggleAutoSync?: () => void;
 }
 
 export function SourcePageViewer({
@@ -25,14 +30,24 @@ export function SourcePageViewer({
   heightPx,
   blocks,
   selectedBlockId,
+  syncTarget = null,
+  autoSync = false,
   onSelectBlock,
   onNavigatePage,
+  onSyncToEditor,
+  onToggleAutoSync,
 }: SourcePageViewerProps) {
   const [viewMode, setViewMode] = useState<"overlay" | "pdfjs">("overlay");
   const [zoom, setZoom] = useState(1.0);
   const [pageJumpInput, setPageJumpInput] = useState(String(pageNumber));
   const [pdfStatus, setPdfStatus] = useState<string>("");
+  const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string>("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const paneBodyRef = useRef<HTMLDivElement>(null);
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
+  const syncSeqRef = useRef(0);
+  const lastHandledSyncSeqRef = useRef<number | null>(null);
 
   useEffect(() => {
     setPageJumpInput(String(pageNumber));
@@ -53,6 +68,52 @@ export function SourcePageViewer({
   const naturalHeight = heightPx ?? 1600;
   const displayWidth = Math.round(760 * zoom);
   const displayHeight = Math.round((760 * zoom * naturalHeight) / naturalWidth);
+
+  useEffect(() => {
+    if (!syncTarget) return;
+    if (viewMode !== "overlay") {
+      setViewMode("overlay");
+      return;
+    }
+    if (lastHandledSyncSeqRef.current === syncTarget.seq) return;
+    const targetBlock = blocks.find((b) => b.block_id === syncTarget.blockId);
+    const scroller = paneBodyRef.current;
+    if (!targetBlock || !scroller) return;
+
+    lastHandledSyncSeqRef.current = syncTarget.seq;
+    let centerX = displayWidth / 2;
+    let centerY = displayHeight / 2;
+    const pts = targetBlock.polygon;
+    const bbox = targetBlock.bbox;
+    if (pts && pts.length > 0) {
+      const xs = pts.map((p) => p[0]);
+      const ys = pts.map((p) => p[1]);
+      centerX = (((Math.min(...xs) + Math.max(...xs)) / 2) * displayWidth) / naturalWidth;
+      centerY = (((Math.min(...ys) + Math.max(...ys)) / 2) * displayHeight) / naturalHeight;
+    } else if (bbox && bbox.length === 4) {
+      centerX = (((bbox[0] + bbox[2]) / 2) * displayWidth) / naturalWidth;
+      centerY = (((bbox[1] + bbox[3]) / 2) * displayHeight) / naturalHeight;
+    }
+
+    const wrapLeft = canvasWrapRef.current?.offsetLeft ?? 0;
+    const wrapTop = canvasWrapRef.current?.offsetTop ?? 0;
+    const targetLeft = wrapLeft + centerX - scroller.clientWidth / 2;
+    const targetTop = wrapTop + centerY - scroller.clientHeight / 2;
+
+    const token = ++syncSeqRef.current;
+    setFlashingBlockId(null);
+    void scrollContainerToAsync(scroller, targetLeft, targetTop).then(() => {
+      if (syncSeqRef.current !== token) return;
+      setFlashingBlockId(targetBlock.block_id);
+      setSyncNotice(`Synced scan view to line ${targetBlock.block_index + 1}.`);
+    });
+  }, [syncTarget, viewMode, blocks, displayWidth, displayHeight, naturalWidth, naturalHeight]);
+
+  useEffect(() => {
+    if (!flashingBlockId) return;
+    const timer = window.setTimeout(() => setFlashingBlockId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [flashingBlockId]);
 
   useEffect(() => {
     if (viewMode !== "pdfjs") return;
@@ -178,6 +239,32 @@ export function SourcePageViewer({
           </button>
         </div>
 
+        {onSyncToEditor && (
+          <div className="toolbar-group" role="group" aria-label="Block sync controls">
+            <button
+              type="button"
+              className="btn-compact sync-trigger-btn"
+              disabled={!selectedBlockId}
+              title="Scroll proofreading editor to the selected box"
+              aria-label="Sync to selected block in editor"
+              onClick={onSyncToEditor}
+            >
+              ⌖ Sync → Editor
+            </button>
+            {onToggleAutoSync && (
+              <button
+                type="button"
+                className="btn-compact"
+                aria-pressed={autoSync}
+                title="Automatically scroll opposite pane when selecting a block"
+                onClick={onToggleAutoSync}
+              >
+                Auto-Sync
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="toolbar-group" role="group" aria-label="Zoom controls" style={{ marginInlineStart: "auto" }}>
           <button
             type="button"
@@ -204,9 +291,14 @@ export function SourcePageViewer({
         </div>
       </div>
 
-      <div className="pane-body">
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {syncNotice}
+      </p>
+
+      <div ref={paneBodyRef} className="pane-body">
         {viewMode === "overlay" ? (
           <div
+            ref={canvasWrapRef}
             className="page-canvas-wrap"
             style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
           >
@@ -226,6 +318,7 @@ export function SourcePageViewer({
                   if (!pts || pts.length < 3) return null;
                   const pointsAttr = pts.map((p) => `${p[0]},${p[1]}`).join(" ");
                   const isSelected = block.block_id === selectedBlockId;
+                  const isFlashing = block.block_id === flashingBlockId;
                   const isFlagged =
                     block.low_confidence_flag ||
                     block.disagreement_flag ||
@@ -234,6 +327,7 @@ export function SourcePageViewer({
                     "overlay-poly",
                     isFlagged ? "flagged" : "",
                     isSelected ? "selected" : "",
+                    isFlashing ? "sync-flash" : "",
                   ]
                     .filter(Boolean)
                     .join(" ");
