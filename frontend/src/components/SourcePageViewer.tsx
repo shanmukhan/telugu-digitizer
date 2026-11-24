@@ -54,6 +54,7 @@ export function SourcePageViewer({
   const [zoom, setZoom] = useState(1.0);
   const [pageJumpInput, setPageJumpInput] = useState(String(pageNumber));
   const [pdfStatus, setPdfStatus] = useState<string>("");
+  const [imageLoading, setImageLoading] = useState<boolean>(false);
   const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string>("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -74,7 +75,19 @@ export function SourcePageViewer({
 
   useEffect(() => {
     setPageJumpInput(String(pageNumber));
-  }, [pageNumber]);
+    setImageLoading(true);
+  }, [bookId, pageNumber]);
+
+  function handleFitToPane() {
+    const scroller = paneBodyRef.current;
+    if (!scroller) {
+      setZoom(1.0);
+      return;
+    }
+    const availableWidth = Math.max(320, scroller.clientWidth - 28);
+    const fitZoom = Math.min(2.5, Math.max(0.5, Number((availableWidth / 760).toFixed(2))));
+    setZoom(fitZoom);
+  }
 
   function commitPageJump() {
     const target = Number(pageJumpInput.trim());
@@ -324,6 +337,14 @@ export function SourcePageViewer({
           >
             +
           </button>
+          <button
+            type="button"
+            className="btn-compact"
+            title="Fit page scan to viewer width"
+            onClick={handleFitToPane}
+          >
+            Fit
+          </button>
           <button type="button" className="btn-compact" onClick={() => setZoom(1.0)}>
             Reset
           </button>
@@ -338,13 +359,15 @@ export function SourcePageViewer({
         {viewMode === "overlay" ? (
           <div
             ref={canvasWrapRef}
-            className="page-canvas-wrap"
+            className={`page-canvas-wrap${imageLoading ? " is-loading" : ""}`}
             style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
           >
             <img
               src={resolveAppUrl(`/api/v1/books/${bookId}/pages/${pageNumber}/image`)}
               alt={`Scanned source page ${pageNumber}`}
               style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
+              onLoad={() => setImageLoading(false)}
+              onError={() => setImageLoading(false)}
             />
             {blocks.length > 0 && (
               <svg
@@ -386,7 +409,9 @@ export function SourcePageViewer({
                           onSelectBlock(block.block_id);
                         }
                       }}
-                    />
+                    >
+                      <title>{`Line ${block.block_index + 1}: ${block.current_text}`}</title>
+                    </polygon>
                   );
                 })}
               </svg>

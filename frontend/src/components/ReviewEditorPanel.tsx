@@ -227,8 +227,19 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         lang="te"
         className="block-textarea"
         value={draftText}
+        title="Tip: Press Ctrl+Enter (or Cmd+Enter) to save correction or approve block"
         onFocus={() => onSelectBlock(block.block_id)}
         onChange={(e) => onDraftChange(block.block_id, e.target.value)}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            if (isDirty) {
+              void onCommitEdit(block, draftText, "corrected");
+            } else {
+              void onCommitEdit(block, draftText, "approved", false);
+            }
+          }
+        }}
       />
 
       {isDirty && (
@@ -310,6 +321,27 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
           </button>
         )}
       </div>
+
+      {block.edit_history.length > 0 && (
+        <details className="edit-history-details">
+          <summary className="hint-text">
+            Revision history ({block.edit_history.length})
+          </summary>
+          <ul className="edit-history-list">
+            {block.edit_history.map((evt) => (
+              <li key={evt.edit_id}>
+                <span className="badge">{evt.action}</span>{" "}
+                <span className="telugu-text" lang="te">
+                  {evt.edited_text}
+                </span>
+                {evt.review_note && (
+                  <span className="hint-text"> — {evt.review_note}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </article>
   );
 });
@@ -371,6 +403,8 @@ export function ReviewEditorPanel({
   const [scopeByBlock, setScopeByBlock] = useState<Record<string, "book_only" | "global_suggestion">>({});
   const [typeByBlock, setTypeByBlock] = useState<Record<string, string>>({});
   const [filterFlagged, setFilterFlagged] = useState(false);
+  const [lineSearch, setLineSearch] = useState("");
+  const [teluguFontScale, setTeluguFontScale] = useState(1.0);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
   const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
@@ -482,23 +516,61 @@ export function ReviewEditorPanel({
     await onSaveEdit(next.blockId, next.nextText, "corrected", "Redo edit");
   }
 
-  const flaggedCount = review.blocks.filter(
+  const flaggedBlocks = review.blocks.filter(
     (b) =>
       b.low_confidence_flag ||
       b.disagreement_flag ||
       b.short_or_empty_flag ||
       b.suggestions.length > 0,
-  ).length;
+  );
+  const flaggedCount = flaggedBlocks.length;
 
-  const visibleBlocks = filterFlagged
-    ? review.blocks.filter(
-        (b) =>
-          b.low_confidence_flag ||
-          b.disagreement_flag ||
-          b.short_or_empty_flag ||
-          b.suggestions.length > 0,
+  const trimmedSearch = lineSearch.trim().toLowerCase();
+  const visibleBlocks = review.blocks.filter((b) => {
+    if (
+      filterFlagged &&
+      !(
+        b.low_confidence_flag ||
+        b.disagreement_flag ||
+        b.short_or_empty_flag ||
+        b.suggestions.length > 0
       )
-    : review.blocks;
+    ) {
+      return false;
+    }
+    if (trimmedSearch) {
+      const draftVal = (drafts[b.block_id] ?? b.current_text).toLowerCase();
+      const rawVal = b.raw_text.toLowerCase();
+      const lineLabel = `line ${b.block_index + 1}`;
+      return (
+        draftVal.includes(trimmedSearch) ||
+        rawVal.includes(trimmedSearch) ||
+        lineLabel.includes(trimmedSearch)
+      );
+    }
+    return true;
+  });
+
+  function handleJumpNextFlagged() {
+    if (flaggedBlocks.length === 0) return;
+    const currentIdx = flaggedBlocks.findIndex((b) => b.block_id === selectedBlockId);
+    const nextBlock = flaggedBlocks[(currentIdx + 1) % flaggedBlocks.length];
+    onSelectBlock(nextBlock.block_id);
+    if (onLocateBlockOnScan) {
+      onLocateBlockOnScan(nextBlock.block_id);
+    }
+    const scroller = paneBodyRef.current;
+    if (scroller) {
+      const escapedId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(nextBlock.block_id)
+          : nextBlock.block_id.replace(/"/g, '\\"');
+      const cardEl = scroller.querySelector<HTMLElement>(`[data-block-id="${escapedId}"]`);
+      if (cardEl) {
+        void scrollIntoViewAsync(cardEl, scroller);
+      }
+    }
+  }
 
   const usableRuns = review.available_runs.filter(
     (r) => r.status === "completed" || r.status === "partial",
@@ -592,6 +664,48 @@ export function ReviewEditorPanel({
           Flagged Only ({flaggedCount})
         </button>
 
+        {flaggedCount > 0 && (
+          <button
+            type="button"
+            className="btn-compact"
+            title="Jump to the next line with low confidence, engine disagreement, or suggestion"
+            onClick={handleJumpNextFlagged}
+          >
+            Next Issue ▾
+          </button>
+        )}
+
+        <input
+          type="search"
+          lang="te"
+          className="editor-search-input"
+          aria-label="Filter lines on this page"
+          placeholder="Filter lines…"
+          value={lineSearch}
+          onChange={(e) => setLineSearch(e.target.value)}
+        />
+
+        <div className="toolbar-group" role="group" aria-label="Telugu text size">
+          <button
+            type="button"
+            className="btn-compact"
+            aria-label="Decrease Telugu font size"
+            title="Smaller Telugu text"
+            onClick={() => setTeluguFontScale((s) => Math.max(0.85, Number((s - 0.15).toFixed(2))))}
+          >
+            A−
+          </button>
+          <button
+            type="button"
+            className="btn-compact"
+            aria-label="Increase Telugu font size"
+            title="Larger Telugu text"
+            onClick={() => setTeluguFontScale((s) => Math.min(1.6, Number((s + 0.15).toFixed(2))))}
+          >
+            A+
+          </button>
+        </div>
+
         {onSyncToScan && (
           <div className="toolbar-group" role="group" aria-label="Scan sync controls">
             <button
@@ -669,7 +783,11 @@ export function ReviewEditorPanel({
         {syncNotice}
       </p>
 
-      <div ref={paneBodyRef} className="pane-body">
+      <div
+        ref={paneBodyRef}
+        className="pane-body"
+        style={{ "--telugu-scale": String(teluguFontScale) } as React.CSSProperties}
+      >
         {review.page_kind === "digital_text" && (
           <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
             <div className="badge-row" style={{ marginBottom: "0.5rem" }}>

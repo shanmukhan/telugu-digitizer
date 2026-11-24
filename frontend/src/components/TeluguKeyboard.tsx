@@ -300,6 +300,9 @@ export function TeluguKeyboard({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && phoneticPreview) {
                   e.preventDefault();
+                  if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+                    return;
+                  }
                   handleInsertPhoneticDraft(false);
                 }
               }}

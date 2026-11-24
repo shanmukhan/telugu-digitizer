@@ -190,4 +190,42 @@ describe("ReviewEditorPanel", () => {
       (screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement).value,
     ).toBe("తెలుగు పుస్తకం (ఇంకా సేవ్ చేయనిది)");
   });
+
+  it("supports line filtering, Telugu font scaling, Next Issue jump, and Ctrl+Enter shortcut", async () => {
+    const onSaveEdit = vi.fn().mockResolvedValue(undefined);
+    const onSelectBlock = vi.fn();
+    render(
+      <ReviewEditorPanel
+        review={SAMPLE_REVIEW}
+        selectedBlockId={null}
+        busyBlockId={null}
+        onSelectBlock={onSelectBlock}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={onSaveEdit}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Next Issue ▾" }));
+    expect(onSelectBlock).toHaveBeenCalledWith("blk-1");
+
+    const filterInput = screen.getByLabelText("Filter lines on this page");
+    fireEvent.change(filterInput, { target: { value: "nonexistent_word" } });
+    expect(screen.queryByLabelText("Edit Telugu text for line 1")).not.toBeInTheDocument();
+
+    fireEvent.change(filterInput, { target: { value: "" } });
+    const textarea = screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement;
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    await waitFor(() => {
+      expect(onSaveEdit).toHaveBeenCalledWith(
+        "blk-1",
+        "తెలుగు పస్తకం",
+        "approved",
+        undefined,
+        expect.any(Object),
+      );
+    });
+  });
 });

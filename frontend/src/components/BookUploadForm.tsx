@@ -1,8 +1,15 @@
-import { useId, useState, type FormEvent } from "react";
+import { useId, useState, type DragEvent, type FormEvent } from "react";
 
 interface BookUploadFormProps {
   busy: boolean;
   onUpload: (formData: FormData) => Promise<void>;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(2)} MB`;
 }
 
 export function BookUploadForm({ busy, onUpload }: BookUploadFormProps) {
@@ -15,11 +22,32 @@ export function BookUploadForm({ busy, onUpload }: BookUploadFormProps) {
   const fileHelpId = useId();
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [orthographyProfile, setOrthographyProfile] = useState("unspecified");
   const [trainingConsent, setTrainingConsent] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  function applyChosenFile(file: File | null) {
+    setSelectedFile(file);
+    setLocalError(null);
+    if (file && !title.trim()) {
+      setTitle(file.name.replace(/\.pdf$/i, ""));
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragActive(false);
+    const dropped = event.dataTransfer.files?.[0] ?? null;
+    if (!dropped) return;
+    if (dropped.type !== "application/pdf" && !dropped.name.toLowerCase().endsWith(".pdf")) {
+      setLocalError("Please drop a valid PDF file (.pdf).");
+      return;
+    }
+    applyChosenFile(dropped);
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -57,22 +85,36 @@ export function BookUploadForm({ busy, onUpload }: BookUploadFormProps) {
           <label htmlFor={fileId}>
             PDF file <span aria-hidden="true">*</span>
           </label>
-          <input
-            id={fileId}
-            name="file"
-            type="file"
-            accept="application/pdf,.pdf"
-            aria-describedby={fileHelpId}
-            required
-            onChange={(e) => {
-              const file = e.target.files?.[0] ?? null;
-              setSelectedFile(file);
-              setLocalError(null);
-              if (file && !title.trim()) {
-                setTitle(file.name.replace(/\.pdf$/i, ""));
-              }
+          <div
+            className={`file-dropzone${dragActive ? " drag-active" : ""}${selectedFile ? " has-file" : ""}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragActive(true);
             }}
-          />
+            onDragLeave={() => setDragActive(false)}
+            onDrop={handleDrop}
+          >
+            <input
+              id={fileId}
+              name="file"
+              type="file"
+              accept="application/pdf,.pdf"
+              aria-describedby={fileHelpId}
+              required={!selectedFile}
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null;
+                applyChosenFile(file);
+              }}
+            />
+            {selectedFile ? (
+              <div className="file-dropzone-meta">
+                <span className="badge ok">✓ {selectedFile.name}</span>
+                <span className="hint-text">{formatBytes(selectedFile.size)}</span>
+              </div>
+            ) : (
+              <span className="hint-text">Drag &amp; drop a Telugu PDF here, or click to browse</span>
+            )}
+          </div>
           <span id={fileHelpId} className="hint-text">
             Stored locally read-only with SHA-256 deduplication.
           </span>

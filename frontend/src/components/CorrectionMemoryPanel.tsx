@@ -13,6 +13,7 @@ export function CorrectionMemoryPanel({
 }: CorrectionMemoryPanelProps) {
   const searchId = useId();
   const statusId = useId();
+  const captionId = useId();
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -144,16 +145,18 @@ export function CorrectionMemoryPanel({
       {items.length === 0 ? (
         <p className="hint-text">No correction memory entries found yet.</p>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "start" }}>
-            <caption className="visually-hidden">Stored Telugu OCR correction memory records</caption>
+        <div tabIndex={0} role="region" aria-labelledby={captionId} className="table-wrapper">
+          <table className="cm-table">
+            <caption id={captionId} className="visually-hidden">
+              Stored Telugu OCR correction memory records
+            </caption>
             <thead>
-              <tr style={{ borderBlockEnd: "2px solid var(--border)" }}>
-                <th scope="col" style={{ padding: "0.5rem" }}>OCR Form → Corrected</th>
-                <th scope="col" style={{ padding: "0.5rem" }}>Context</th>
-                <th scope="col" style={{ padding: "0.5rem" }}>Scope & State</th>
-                <th scope="col" style={{ padding: "0.5rem" }}>Evidence</th>
-                <th scope="col" style={{ padding: "0.5rem" }}>Actions</th>
+              <tr>
+                <th scope="col">OCR Form → Corrected</th>
+                <th scope="col">Context</th>
+                <th scope="col">Scope &amp; State</th>
+                <th scope="col">Evidence</th>
+                <th scope="col">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -162,21 +165,21 @@ export function CorrectionMemoryPanel({
                   item.status === "active" &&
                   (activeTargetsByIncorrect.get(item.incorrect_text)?.size ?? 0) > 1;
                 return (
-                  <tr key={item.correction_id} style={{ borderBlockEnd: "1px solid var(--border)" }}>
-                    <td style={{ padding: "0.55rem" }}>
+                  <tr key={item.correction_id}>
+                    <th scope="row">
                       <div className="telugu-text" lang="te">
                         <span>{item.incorrect_text}</span> → <strong>{item.corrected_text}</strong>
                       </div>
                       {item.correction_type && (
                         <span className="badge">{item.correction_type}</span>
                       )}
-                    </td>
-                    <td style={{ padding: "0.55rem" }}>
+                    </th>
+                    <td>
                       <span className="hint-text" lang="te">
                         {item.left_context || "—"} | {item.right_context || "—"}
                       </span>
                     </td>
-                    <td style={{ padding: "0.55rem" }}>
+                    <td>
                       <div className="badge-row">
                         <span className="badge">{item.scope}</span>
                         <span
@@ -187,10 +190,10 @@ export function CorrectionMemoryPanel({
                         {isConflict && <span className="badge warn">⚠ Conflict</span>}
                       </div>
                     </td>
-                    <td style={{ padding: "0.55rem" }}>
+                    <td>
                       +{item.approved_count} / −{item.rejected_count}
                     </td>
-                    <td style={{ padding: "0.55rem" }}>
+                    <td>
                       {item.status === "active" ? (
                         <button
                           type="button"

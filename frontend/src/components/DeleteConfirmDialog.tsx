@@ -26,6 +26,26 @@ export function DeleteConfirmDialog({
     }
   }, [open]);
 
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || "closedBy" in HTMLDialogElement.prototype) return;
+
+    function handleBackdropClick(event: MouseEvent) {
+      if (!dialog || event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      const isDialogContent =
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width;
+      if (isDialogContent) return;
+      dialog.close();
+    }
+
+    dialog.addEventListener("click", handleBackdropClick);
+    return () => dialog.removeEventListener("click", handleBackdropClick);
+  }, []);
+
   function handleClose() {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -39,7 +59,12 @@ export function DeleteConfirmDialog({
   }
 
   return (
-    <dialog ref={dialogRef} aria-labelledby={titleId} onClose={handleClose}>
+    <dialog
+      ref={dialogRef}
+      {...({ closedby: "any" } as Record<string, unknown>)}
+      aria-labelledby={titleId}
+      onClose={handleClose}
+    >
       <h1 id={titleId} style={{ marginTop: 0, fontSize: "1.15rem" }}>
         Delete book and OCR artifacts?
       </h1>
