@@ -205,6 +205,17 @@ Phase 5 endpoints under `/api/v1`:
 
 All exports run UTF-8 and `python-docx` round-trip verification before saving and emit an `export-manifest.json` sidecar under `workspace/exports/<book_id>/<export_id>/`.
 
+---
+
+## 8. Raspberry Pi & Public Hosting (`https://lahari.org/telugu/`)
+
+Full Raspberry Pi (`aarch64`) deployment configuration is provided in `deploy/` and documented in [docs/13-raspberry-pi-lahari-deployment.md](docs/13-raspberry-pi-lahari-deployment.md):
+
+- **Bare-metal Raspberry Pi OS (`systemd` + PostgreSQL + Apache/Caddy, default):** [deploy/raspberry-pi/install.sh](deploy/raspberry-pi/install.sh), [deploy/raspberry-pi/telugu-digitizer.service](deploy/raspberry-pi/telugu-digitizer.service), and [deploy/raspberry-pi/remote-deploy.sh](deploy/raspberry-pi/remote-deploy.sh). Currently deployed natively on `lipi@192.168.1.13` (loopback `127.0.0.1:8085`, proxied under `https://lahari.org/telugu/` and linked from `https://lahari.org/` without replacing existing `lahari.org` routes).
+- **Optional Docker Compose + Caddy + Cloudflare Tunnel:** [deploy/compose.lahari.yml](deploy/compose.lahari.yml), [deploy/Dockerfile](deploy/Dockerfile), [deploy/Caddyfile.tunnel](deploy/Caddyfile.tunnel), [deploy/Caddyfile.direct](deploy/Caddyfile.direct), and [deploy/.env.lahari.example](deploy/.env.lahari.example).
+- **Public access & capabilities:** Open by default with no login page (`APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` unset, optional Basic Auth if explicitly set), configurable `CORS_ALLOWED_ORIGINS`, reverse-proxy headers (`PROXY_HEADERS`), relative subpath asset/API resolution, and `GET /api/v1/capabilities`.
+
+
 
 
 

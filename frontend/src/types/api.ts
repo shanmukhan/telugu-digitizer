@@ -4,6 +4,20 @@ export interface ApiErrorDetail {
   details: Record<string, unknown>;
 }
 
+export interface EngineCapability {
+  available: boolean;
+  reason: string | null;
+  model_id: string;
+}
+
+export interface HostCapabilities {
+  platform_machine: string;
+  auth_enabled: boolean;
+  max_upload_mb: number;
+  max_pdf_pages: number;
+  engines: Record<string, EngineCapability>;
+}
+
 export interface BookSummary {
   book_id: string;
   title: string;

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ExportPanel } from "./ExportPanel";
-import type { BookSummary } from "../types/api";
+import type { BookSummary, ExportRecord } from "../types/api";
 import * as client from "../api/client";
 
 const SAMPLE_BOOK: BookSummary = {
@@ -50,8 +50,7 @@ describe("ExportPanel", () => {
   });
 
   it("submits DOCX export options and displays validated download links", async () => {
-    vi.spyOn(client, "listBookExports").mockResolvedValue([]);
-    const createSpy = vi.spyOn(client, "createBookExport").mockResolvedValue({
+    const exportRecord: ExportRecord = {
       export_id: "exp-1",
       book_id: SAMPLE_BOOK.book_id,
       transcript_version_id: null,
@@ -66,7 +65,11 @@ describe("ExportPanel", () => {
       download_url: "/api/v1/exports/exp-1/download",
       manifest_url: "/api/v1/exports/exp-1/manifest",
       created_at: "2026-11-24T00:00:00Z",
-    });
+    };
+    vi.spyOn(client, "listBookExports")
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([exportRecord]);
+    const createSpy = vi.spyOn(client, "createBookExport").mockResolvedValue(exportRecord);
 
     const onStatusBanner = vi.fn();
     render(
@@ -96,5 +99,14 @@ describe("ExportPanel", () => {
         "Export ready: book_page-preserving.docx",
       );
     });
+
+    expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "href",
+      "api/v1/exports/exp-1/download",
+    );
+    expect(screen.getByRole("link", { name: "Sidecar JSON" })).toHaveAttribute(
+      "href",
+      "api/v1/exports/exp-1/manifest",
+    );
   });
 });

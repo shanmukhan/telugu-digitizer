@@ -1,0 +1,18 @@
+# Use this Caddyfile when routing https://lahari.org through Cloudflare Tunnel (cloudflared).
+# Cloudflare Edge handles public TLS termination and connects to Caddy on port 8080.
+:8080 {
+	request_body {
+		max_size 250MB
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	reverse_proxy {$UPSTREAM_ADDR:app:8000} {
+		flush_interval -1
+	}
+}

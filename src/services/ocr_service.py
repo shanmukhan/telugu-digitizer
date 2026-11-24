@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
 import logging
+import platform
+import shutil
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -48,6 +52,50 @@ def canonicalize_engine_name(raw_name: str) -> str:
     return ENGINE_ALIASES[key]
 
 
+def inspect_host_ocr_capabilities(settings: AppSettings) -> dict[str, Any]:
+    """Inspect which OCR engines are runnable on the current host without loading weights."""
+    paddle_reason: str | None = None
+    paddle_available = False
+    if not settings.enable_paddle_ocr:
+        paddle_reason = "Disabled via ENABLE_PADDLE_OCR=false"
+    elif importlib.util.find_spec("paddle") is None:
+        paddle_reason = "paddlepaddle package is not installed on this host"
+    elif importlib.util.find_spec("paddleocr") is None:
+        paddle_reason = "paddleocr package is not installed on this host"
+    else:
+        paddle_available = True
+
+    tess_bin = settings.tesseract_cmd or shutil.which("tesseract")
+    tess_traineddata = settings.tessdata_dir / "tel.traineddata"
+    tess_reason: str | None = None
+    tess_available = False
+    if not tess_bin or not Path(str(tess_bin)).exists() and shutil.which(str(tess_bin or "")) is None:
+        tess_reason = "tesseract CLI binary is not installed"
+    elif not tess_traineddata.is_file():
+        tess_reason = f"Missing {tess_traineddata}"
+    else:
+        tess_available = True
+
+    return {
+        "platform_machine": platform.machine(),
+        "auth_enabled": bool(settings.auth_username and settings.auth_password),
+        "max_upload_mb": settings.max_upload_mb,
+        "max_pdf_pages": settings.max_pdf_pages,
+        "engines": {
+            "paddle_ppocrv5_te": {
+                "available": paddle_available,
+                "reason": paddle_reason,
+                "model_id": "PP-OCRv5_server_det+te_PP-OCRv5_mobile_rec",
+            },
+            "tesseract_tel_best": {
+                "available": tess_available,
+                "reason": tess_reason,
+                "model_id": "tesseract-5-tel-best",
+            },
+        },
+    }
+
+
 def build_ocr_provider(
     canonical_engine: str,
     settings: AppSettings,
@@ -56,6 +104,20 @@ def build_ocr_provider(
 ) -> OCRProvider:
     """Instantiate a pinned Phase 1/2 OCRProvider for the canonical engine key."""
     if canonical_engine == "paddle_ppocrv5_te":
+        if not settings.enable_paddle_ocr:
+            raise AppError(
+                "OCR_MODEL_NOT_AVAILABLE",
+                "PaddleOCR is disabled on this host (ENABLE_PADDLE_OCR=false). Select Tesseract 5 Telugu instead.",
+                status_code=503,
+                details={"engine": "paddleocr"},
+            )
+        if importlib.util.find_spec("paddle") is None or importlib.util.find_spec("paddleocr") is None:
+            raise AppError(
+                "OCR_MODEL_NOT_AVAILABLE",
+                "PaddleOCR runtime (paddlepaddle/paddleocr) is not installed on this host.",
+                status_code=503,
+                details={"engine": "paddleocr"},
+            )
         return PaddleOCRProvider(
             lang="te",
             ocr_version="PP-OCRv5",

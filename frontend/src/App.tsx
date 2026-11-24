@@ -3,6 +3,7 @@ import {
   ApiClientError,
   approveCorrection,
   deleteBook,
+  getHostCapabilities,
   getOcrRunStatus,
   getPageReview,
   listBookOcrRuns,
@@ -36,6 +37,7 @@ import type {
   BookOCRRunSummary,
   BookSummary,
   CorrectionSuggestionItem,
+  HostCapabilities,
   OCRRunStatus,
   PageReviewPayload,
   PageSummary,
@@ -77,6 +79,7 @@ export function App() {
 
   const [usePaddle, setUsePaddle] = useState(true);
   const [useTesseract, setUseTesseract] = useState(true);
+  const [capabilities, setCapabilities] = useState<HostCapabilities | null>(null);
   const [ocrStartPage, setOcrStartPage] = useState("1");
   const [ocrEndPage, setOcrEndPage] = useState("");
   const [busyUpload, setBusyUpload] = useState(false);
@@ -151,6 +154,19 @@ export function App() {
     refreshBooks().catch((err) => {
       setBanner({ kind: "error", text: err instanceof Error ? err.message : "Failed to load books." });
     });
+    getHostCapabilities()
+      .then((caps) => {
+        setCapabilities(caps);
+        if (caps.engines.paddle_ppocrv5_te && !caps.engines.paddle_ppocrv5_te.available) {
+          setUsePaddle(false);
+        }
+        if (caps.engines.tesseract_tel_best && !caps.engines.tesseract_tel_best.available) {
+          setUseTesseract(false);
+        }
+      })
+      .catch(() => {
+        // Optional capabilities check; keep defaults if endpoint unavailable.
+      });
   }, [refreshBooks]);
 
   useEffect(() => {
@@ -802,10 +818,16 @@ export function App() {
                     id="eng-paddle"
                     type="checkbox"
                     checked={usePaddle}
+                    disabled={capabilities?.engines.paddle_ppocrv5_te?.available === false}
                     onChange={(e) => setUsePaddle(e.target.checked)}
                   />
                   <label htmlFor="eng-paddle">
-                    PaddleOCR PP-OCRv5 <span className="hint-text">(~90s/p CPU)</span>
+                    PaddleOCR PP-OCRv5{" "}
+                    <span className="hint-text">
+                      {capabilities?.engines.paddle_ppocrv5_te?.available === false
+                        ? `(${capabilities.engines.paddle_ppocrv5_te.reason ?? "Unavailable"})`
+                        : "(~90s/p CPU)"}
+                    </span>
                   </label>
                 </div>
                 <div className="checkbox-row">
@@ -813,10 +835,16 @@ export function App() {
                     id="eng-tess"
                     type="checkbox"
                     checked={useTesseract}
+                    disabled={capabilities?.engines.tesseract_tel_best?.available === false}
                     onChange={(e) => setUseTesseract(e.target.checked)}
                   />
                   <label htmlFor="eng-tess">
-                    Tesseract 5 Telugu <span className="hint-text">(~0.4s/p CPU)</span>
+                    Tesseract 5 Telugu{" "}
+                    <span className="hint-text">
+                      {capabilities?.engines.tesseract_tel_best?.available === false
+                        ? `(${capabilities.engines.tesseract_tel_best.reason ?? "Unavailable"})`
+                        : "(~0.4s/p CPU)"}
+                    </span>
                   </label>
                 </div>
               </fieldset>

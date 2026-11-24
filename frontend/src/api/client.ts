@@ -7,6 +7,7 @@ import type {
   CorrectionMemoryRecord,
   ExportCreatePayload,
   ExportRecord,
+  HostCapabilities,
   OCRRunCreateResult,
   OCRRunStatus,
   PageReviewPayload,
@@ -26,8 +27,15 @@ export class ApiClientError extends Error {
   }
 }
 
+export function resolveAppUrl(path: string): string {
+  if (!path || /^(https?:|blob:|data:)/i.test(path)) {
+    return path;
+  }
+  return path.startsWith("/") ? path.slice(1) : path;
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(resolveAppUrl(url), init);
   if (response.status === 204) {
     return undefined as T;
   }
@@ -48,6 +56,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new ApiClientError(response.status, errObj);
   }
   return parsed as T;
+}
+
+export async function getHostCapabilities(): Promise<HostCapabilities> {
+  return requestJson<HostCapabilities>("/api/v1/capabilities");
 }
 
 export async function listBooks(): Promise<BookSummary[]> {

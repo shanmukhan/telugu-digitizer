@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: telugu-digitizer-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-telugu_digitizer}
+      POSTGRES_USER: ${POSTGRES_USER:-telugu_digitizer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_STRONG_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-telugu_digitizer} -d ${POSTGRES_DB:-telugu_digitizer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BUILD_PADDLE: ${BUILD_PADDLE:-true}
+    container_name: telugu-digitizer-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.lahari
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      PROXY_HEADERS: "true"
+      FORWARDED_ALLOW_IPS: "*"
+      WORKSPACE_DIR: /app/workspace
+      TESSDATA_DIR: /app/models/tesseract/tessdata
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ../workspace:/app/workspace
+      - paddle_models:/root/.paddlex
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: telugu-digitizer-caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-lahari.org}
+      UPSTREAM_ADDR: app:8000
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ${CADDYFILE:-./Caddyfile.tunnel}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: telugu-digitizer-cloudflared
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+
+volumes:
+  pgdata:
+  paddle_models:
+  caddy_data:
+  caddy_config:

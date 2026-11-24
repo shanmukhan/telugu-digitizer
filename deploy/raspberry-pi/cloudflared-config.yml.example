@@ -1,0 +1,11 @@
+# Copy to /etc/cloudflared/config.yml after running `cloudflared tunnel login`
+# and `cloudflared tunnel create telugu-digitizer`.
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: lahari.org
+    service: http://127.0.0.1:8080
+  - hostname: www.lahari.org
+    service: http://127.0.0.1:8080
+  - service: http_status:404

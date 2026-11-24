@@ -21,6 +21,7 @@ from src.api.schemas import (
     BookPagesResponse,
     BookSummaryResponse,
     BookUploadResponse,
+    CapabilitiesResponse,
     CorrectionListResponse,
     CorrectionMemoryRecord,
     CorrectionRejectRequest,
@@ -62,6 +63,7 @@ from src.services.export_service import create_book_export, list_book_exports
 from src.services.ocr_service import (
     OCRJobExecutor,
     create_or_reuse_ocr_runs,
+    inspect_host_ocr_capabilities,
     resume_ocr_run,
 )
 from src.services.review_service import (
@@ -106,6 +108,13 @@ def health_check(
         database="connected",
         workspace_dir=str(settings.workspace_dir),
     )
+
+
+@router.get("/capabilities", response_model=CapabilitiesResponse)
+def get_capabilities(
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> CapabilitiesResponse:
+    return CapabilitiesResponse(**inspect_host_ocr_capabilities(settings))
 
 
 @router.post("/books", response_model=BookUploadResponse, status_code=status.HTTP_201_CREATED)

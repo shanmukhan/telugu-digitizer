@@ -1,0 +1,21 @@
+[Unit]
+Description=Telugu Book Digitizer API & Web Studio
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__REPO_DIR__
+EnvironmentFile=/etc/telugu-digitizer/env
+ExecStart=__REPO_DIR__/.venv/bin/python scripts/run_api.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

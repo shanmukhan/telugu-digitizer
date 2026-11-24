@@ -50,7 +50,13 @@ def main() -> None:
     settings = AppSettings.from_env()
     _ensure_local_postgres(settings)
     app = create_app(settings)
-    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
+    uvicorn.run(
+        app,
+        host=settings.api_host,
+        port=settings.api_port,
+        proxy_headers=settings.proxy_headers,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
+    )
 
 
 if __name__ == "__main__":

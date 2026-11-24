@@ -178,3 +178,19 @@ White on primary 6.41:1 (hover 8.84:1); ink on page 13.2:1; muted text 5.75–6.
 
 ### Implementation
 All colours are CSS custom properties in `:root` of `frontend/src/styles/app.css`; the remaining literals were remapped and no blue/indigo literals remain. Retheming again only requires editing the `:root` tokens plus the few gradient literals in the "Studio theme v2" block.
+
+---
+
+## 10. Raspberry Pi ARM64 & Public Domain Hosting (`lahari.org`) Support
+
+### Requirements Addressed
+1. **Verified Linux `aarch64` OCR wheel matrix:** Checked `https://www.paddlepaddle.org.cn/packages/stable/cpu/paddlepaddle/` and confirmed official `paddlepaddle==3.3.1` `linux_aarch64` wheels (including `cp311` and `cp313`) are published alongside PyPI `paddleocr==3.7.0`, so the pinned dual-engine stack runs natively on 64-bit Debian/Raspberry Pi OS (with an explicit `ENABLE_PADDLE_OCR=false` option for 2–4 GB boards running Tesseract-only).
+2. **Dockerless native Raspberry Pi default & Debian Trixie compatibility:**
+   - Native bare-metal Raspberry Pi OS / Debian 13 (`systemd` + `postgresql` + `tesseract-ocr` + `.venv` via `deploy/raspberry-pi/install.sh` and `deploy/raspberry-pi/remote-deploy.sh --mode native`) is the default deployment path; Docker (`deploy/compose.lahari.yml`) remains optional.
+   - `install.sh` auto-detects `libglib2.0-0t64` vs `libglib2.0-0`, accepts `API_PORT` (deployed on `8085` on the Pi because `8000` is used by `rpi-monitor`), and leaves `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` unset by default for free open access with no login page.
+3. **Subpath hosting on `lahari.org/telugu/` without replacing existing `lahari.org` services:**
+   - Updated `frontend/vite.config.ts` (`base: "./"`), `frontend/src/api/client.ts` (`resolveAppUrl()`), `SourcePageViewer.tsx`, and `ExportPanel.tsx` so all Vite assets, PDF.js worker, API requests, and DOCX/TXT download links resolve cleanly under `/telugu/` as well as `/` (because `lahari.org/api/` is already used by `lahari-counter.service`).
+   - Added `/telugu/` reverse proxy (`127.0.0.1:8085`) and Product Card `07` + nav link (`href="/telugu/"`) in sibling repo `~/Developer/repo/rpi-setup` (`scripts/apache-templates/lahari.org.conf.tmpl`, `scripts/configure-lahari.sh`, `scripts/site-content/lahari-home/index.html`, and docs/tests), preserving `/`, `/lab/`, `/api/`, `/monitor/`, `/agentic-trader/`, and `/portfolio-advisor/`.
+4. **Live Pi Deployment & Verification (2026-11-24 on `lipi@192.168.1.13`):**
+   - Deployed via `./deploy/raspberry-pi/remote-deploy.sh lipi@192.168.1.13 --mode native --with-paddle --port 8085` (Debian 13 `trixie` `aarch64`, Python `3.13.5`, PostgreSQL `17`, Alembic `0002_exports_table`).
+   - Verified `telugu-digitizer.service` active and public HTTPS `200` responses across `https://lahari.org/`, `/lab/`, `/api/visits/stats`, `/monitor/health`, `/agentic-trader/workspace`, `/telugu/` (`302` from `/telugu`), bundled JS/CSS/PDF.js worker assets, `/telugu/api/v1/health`, `/telugu/api/v1/capabilities` (both `paddle_ppocrv5_te` and `tesseract_tel_best` available, `auth_enabled: false`), and `/telugu/api/v1/books` (`/portfolio-advisor/` `401` preserved).

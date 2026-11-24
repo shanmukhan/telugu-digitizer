@@ -63,6 +63,8 @@ describe("CommitmentBar", () => {
     expect(screen.getByText(/No silent Telugu auto-correction/)).toBeInTheDocument();
     expect(screen.getByText(/Runs 100% on this machine/)).toBeInTheDocument();
     expect(screen.getByText(/Source PDF stored read-only/)).toBeInTheDocument();
+    const lahariLink = screen.getByRole("link", { name: /lahari\.org/ });
+    expect(lahariLink).toHaveAttribute("href", "https://lahari.org");
   });
 });
 

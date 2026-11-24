@@ -25,6 +25,20 @@ class HealthResponse(BaseModel):
     workspace_dir: str
 
 
+class EngineCapabilityResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    model_id: str
+
+
+class CapabilitiesResponse(BaseModel):
+    platform_machine: str
+    auth_enabled: bool
+    max_upload_mb: int
+    max_pdf_pages: int
+    engines: dict[str, EngineCapabilityResponse]
+
+
 class BookUploadResponse(BaseModel):
     book_id: UUID
     title: str

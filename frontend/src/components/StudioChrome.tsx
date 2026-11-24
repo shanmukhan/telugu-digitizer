@@ -24,6 +24,16 @@ export function CommitmentBar() {
           {item.text}
         </span>
       ))}
+      <a
+        className="commit-link"
+        href="https://lahari.org"
+        target="_blank"
+        rel="noreferrer"
+        title="Hosted at lahari.org"
+      >
+        <span aria-hidden="true">🌐</span>
+        lahari.org
+      </a>
     </div>
   );
 }

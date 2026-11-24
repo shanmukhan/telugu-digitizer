@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { resolveAppUrl } from "../api/client";
 import type { ReviewBlock } from "../types/api";
 import { scrollContainerToAsync } from "../utils/scrollSync";
 
@@ -126,7 +127,7 @@ export function SourcePageViewer({
       if (!canvas) return;
       setPdfStatus("Rendering PDF via PDF.js...");
       try {
-        const loadingTask = pdfjsLib.getDocument(`/api/v1/books/${bookId}/pdf`);
+        const loadingTask = pdfjsLib.getDocument(resolveAppUrl(`/api/v1/books/${bookId}/pdf`));
         const pdfDoc = await loadingTask.promise;
         loadedDoc = pdfDoc;
         if (cancelled) return;
@@ -303,7 +304,7 @@ export function SourcePageViewer({
             style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
           >
             <img
-              src={`/api/v1/books/${bookId}/pages/${pageNumber}/image`}
+              src={resolveAppUrl(`/api/v1/books/${bookId}/pages/${pageNumber}/image`)}
               alt={`Scanned source page ${pageNumber}`}
               style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
             />

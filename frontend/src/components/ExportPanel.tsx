@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
-import { ApiClientError, createBookExport, listBookExports } from "../api/client";
+import { ApiClientError, createBookExport, listBookExports, resolveAppUrl } from "../api/client";
 import type { BookOCRRunSummary, BookSummary, ExportRecord } from "../types/api";
 import { formatEngineLabel, formatLayoutMode } from "../utils/formatters";
 
@@ -74,7 +74,7 @@ export function ExportPanel({ book, runs, onStatusBanner, onGoToReview }: Export
 
       // Trigger immediate browser download
       const anchor = document.createElement("a");
-      anchor.href = record.download_url;
+      anchor.href = resolveAppUrl(record.download_url);
       anchor.download = record.filename;
       document.body.appendChild(anchor);
       anchor.click();
@@ -229,7 +229,7 @@ export function ExportPanel({ book, runs, onStatusBanner, onGoToReview }: Export
                   </div>
                   <div className="badge-row">
                     <a
-                      href={item.download_url}
+                      href={resolveAppUrl(item.download_url)}
                       download={item.filename}
                       style={{
                         display: "inline-flex",
@@ -245,7 +245,7 @@ export function ExportPanel({ book, runs, onStatusBanner, onGoToReview }: Export
                       Download
                     </a>
                     <a
-                      href={item.manifest_url}
+                      href={resolveAppUrl(item.manifest_url)}
                       target="_blank"
                       rel="noreferrer"
                       style={{ padding: "0.45rem 0.65rem" }}

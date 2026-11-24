@@ -1,0 +1,19 @@
+# Use this Caddyfile when ports 80 and 443 are forwarded directly to the Raspberry Pi.
+# Caddy obtains and renews Let's Encrypt HTTPS certificates for lahari.org automatically.
+{$APP_DOMAIN:lahari.org}, www.{$APP_DOMAIN:lahari.org} {
+	request_body {
+		max_size 250MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	reverse_proxy {$UPSTREAM_ADDR:app:8000} {
+		flush_interval -1
+	}
+}

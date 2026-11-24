@@ -35,3 +35,10 @@ frontend/dist/
 # OS / Editor
 .DS_Store
 *.swp
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+deploy/.env.lahari
+deploy/raspberry-pi/cloudflared-config.yml

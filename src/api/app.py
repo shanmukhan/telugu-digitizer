@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -106,9 +109,50 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             },
         )
 
+    if cfg.auth_username and cfg.auth_password:
+        expected_user = cfg.auth_username.encode("utf-8")
+        expected_pass = cfg.auth_password.encode("utf-8")
+
+        @app.middleware("http")
+        async def require_basic_auth(request: Request, call_next):
+            if request.method == "OPTIONS" or request.url.path == "/api/v1/health":
+                return await call_next(request)
+
+            auth_header = request.headers.get("authorization", "")
+            authorized = False
+            if auth_header.startswith("Basic "):
+                token = auth_header[6:].strip()
+                try:
+                    decoded = base64.b64decode(token, validate=True).decode("utf-8")
+                    if ":" in decoded:
+                        user, password = decoded.split(":", 1)
+                        authorized = hmac.compare_digest(
+                            user.encode("utf-8"), expected_user
+                        ) and hmac.compare_digest(password.encode("utf-8"), expected_pass)
+                except (binascii.Error, UnicodeDecodeError):
+                    authorized = False
+
+            if not authorized:
+                headers = {"WWW-Authenticate": 'Basic realm="Telugu Book Digitizer", charset="UTF-8"'}
+                if request.url.path.startswith("/api/"):
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "error": {
+                                "code": "UNAUTHORIZED",
+                                "message": "Authentication required.",
+                                "details": {},
+                            }
+                        },
+                        headers=headers,
+                    )
+                return Response(content="Authentication required.", status_code=401, headers=headers)
+
+            return await call_next(request)
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origins=list(cfg.cors_allowed_origins),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
