@@ -143,3 +143,38 @@ Added a toggleable on-screen **Telugu Virtual Keyboard** dock (`⌨ Telugu Keybo
   - Pointer clicks keep cursor focus in the active `<textarea>`/`<input>` (`onMouseDown` `preventDefault`) and update React 19 controlled values cleanly at the exact caret index (`insertTextAtCursor` / `backspaceAtCursor`), falling back cleanly to the selected OCR block when clicked after scan selection.
   - Docked inside `.app-shell.has-keyboard` so sidebar cards and proofreading blocks remain visible and scrollable above the keyboard.
 - **Tests:** `frontend/src/components/TeluguKeyboard.test.tsx`.
+
+---
+
+## 8. Studio Visual Redesign (Header, Cards, Stepper, Welcome Hero)
+
+### Goal
+Move the UI from a basic utility look to a polished product look while keeping the core commitments visible and enforced (local-first, raw OCR never overwritten, no silent Telugu correction, read-only source PDF). Layout ideas were inspired by common OCR/SaaS dashboard patterns (sticky top bar, hero + bento feature cards, stat cards, workflow stepper); nothing is copied from any third-party site, and no external fonts/CDNs are loaded so the app still works fully offline.
+
+### Changes
+- **Commitment bar + top header** (`frontend/src/components/StudioChrome.tsx`, `frontend/src/App.tsx`): thin indigo bar stating the four core commitments, above a translucent sticky header with a gradient brand mark, `Local Studio` badge, OCR status pill, `⌨ Telugu Keyboard`, `＋ Import PDF` CTA and icon-labelled view tabs.
+- **Workflow stepper** (`deriveWorkflowSteps`, `WorkflowStepper`): Import → OCR → Review → Export, derived from real state (runs, approved pages, active view) with `aria-current="step"`, shape + text state (not color alone), and clickable Review/Export steps.
+- **Stat cards** (`OverviewCards`): Book, OCR Engines, Review Progress (native `<progress>`), This Page (lines/flagged/status); collapsible via `Hide stats`.
+- **Welcome hero** (`WelcomeHero`): shown on an empty library with the product promise, a 4-step pipeline, an `Import your first PDF` CTA (opens the file picker) and six feature cards that restate the commitments.
+- **Theme** (`frontend/src/styles/app.css`): indigo/saffron palette tokens, soft shadows, rounded cards, card icons, pane toolbars; review split keeps a minimum height (`min(36rem, 72dvh)`) and the main stage scrolls instead of squeezing the panes; `forced-colors` and `prefers-reduced-motion` handled.
+- **Tests:** `frontend/src/components/StudioChrome.test.tsx`.
+
+---
+
+## 9. Theme Refresh: "Palm-leaf & Turmeric" (replaces the indigo/blue palette)
+
+### Why
+The first redesign used a generic indigo/blue that felt like a stock SaaS template and did not suit a Telugu book-digitization tool.
+
+### Theme
+- **Palm-leaf teal** primary (`#0f6b5c`, hover `#0a5448`, soft tint `#e5f3ef`) — evokes palm-leaf manuscripts and gives a calm, scholarly feel.
+- **Turmeric** accent (`#e0a100`, soft `#fff2cc`) for highlights, badges and sync flashes; amber stays reserved for "needs attention".
+- **Warm paper** neutrals (`--bg #f6f2e8`, cream surfaces, green-black ink `#1b2b28`) with a very faint ruled-line texture and teal/turmeric glows in the page background.
+- Deep teal commitment bar and brand mark; hero accent text runs teal → copper.
+- Scan overlay boxes switched from blue to teal (selected = dark teal, flagged = amber).
+
+### Accessibility checks (computed WCAG contrast)
+White on primary 6.41:1 (hover 8.84:1); ink on page 13.2:1; muted text 5.75–6.43:1; info text on tint 8.9:1; commitment-bar text 5.55–12.4:1; focus ring 4.4–4.9:1. Control/input borders were darkened (`--border-strong #8c8672`, 3.26–3.64:1) so form field boundaries meet the 3:1 non-text contrast guideline.
+
+### Implementation
+All colours are CSS custom properties in `:root` of `frontend/src/styles/app.css`; the remaining literals were remapped and no blue/indigo literals remain. Retheming again only requires editing the `:root` tokens plus the few gradient literals in the "Studio theme v2" block.

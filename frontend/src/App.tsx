@@ -26,6 +26,11 @@ import {
 } from "./components/OcrStatusBar";
 import { ReviewEditorPanel, type SaveEditOptions } from "./components/ReviewEditorPanel";
 import { SourcePageViewer } from "./components/SourcePageViewer";
+import {
+  CommitmentBar,
+  OverviewPanel,
+  WelcomeHero,
+} from "./components/StudioChrome";
 import { TeluguKeyboard } from "./components/TeluguKeyboard";
 import type {
   BookOCRRunSummary,
@@ -609,21 +614,38 @@ export function App() {
     return backspaceAtCursor(target);
   }, [resolveKeyboardTarget]);
 
+  const handleImportCta = useCallback(() => {
+    setUploadExpanded(true);
+    setActiveView("review");
+    window.requestAnimationFrame(() => {
+      const input = document.querySelector<HTMLInputElement>('.sidebar input[type="file"]');
+      if (input) {
+        input.scrollIntoView({ block: "center" });
+        input.focus();
+        input.click();
+      }
+    });
+  }, []);
+
   return (
     <div className={keyboardOpen ? "app-shell has-keyboard" : "app-shell"}>
       <a href="#main-review" className="skip-link visually-hidden">
         Skip to review workspace
       </a>
 
+      <div className="app-top">
+      <CommitmentBar />
       <header className="app-header">
         <div className="brand-block">
           <div className="brand-mark" aria-hidden="true">
-            తె
+            <span lang="te">తె</span>
           </div>
           <div>
-            <h1>Telugu Book Digitizer</h1>
+            <h1>
+              Telugu Book Digitizer <span className="brand-badge">Local Studio</span>
+            </h1>
             <span className="header-meta">
-              Local OCR Studio &amp; Contextual Proofreading Memory
+              Dual-engine OCR · Human proofreading · Correction memory
             </span>
           </div>
         </div>
@@ -641,6 +663,15 @@ export function App() {
             ⌨ Telugu Keyboard
           </button>
 
+          <button
+            type="button"
+            className="primary btn-compact header-cta"
+            title="Import a scanned Telugu PDF"
+            onClick={handleImportCta}
+          >
+            ＋ Import PDF
+          </button>
+
           <nav className="segmented-nav" aria-label="Workspace views">
             <button
               type="button"
@@ -648,7 +679,7 @@ export function App() {
               aria-pressed={activeView === "review"}
               onClick={() => setActiveView("review")}
             >
-              Page Review
+              <span aria-hidden="true">📖</span> Page Review
             </button>
             <button
               type="button"
@@ -656,7 +687,7 @@ export function App() {
               aria-pressed={activeView === "memory"}
               onClick={() => setActiveView("memory")}
             >
-              Correction Memory
+              <span aria-hidden="true">🧠</span> Correction Memory
             </button>
             <button
               type="button"
@@ -665,11 +696,12 @@ export function App() {
               disabled={!selectedBook}
               onClick={() => setActiveView("export")}
             >
-              Export DOCX / TXT
+              <span aria-hidden="true">📄</span> Export DOCX / TXT
             </button>
           </nav>
         </div>
       </header>
+      </div>
 
       <div className="workspace-grid">
         <aside className="sidebar" aria-label="Library and OCR controls">
@@ -707,7 +739,12 @@ export function App() {
           )}
 
           <section className="panel-card">
-            <h2>Books ({books.length})</h2>
+            <h2 className="card-title">
+              <span className="card-icon" aria-hidden="true">
+                📚
+              </span>
+              Books ({books.length})
+            </h2>
             {books.length === 0 ? (
               <p className="hint-text">Upload a printed Telugu PDF above to begin.</p>
             ) : (
@@ -752,7 +789,12 @@ export function App() {
 
           {selectedBook && (
             <section className="panel-card">
-              <h2>Run OCR Engines</h2>
+              <h2 className="card-title">
+                <span className="card-icon" aria-hidden="true">
+                  ⚙️
+                </span>
+                Run OCR Engines
+              </h2>
               <fieldset className="sidebar-fieldset">
                 <legend className="hint-text">Engines</legend>
                 <div className="checkbox-row">
@@ -862,7 +904,12 @@ export function App() {
           {pages.length > 0 && (
             <nav className="panel-card" aria-label="Book pages">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
-                <h2 style={{ margin: 0 }}>Pages ({pages.length})</h2>
+                <h2 className="card-title" style={{ margin: 0 }}>
+                  <span className="card-icon" aria-hidden="true">
+                    🗂️
+                  </span>
+                  Pages ({pages.length})
+                </h2>
                 <span className="hint-text">{approvedPagesCount} approved</span>
               </div>
               <div className="segmented-control" role="group" aria-label="Filter pages" style={{ marginBottom: "0.6rem" }}>
@@ -930,6 +977,18 @@ export function App() {
 
         <main id="main-review" className="main-stage" tabIndex={-1}>
           {selectedBook && (
+            <OverviewPanel
+              book={selectedBook}
+              pages={pages}
+              runs={mergedRuns}
+              review={review}
+              activeView={activeView}
+              onGoToReview={() => setActiveView("review")}
+              onGoToExport={() => setActiveView("export")}
+            />
+          )}
+
+          {selectedBook && (
             <OcrProgressStrip
               book={selectedBook}
               runs={mergedRuns}
@@ -976,13 +1035,14 @@ export function App() {
               onGoToReview={() => setActiveView("review")}
             />
           ) : !review ? (
-            <div className="panel-card">
-              <h2>No Book Selected</h2>
-              <p className="hint-text">
-                Upload a printed Telugu PDF on the left, run PaddleOCR / Tesseract, and inspect or
-                correct lines side-by-side against the original scan.
-              </p>
-            </div>
+            books.length === 0 ? (
+              <WelcomeHero onImportClick={handleImportCta} />
+            ) : (
+              <div className="panel-card">
+                <h2>Loading page…</h2>
+                <p className="hint-text">Fetching the scan and OCR lines for the selected page.</p>
+              </div>
+            )
           ) : (
             <div className="review-split">
               <SourcePageViewer

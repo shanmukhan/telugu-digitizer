@@ -458,7 +458,7 @@ export function ReviewEditorPanel({
                     padding: "0.5rem",
                     border: "1px solid var(--border)",
                     borderRadius: "0.45rem",
-                    background: "#f8fafc",
+                    background: "#faf7ef",
                     display: "flex",
                     flexDirection: "column",
                     gap: "0.45rem",
