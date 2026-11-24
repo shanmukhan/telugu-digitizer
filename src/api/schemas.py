@@ -153,6 +153,10 @@ class BookOCRRunSummary(BaseModel):
     engine: str | None
     model_id: str | None
     status: str
+    progress_current: int = 0
+    progress_total: int = 0
+    started_at: datetime | None = None
+    error_summary: str | None = None
     config: dict[str, Any]
     created_at: datetime
     completed_at: datetime | None

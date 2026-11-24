@@ -51,6 +51,10 @@ export interface BookOCRRunSummary {
   engine: string | null;
   model_id: string | null;
   status: string;
+  progress_current?: number;
+  progress_total?: number;
+  started_at?: string | null;
+  error_summary?: string | null;
   config: Record<string, unknown>;
   created_at: string;
   completed_at: string | null;

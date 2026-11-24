@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiClientError,
   approveCorrection,
@@ -19,6 +19,11 @@ import { BookUploadForm } from "./components/BookUploadForm";
 import { CorrectionMemoryPanel } from "./components/CorrectionMemoryPanel";
 import { DeleteConfirmDialog } from "./components/DeleteConfirmDialog";
 import { ExportPanel } from "./components/ExportPanel";
+import {
+  HeaderOcrStatusPill,
+  OcrProgressStrip,
+  mergeBookRunsWithLiveStatuses,
+} from "./components/OcrStatusBar";
 import { ReviewEditorPanel, type SaveEditOptions } from "./components/ReviewEditorPanel";
 import { SourcePageViewer } from "./components/SourcePageViewer";
 import type {
@@ -30,6 +35,7 @@ import type {
   PageSummary,
   ReviewBlock,
 } from "./types/api";
+import { formatEngineLabel, formatPageKind, formatReviewStatus } from "./utils/formatters";
 
 export function App() {
   const [books, setBooks] = useState<BookSummary[]>([]);
@@ -37,17 +43,28 @@ export function App() {
   const [pages, setPages] = useState<PageSummary[]>([]);
   const [selectedPageNumber, setSelectedPageNumber] = useState<number>(1);
   const [runs, setRuns] = useState<BookOCRRunSummary[]>([]);
+  const [liveStatuses, setLiveStatuses] = useState<Record<string, OCRRunStatus>>({});
   const [selectedPrimaryRunId, setSelectedPrimaryRunId] = useState<string | null>(null);
   const [review, setReview] = useState<PageReviewPayload | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"review" | "memory" | "export">("review");
 
+  const [uploadExpanded, setUploadExpanded] = useState(true);
+  const initializedCollapseRef = useRef(false);
+  const [pageFilter, setPageFilter] = useState<"all" | "pending" | "approved">("all");
+
   const [usePaddle, setUsePaddle] = useState(true);
   const [useTesseract, setUseTesseract] = useState(true);
   const [ocrStartPage, setOcrStartPage] = useState("1");
   const [ocrEndPage, setOcrEndPage] = useState("");
-  const [activeRunStatus, setActiveRunStatus] = useState<OCRRunStatus | null>(null);
   const [busyUpload, setBusyUpload] = useState(false);
+  const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<BookSummary | null>(null);
+  const [banner, setBanner] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(
+    null,
+  );
+
+  const prevProgressRef = useRef<Record<string, { progress: number; status: string }>>({});
 
   const reviewBookId = review?.book_id;
   const reviewPageCount = review?.page_count;
@@ -60,11 +77,11 @@ export function App() {
       setOcrEndPage("");
     }
   }, [reviewBookId, reviewPageCount]);
-  const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<BookSummary | null>(null);
-  const [banner, setBanner] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(
-    null,
-  );
+
+  useEffect(() => {
+    setLiveStatuses({});
+    prevProgressRef.current = {};
+  }, [selectedBookId]);
 
   const handleStatusBanner = useCallback(
     (kind: "info" | "success" | "error", text: string) => {
@@ -76,6 +93,12 @@ export function App() {
   const refreshBooks = useCallback(async () => {
     const items = await listBooks();
     setBooks(items);
+    if (!initializedCollapseRef.current) {
+      initializedCollapseRef.current = true;
+      if (items.length > 0) {
+        setUploadExpanded(false);
+      }
+    }
     if (items.length > 0 && (!selectedBookId || !items.some((b) => b.book_id === selectedBookId))) {
       setSelectedBookId(items[0].book_id);
       setSelectedPageNumber(1);
@@ -84,6 +107,7 @@ export function App() {
       setPages([]);
       setRuns([]);
       setReview(null);
+      setUploadExpanded(true);
     }
   }, [selectedBookId]);
 
@@ -124,31 +148,82 @@ export function App() {
     });
   }, [selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshReview]);
 
+  const mergedRuns = useMemo(
+    () => mergeBookRunsWithLiveStatuses(runs, liveStatuses),
+    [runs, liveStatuses],
+  );
+
+  const activeRunIds = useMemo(
+    () =>
+      mergedRuns
+        .filter((r) => r.status === "running" || r.status === "queued")
+        .map((r) => r.ocr_run_id)
+        .sort(),
+    [mergedRuns],
+  );
+  const activeRunIdsKey = activeRunIds.join(",");
+  const isOcrRunning = activeRunIds.length > 0;
+
   useEffect(() => {
-    if (!activeRunStatus) return;
-    if (activeRunStatus.status === "completed" || activeRunStatus.status === "failed" || activeRunStatus.status === "partial") {
-      return;
-    }
-    const timer = window.setInterval(async () => {
+    if (!activeRunIdsKey || !selectedBookId) return;
+    const currentBookId = selectedBookId;
+    const ids = activeRunIdsKey.split(",").filter(Boolean);
+    let cancelled = false;
+
+    async function pollOnce() {
       try {
-        const next = await getOcrRunStatus(activeRunStatus.ocr_run_id);
-        setActiveRunStatus(next);
-        if (next.status === "completed" || next.status === "partial" || next.status === "failed") {
-          if (selectedBookId) {
-            await refreshBookDetail(selectedBookId);
-            await refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
+        const fetched = await Promise.all(ids.map((id) => getOcrRunStatus(id)));
+        if (cancelled) return;
+
+        setLiveStatuses((prev) => {
+          const nextMap = { ...prev };
+          for (const st of fetched) {
+            nextMap[st.ocr_run_id] = st;
           }
+          return nextMap;
+        });
+
+        let shouldRefreshData = false;
+        let finishedRun: OCRRunStatus | null = null;
+        for (const st of fetched) {
+          const prevEntry = prevProgressRef.current[st.ocr_run_id];
+          const advanced = prevEntry && st.progress_current > prevEntry.progress;
+          const becameTerminal =
+            st.status === "completed" || st.status === "partial" || st.status === "failed";
+          if (advanced || becameTerminal) {
+            shouldRefreshData = true;
+          }
+          if (becameTerminal && (!prevEntry || prevEntry.status !== st.status)) {
+            finishedRun = st;
+          }
+          prevProgressRef.current[st.ocr_run_id] = {
+            progress: st.progress_current,
+            status: st.status,
+          };
+        }
+
+        if (shouldRefreshData && !cancelled) {
+          await refreshBookDetail(currentBookId);
+          await refreshReview(currentBookId, selectedPageNumber, selectedPrimaryRunId);
+        }
+        if (finishedRun && !cancelled) {
           setBanner({
-            kind: next.status === "failed" ? "error" : "success",
-            text: `OCR run finished with status "${next.status}" (${next.progress_current}/${next.progress_total} pages).`,
+            kind: finishedRun.status === "failed" ? "error" : "success",
+            text: `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages).`,
           });
         }
       } catch {
-        // Keep polling transiently.
+        // Ignore transient polling hiccups.
       }
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [activeRunStatus, selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshBookDetail, refreshReview]);
+    }
+
+    void pollOnce();
+    const timer = window.setInterval(() => void pollOnce(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeRunIdsKey, selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshBookDetail, refreshReview]);
 
   async function handleUpload(formData: FormData) {
     setBusyUpload(true);
@@ -159,11 +234,12 @@ export function App() {
       setSelectedPageNumber(1);
       setSelectedPrimaryRunId(null);
       setActiveView("review");
+      setUploadExpanded(false);
       setBanner({
         kind: "success",
         text: res.duplicate
           ? `Book "${res.title}" matched existing SHA-256 (${res.page_count} pages).`
-          : `Imported "${res.title}" (${res.page_count} pages at 300 DPI).`,
+          : `Imported "${res.title}" (${res.page_count} pages at 300 DPI). Ready for OCR.`,
       });
     } catch (err) {
       setBanner({
@@ -175,7 +251,9 @@ export function App() {
     }
   }
 
-  async function handleStartOcr() {
+  const selectedBook = books.find((b) => b.book_id === selectedBookId) ?? null;
+
+  async function handleStartOcr(preset?: "sample_5" | "full") {
     if (!selectedBookId) return;
     const engines: string[] = [];
     if (usePaddle) engines.push("paddle_ppocrv5_te");
@@ -186,42 +264,63 @@ export function App() {
     }
 
     const totalPages = selectedBook?.page_count ?? review?.page_count ?? 0;
-    const startVal = ocrStartPage.trim() === "" ? 1 : Number(ocrStartPage.trim());
-    const endVal =
-      ocrEndPage.trim() === "" ? totalPages || startVal : Number(ocrEndPage.trim());
-    if (
-      !Number.isInteger(startVal) ||
-      !Number.isInteger(endVal) ||
-      startVal < 1 ||
-      endVal < startVal ||
-      (totalPages > 0 && endVal > totalPages)
-    ) {
-      setBanner({
-        kind: "error",
-        text:
-          totalPages > 0
-            ? `Enter a valid OCR page range between 1 and ${totalPages}.`
-            : "Enter a valid OCR page range.",
-      });
-      return;
+    let pageRange: { start: number; end: number } | null = null;
+
+    if (preset === "sample_5") {
+      const endSample = Math.min(5, totalPages || 5);
+      setOcrStartPage("1");
+      setOcrEndPage(String(endSample));
+      pageRange = totalPages > 0 && endSample === totalPages ? null : { start: 1, end: endSample };
+    } else if (preset === "full") {
+      setOcrStartPage("1");
+      if (totalPages > 0) setOcrEndPage(String(totalPages));
+      pageRange = null;
+    } else {
+      const startVal = ocrStartPage.trim() === "" ? 1 : Number(ocrStartPage.trim());
+      const endVal =
+        ocrEndPage.trim() === "" ? totalPages || startVal : Number(ocrEndPage.trim());
+      if (
+        !Number.isInteger(startVal) ||
+        !Number.isInteger(endVal) ||
+        startVal < 1 ||
+        endVal < startVal ||
+        (totalPages > 0 && endVal > totalPages)
+      ) {
+        setBanner({
+          kind: "error",
+          text:
+            totalPages > 0
+              ? `Enter a valid OCR page range between 1 and ${totalPages}.`
+              : "Enter a valid OCR page range.",
+        });
+        return;
+      }
+      pageRange =
+        totalPages > 0 && startVal === 1 && endVal === totalPages
+          ? null
+          : { start: startVal, end: endVal };
     }
-    const pageRange =
-      totalPages > 0 && startVal === 1 && endVal === totalPages
-        ? null
-        : { start: startVal, end: endVal };
 
     try {
       const created = await startOcrRun(selectedBookId, engines, { pageRange });
-      const statusObj = await getOcrRunStatus(created.ocr_run_id);
-      setActiveRunStatus(statusObj);
+      const runIdsToFetch = created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
+      const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
+      setLiveStatuses((prev) => {
+        const nextMap = { ...prev };
+        for (const st of fetchedStatuses) {
+          nextMap[st.ocr_run_id] = st;
+        }
+        return nextMap;
+      });
       await refreshBookDetail(selectedBookId);
       if (created.reused_existing) {
         await refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
         setBanner({ kind: "info", text: "Reused existing completed OCR run." });
       } else {
+        const engineNames = engines.map((e) => formatEngineLabel(e)).join(" + ");
         setBanner({
           kind: "info",
-          text: `Started OCR (${engines.join(" + ")}) for ${created.pages_total} scanned/mixed page(s)${
+          text: `Started OCR (${engineNames}) for ${created.pages_total} scanned page(s)${
             pageRange ? ` (pages ${pageRange.start}–${pageRange.end})` : ""
           }.`,
         });
@@ -237,8 +336,14 @@ export function App() {
   async function handleResumeRun(runId: string) {
     try {
       const resumed = await resumeOcrRun(runId);
-      setActiveRunStatus(resumed);
-      setBanner({ kind: "info", text: `Resumed OCR run ${runId.slice(0, 8)}...` });
+      setLiveStatuses((prev) => ({ ...prev, [resumed.ocr_run_id]: resumed }));
+      if (selectedBookId) {
+        await refreshBookDetail(selectedBookId);
+      }
+      setBanner({
+        kind: "info",
+        text: `Resumed ${formatEngineLabel(resumed.engine)} from ${resumed.progress_current}/${resumed.progress_total} pages.`,
+      });
     } catch (err) {
       setBanner({
         kind: "error",
@@ -345,7 +450,10 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({ kind: "success", text: `Page ${selectedPageNumber} marked "${reviewStatus}".` });
+      setBanner({
+        kind: "success",
+        text: `Page ${selectedPageNumber} marked "${formatReviewStatus(reviewStatus)}".`,
+      });
     } catch (err) {
       setBanner({
         kind: "error",
@@ -371,7 +479,27 @@ export function App() {
     }
   }
 
-  const selectedBook = books.find((b) => b.book_id === selectedBookId) ?? null;
+  const approvedPagesCount = useMemo(
+    () => pages.filter((p) => p.review_status === "approved").length,
+    [pages],
+  );
+  const filteredPages = useMemo(() => {
+    if (pageFilter === "approved") {
+      return pages.filter((p) => p.review_status === "approved");
+    }
+    if (pageFilter === "pending") {
+      return pages.filter((p) => p.review_status !== "approved");
+    }
+    return pages;
+  }, [pages, pageFilter]);
+
+  const resumableRuns = useMemo(
+    () =>
+      mergedRuns.filter(
+        (r) => (r.status === "partial" || r.status === "failed") && !activeRunIds.includes(r.ocr_run_id),
+      ),
+    [mergedRuns, activeRunIds],
+  );
 
   return (
     <div className="app-shell">
@@ -380,45 +508,85 @@ export function App() {
       </a>
 
       <header className="app-header">
-        <div>
-          <h1>Telugu Book Digitizer — Review Studio</h1>
-          <span className="header-meta">
-            Local-first OCR inspection &amp; contextual correction memory
-          </span>
+        <div className="brand-block">
+          <div className="brand-mark" aria-hidden="true">
+            తె
+          </div>
+          <div>
+            <h1>Telugu Book Digitizer</h1>
+            <span className="header-meta">
+              Local OCR Studio &amp; Contextual Proofreading Memory
+            </span>
+          </div>
         </div>
 
         <div className="header-actions">
-          <button
-            type="button"
-            className={activeView === "review" ? "primary" : undefined}
-            aria-pressed={activeView === "review"}
-            onClick={() => setActiveView("review")}
-          >
-            Page Review
-          </button>
-          <button
-            type="button"
-            className={activeView === "memory" ? "primary" : undefined}
-            aria-pressed={activeView === "memory"}
-            onClick={() => setActiveView("memory")}
-          >
-            Correction Memory
-          </button>
-          <button
-            type="button"
-            className={activeView === "export" ? "primary" : undefined}
-            aria-pressed={activeView === "export"}
-            disabled={!selectedBook}
-            onClick={() => setActiveView("export")}
-          >
-            Export DOCX / TXT
-          </button>
+          <HeaderOcrStatusPill book={selectedBook} runs={mergedRuns} />
+
+          <nav className="segmented-nav" aria-label="Workspace views">
+            <button
+              type="button"
+              className={activeView === "review" ? "primary" : undefined}
+              aria-pressed={activeView === "review"}
+              onClick={() => setActiveView("review")}
+            >
+              Page Review
+            </button>
+            <button
+              type="button"
+              className={activeView === "memory" ? "primary" : undefined}
+              aria-pressed={activeView === "memory"}
+              onClick={() => setActiveView("memory")}
+            >
+              Correction Memory
+            </button>
+            <button
+              type="button"
+              className={activeView === "export" ? "primary" : undefined}
+              aria-pressed={activeView === "export"}
+              disabled={!selectedBook}
+              onClick={() => setActiveView("export")}
+            >
+              Export DOCX / TXT
+            </button>
+          </nav>
         </div>
       </header>
 
       <div className="workspace-grid">
         <aside className="sidebar" aria-label="Library and OCR controls">
-          <BookUploadForm busy={busyUpload} onUpload={handleUpload} />
+          {uploadExpanded || books.length === 0 ? (
+            <div>
+              {books.length > 0 && (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.35rem" }}>
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    onClick={() => setUploadExpanded(false)}
+                  >
+                    Hide Upload Form
+                  </button>
+                </div>
+              )}
+              <BookUploadForm busy={busyUpload} onUpload={handleUpload} />
+            </div>
+          ) : (
+            <section className="panel-card panel-card-compact">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
+                <div>
+                  <strong style={{ fontSize: "0.95rem" }}>Library Import</strong>
+                  <div className="hint-text">Add another scanned Telugu PDF</div>
+                </div>
+                <button
+                  type="button"
+                  className="primary btn-compact"
+                  onClick={() => setUploadExpanded(true)}
+                >
+                  + Import PDF
+                </button>
+              </div>
+            </section>
+          )}
 
           <section className="panel-card">
             <h2>Books ({books.length})</h2>
@@ -441,7 +609,7 @@ export function App() {
                       >
                         <strong lang="te">{book.title}</strong>
                         <span className="hint-text">
-                          {book.page_count} page(s) · {book.scanned_pages_count} scanned ·{" "}
+                          {book.page_count} pages · {book.scanned_pages_count} scanned ·{" "}
                           {book.digital_text_pages_count} digital
                         </span>
                       </button>
@@ -455,7 +623,7 @@ export function App() {
               <div style={{ marginTop: "0.75rem" }}>
                 <button
                   type="button"
-                  className="danger"
+                  className="danger btn-compact"
                   onClick={() => setDeleteTarget(selectedBook)}
                 >
                   Delete Selected Book
@@ -467,7 +635,7 @@ export function App() {
           {selectedBook && (
             <section className="panel-card">
               <h2>Run OCR Engines</h2>
-              <fieldset style={{ border: "1px solid var(--border)", borderRadius: "0.45rem", padding: "0.55rem" }}>
+              <fieldset className="sidebar-fieldset">
                 <legend className="hint-text">Engines</legend>
                 <div className="checkbox-row">
                   <input
@@ -476,7 +644,9 @@ export function App() {
                     checked={usePaddle}
                     onChange={(e) => setUsePaddle(e.target.checked)}
                   />
-                  <label htmlFor="eng-paddle">PaddleOCR PP-OCRv5 (`te`)</label>
+                  <label htmlFor="eng-paddle">
+                    PaddleOCR PP-OCRv5 <span className="hint-text">(~90s/p CPU)</span>
+                  </label>
                 </div>
                 <div className="checkbox-row">
                   <input
@@ -485,18 +655,13 @@ export function App() {
                     checked={useTesseract}
                     onChange={(e) => setUseTesseract(e.target.checked)}
                   />
-                  <label htmlFor="eng-tess">Tesseract 5 (`tel` tessdata_best)</label>
+                  <label htmlFor="eng-tess">
+                    Tesseract 5 Telugu <span className="hint-text">(~0.4s/p CPU)</span>
+                  </label>
                 </div>
               </fieldset>
 
-              <fieldset
-                style={{
-                  border: "1px solid var(--border)",
-                  borderRadius: "0.45rem",
-                  padding: "0.55rem",
-                  marginTop: "0.55rem",
-                }}
-              >
+              <fieldset className="sidebar-fieldset" style={{ marginTop: "0.55rem" }}>
                 <legend className="hint-text">Page Range</legend>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.45rem" }}>
                   <label className="hint-text" htmlFor="ocr-start-page">
@@ -504,11 +669,11 @@ export function App() {
                     <input
                       id="ocr-start-page"
                       type="number"
+                      className="compact-number-input"
                       min={1}
                       max={selectedBook.page_count}
                       value={ocrStartPage}
                       onChange={(e) => setOcrStartPage(e.target.value)}
-                      style={{ width: "100%", marginTop: "0.2rem" }}
                     />
                   </label>
                   <label className="hint-text" htmlFor="ocr-end-page">
@@ -516,18 +681,19 @@ export function App() {
                     <input
                       id="ocr-end-page"
                       type="number"
+                      className="compact-number-input"
                       min={1}
                       max={selectedBook.page_count}
                       value={ocrEndPage}
                       placeholder={String(selectedBook.page_count)}
                       onChange={(e) => setOcrEndPage(e.target.value)}
-                      style={{ width: "100%", marginTop: "0.2rem" }}
                     />
                   </label>
                 </div>
                 <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.45rem", flexWrap: "wrap" }}>
                   <button
                     type="button"
+                    className="btn-compact"
                     onClick={() => {
                       setOcrStartPage("1");
                       setOcrEndPage(String(Math.min(5, selectedBook.page_count)));
@@ -537,6 +703,7 @@ export function App() {
                   </button>
                   <button
                     type="button"
+                    className="btn-compact"
                     onClick={() => {
                       setOcrStartPage("1");
                       setOcrEndPage(String(selectedBook.page_count));
@@ -546,7 +713,7 @@ export function App() {
                   </button>
                 </div>
                 <p className="hint-text" style={{ marginTop: "0.4rem", marginBottom: 0 }}>
-                  CPU speed: Tesseract ~0.4 s/page; PaddleOCR PP-OCRv5 ~90 s/page. For large PDFs, test Pages 1–5 first.
+                  For large PDFs on CPU, test Pages 1–5 first or run Tesseract alone for a quick draft.
                 </p>
               </fieldset>
 
@@ -554,47 +721,60 @@ export function App() {
                 <button
                   type="button"
                   className="primary"
-                  disabled={
-                    Boolean(
-                      activeRunStatus &&
-                        (activeRunStatus.status === "queued" || activeRunStatus.status === "running"),
-                    ) || runs.some((r) => r.status === "queued" || r.status === "running")
-                  }
+                  disabled={isOcrRunning}
                   onClick={() => void handleStartOcr()}
                 >
-                  {Boolean(
-                    activeRunStatus &&
-                      (activeRunStatus.status === "queued" || activeRunStatus.status === "running"),
-                  ) || runs.some((r) => r.status === "queued" || r.status === "running")
-                    ? "OCR Running..."
-                    : "Run Selected OCR"}
+                  {isOcrRunning ? "OCR In Progress..." : "Run Selected OCR"}
                 </button>
-                {activeRunStatus && (
-                  <p className="hint-text" role="status">
-                    Active run: <strong>{activeRunStatus.status}</strong> (
-                    {activeRunStatus.progress_current}/{activeRunStatus.progress_total})
-                  </p>
-                )}
-                {runs
-                  .filter((r) => r.status === "partial" || r.status === "failed")
-                  .map((r) => (
-                    <button
-                      key={r.ocr_run_id}
-                      type="button"
-                      onClick={() => void handleResumeRun(r.ocr_run_id)}
-                    >
-                      Resume {r.engine} ({r.status})
-                    </button>
-                  ))}
+                {resumableRuns.map((r) => (
+                  <button
+                    key={r.ocr_run_id}
+                    type="button"
+                    className="btn-compact"
+                    onClick={() => void handleResumeRun(r.ocr_run_id)}
+                  >
+                    Resume {formatEngineLabel(r.engine)} ({r.progress_current ?? 0}/
+                    {r.progress_total || selectedBook.scanned_pages_count})
+                  </button>
+                ))}
               </div>
             </section>
           )}
 
           {pages.length > 0 && (
             <nav className="panel-card" aria-label="Book pages">
-              <h2>Pages</h2>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
+                <h2 style={{ margin: 0 }}>Pages ({pages.length})</h2>
+                <span className="hint-text">{approvedPagesCount} approved</span>
+              </div>
+              <div className="segmented-control" role="group" aria-label="Filter pages" style={{ marginBottom: "0.6rem" }}>
+                <button
+                  type="button"
+                  className={`btn-compact ${pageFilter === "all" ? "primary" : ""}`.trim()}
+                  aria-pressed={pageFilter === "all"}
+                  onClick={() => setPageFilter("all")}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className={`btn-compact ${pageFilter === "pending" ? "primary" : ""}`.trim()}
+                  aria-pressed={pageFilter === "pending"}
+                  onClick={() => setPageFilter("pending")}
+                >
+                  Pending
+                </button>
+                <button
+                  type="button"
+                  className={`btn-compact ${pageFilter === "approved" ? "primary" : ""}`.trim()}
+                  aria-pressed={pageFilter === "approved"}
+                  onClick={() => setPageFilter("approved")}
+                >
+                  Approved
+                </button>
+              </div>
               <ul className="page-list">
-                {pages.map((p) => (
+                {filteredPages.map((p) => (
                   <li key={p.page_id}>
                     <button
                       type="button"
@@ -605,13 +785,21 @@ export function App() {
                         setActiveView("review");
                       }}
                     >
-                      <div className="badge-row">
+                      <div className="badge-row" style={{ justifyContent: "space-between", width: "100%" }}>
                         <strong>Page {p.page_number}</strong>
-                        <span className="badge">{p.page_kind}</span>
+                        <span className="badge">{formatPageKind(p.page_kind)}</span>
+                      </div>
+                      <div className="badge-row">
                         <span
-                          className={`badge ${p.review_status === "approved" ? "ok" : p.review_status === "needs_attention" ? "warn" : ""}`}
+                          className={`badge ${
+                            p.review_status === "approved"
+                              ? "ok"
+                              : p.review_status === "needs_attention"
+                                ? "warn"
+                                : ""
+                          }`}
                         >
-                          {p.review_status}
+                          {formatReviewStatus(p.review_status)}
                         </span>
                       </div>
                     </button>
@@ -623,13 +811,37 @@ export function App() {
         </aside>
 
         <main id="main-review" className="main-stage" tabIndex={-1}>
+          {selectedBook && (
+            <OcrProgressStrip
+              book={selectedBook}
+              runs={mergedRuns}
+              pages={pages}
+              activeView={activeView}
+              onQuickStartSample={() => handleStartOcr("sample_5")}
+              onQuickStartFull={() => handleStartOcr("full")}
+              onResumeRun={handleResumeRun}
+              onGoToExport={() => setActiveView("export")}
+              onGoToReview={() => setActiveView("review")}
+            />
+          )}
+
           {banner && (
             <div
-              className={`status-banner ${banner.kind === "error" ? "error" : banner.kind === "success" ? "success" : ""}`}
+              className={`status-banner ${
+                banner.kind === "error" ? "error" : banner.kind === "success" ? "success" : ""
+              }`}
               role="status"
               aria-live="polite"
             >
-              {banner.text}
+              <span>{banner.text}</span>
+              <button
+                type="button"
+                className="banner-close-btn"
+                aria-label="Dismiss status message"
+                onClick={() => setBanner(null)}
+              >
+                ✕
+              </button>
             </div>
           )}
 
@@ -641,7 +853,7 @@ export function App() {
           ) : activeView === "export" && selectedBook ? (
             <ExportPanel
               book={selectedBook}
-              runs={runs}
+              runs={mergedRuns}
               onStatusBanner={handleStatusBanner}
               onGoToReview={() => setActiveView("review")}
             />
@@ -674,13 +886,8 @@ export function App() {
                 review={review}
                 selectedBlockId={selectedBlockId}
                 busyBlockId={busyBlockId}
-                ocrRunning={
-                  Boolean(
-                    activeRunStatus &&
-                      (activeRunStatus.status === "queued" || activeRunStatus.status === "running"),
-                  ) || runs.some((r) => r.status === "queued" || r.status === "running")
-                }
-                onQuickStartOcr={handleStartOcr}
+                ocrRunning={isOcrRunning}
+                onQuickStartOcr={() => handleStartOcr()}
                 onSelectBlock={setSelectedBlockId}
                 onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
                 onSaveEdit={handleSaveBlockEdit}

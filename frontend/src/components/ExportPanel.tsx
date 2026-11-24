@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import { ApiClientError, createBookExport, listBookExports } from "../api/client";
 import type { BookOCRRunSummary, BookSummary, ExportRecord } from "../types/api";
+import { formatEngineLabel, formatLayoutMode } from "../utils/formatters";
 
 interface ExportPanelProps {
   book: BookSummary;
@@ -151,8 +152,8 @@ export function ExportPanel({ book, runs, onStatusBanner, onGoToReview }: Export
             >
               <option value="">Auto-select primary run</option>
               {usableRuns.map((run) => (
-                <option key={run.ocr_run_id} value={run.ocr_run_id}>
-                  {run.engine} ({run.model_id})
+                <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
+                  {formatEngineLabel(run.engine)} ({run.progress_current ?? 0}/{run.progress_total ?? book.page_count} pages)
                 </option>
               ))}
             </select>
@@ -216,10 +217,10 @@ export function ExportPanel({ book, runs, onStatusBanner, onGoToReview }: Export
                     <strong lang="te">{item.filename}</strong>
                     <div className="badge-row" style={{ marginTop: "0.25rem" }}>
                       <span className="badge">{item.format.toUpperCase()}</span>
-                      <span className="badge">{item.layout_mode}</span>
-                      <span className="badge">{item.text_version}</span>
+                      <span className="badge">{formatLayoutMode(item.layout_mode)}</span>
+                      <span className="badge">{formatLayoutMode(item.text_version)}</span>
                       <span className={`badge ${item.is_fully_reviewed ? "ok" : "warn"}`}>
-                        {item.is_fully_reviewed ? "Reviewed" : "Partial / Unreviewed"}
+                        {item.is_fully_reviewed ? "✓ Reviewed" : "⚠ Partial / Unreviewed"}
                       </span>
                       {Boolean(item.validation?.passed) && (
                         <span className="badge ok">✓ Verified</span>

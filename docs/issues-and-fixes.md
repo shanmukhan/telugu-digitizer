@@ -72,3 +72,45 @@ When the left sidebar (**Upload Printed Telugu PDF**, **Books**, **Run OCR Engin
   (cd frontend && npm run build)
   .venv/bin/python scripts/run_api.py
   ```
+
+---
+
+## 4. `Connection refused` on `127.0.0.1:5432` When Starting `scripts/run_api.py`
+
+### Symptom
+Running `.venv/bin/python scripts/run_api.py` after a macOS reboot or environment restart failed during FastAPI lifespan startup with:
+`psycopg.OperationalError: connection failed: connection to server at "127.0.0.1", port 5432 failed: could not receive data from server: Connection refused`
+
+### Root Cause
+The project uses a self-contained PostgreSQL 18 cluster in `.tools/postgres` / `.tools/pgdata` managed via `scripts/manage_local_pg.py` (no background macOS `launchd` service), so PostgreSQL stops when the host restarts. Previously, `scripts/run_api.py` did not start `.tools/pgdata` automatically when port `5432` was closed.
+
+### Fix Implemented
+- **Immediate manual start command:**
+  ```sh
+  .venv/bin/python scripts/manage_local_pg.py start
+  ```
+- **Automatic startup guard** (`scripts/run_api.py`): Added `_ensure_local_postgres(settings)`, which checks `127.0.0.1:5432` before starting Uvicorn and automatically invokes `.venv/bin/python scripts/manage_local_pg.py start` when the cluster is stopped and an initialized `.tools/pgdata` cluster exists on disk.
+
+---
+
+## 5. Hidden OCR Progress, Missing Status/ETA Visibility & UI Polish
+
+### Symptom
+1. Clicking **Run Selected OCR** disabled the sidebar button (`OCR Running...`) at the bottom of the left sidebar with no status indicator, page progress bar, completed/pending page breakdown, or time estimate visible at the top of the workspace.
+2. Refreshing the browser mid-run lost active run progress in the header, and multi-engine batches did not show queued vs running engines.
+3. Long PDFs (e.g., 292 pages) lacked direct page-number jump in the viewer toolbar, raw DB enums (`scanned_image`, `not_started`) and backticks appeared directly in badges/labels, and the upload form pushed OCR/page controls below the fold whenever a book was already selected.
+
+### Root Causes
+- `GET /api/v1/books/{book_id}/ocr-runs` (`BookOCRRunSummary`) did not include `ProcessingJob` counters (`progress_current`, `progress_total`, `started_at`, `error_summary`).
+- `App.tsx` only polled a single `activeRunStatus` initiated in-session instead of syncing all running/queued runs across `runs`, and only refreshed `review` after full completion rather than incrementally as pages finished.
+
+### Fixes Implemented
+- **Backend progress fields on run summaries** (`src/api/schemas.py`, `src/services/review_service.py`): Added defaulted `progress_current`, `progress_total`, `started_at`, and `error_summary` fields to `BookOCRRunSummary` populated from `ProcessingJob` / `OCRRun`.
+- **Top status pill & telemetry progress strip** (`frontend/src/components/OcrStatusBar.tsx`, `frontend/src/utils/formatters.ts`, `frontend/src/App.tsx`):
+  - Sticky header `HeaderOcrStatusPill` always displays current book state (`OCR In Progress`, `OCR Queued`, `OCR Ready`, `Partial OCR · Resume Available`, or `Needs OCR`).
+  - `OcrProgressStrip` above the split workspace renders a semantic styled `<progress>` bar, **`completed`** vs **`pending`** counts, percent, elapsed duration, observed **`sec/page` pace & ETA** (once ≥1 page finishes), queued follow-up engine badges, and one-click actions (`Test Pages 1–5`, `Run Full Book OCR`, `Resume`, `Export DOCX / TXT`).
+  - Multi-run polling syncs all `running`/`queued` runs every `1500 ms` (including after browser refresh) and refreshes the page list and current review view live whenever a page completes.
+- **UI & ergonomics refinements** (`frontend/src/App.tsx`, `frontend/src/components/SourcePageViewer.tsx`, `frontend/src/components/ReviewEditorPanel.tsx`, `frontend/src/components/ExportPanel.tsx`, `frontend/src/styles/app.css`):
+  - Auto-collapsible **Import PDF** card once a book is loaded (`+ Import PDF` toggle) so **Books**, **Run OCR Engines**, and **Pages** appear above the fold.
+  - Direct page-number jump input (`Page [N] / Total`), page status filter (`All` / `Pending` / `Approved`), human-readable badges/labels (`Scanned`, `Pending Review`, `PaddleOCR PP-OCRv5`, `Tesseract 5 Telugu`), compact toolbar controls (`role="toolbar"`), elevated studio styling, and `forced-colors` / `prefers-reduced-motion` support.
+- **Tests added:** `frontend/src/components/OcrStatusBar.test.tsx`.

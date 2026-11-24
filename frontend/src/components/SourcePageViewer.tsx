@@ -30,8 +30,24 @@ export function SourcePageViewer({
 }: SourcePageViewerProps) {
   const [viewMode, setViewMode] = useState<"overlay" | "pdfjs">("overlay");
   const [zoom, setZoom] = useState(1.0);
+  const [pageJumpInput, setPageJumpInput] = useState(String(pageNumber));
   const [pdfStatus, setPdfStatus] = useState<string>("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    setPageJumpInput(String(pageNumber));
+  }, [pageNumber]);
+
+  function commitPageJump() {
+    const target = Number(pageJumpInput.trim());
+    if (Number.isInteger(target) && target >= 1 && target <= pageCount) {
+      if (target !== pageNumber) {
+        onNavigatePage(target);
+      }
+    } else {
+      setPageJumpInput(String(pageNumber));
+    }
+  }
 
   const naturalWidth = widthPx ?? 1200;
   const naturalHeight = heightPx ?? 1600;
@@ -98,62 +114,91 @@ export function SourcePageViewer({
 
   return (
     <section className="pane" aria-label="Source page viewer">
-      <div className="pane-toolbar">
-        <button
-          type="button"
-          aria-label="Previous page"
-          disabled={pageNumber <= 1}
-          onClick={() => onNavigatePage(pageNumber - 1)}
-        >
-          ← Prev
-        </button>
-        <strong style={{ marginInline: "0.25rem" }}>
-          Page {pageNumber} / {pageCount}
-        </strong>
-        <button
-          type="button"
-          aria-label="Next page"
-          disabled={pageNumber >= pageCount}
-          onClick={() => onNavigatePage(pageNumber + 1)}
-        >
-          Next →
-        </button>
-        <button
-          type="button"
-          className={viewMode === "overlay" ? "primary" : undefined}
-          aria-pressed={viewMode === "overlay"}
-          onClick={() => setViewMode("overlay")}
-        >
-          Raster + OCR Boxes
-        </button>
-        <button
-          type="button"
-          className={viewMode === "pdfjs" ? "primary" : undefined}
-          aria-pressed={viewMode === "pdfjs"}
-          onClick={() => setViewMode("pdfjs")}
-        >
-          PDF.js Original
-        </button>
-
-        <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.35rem", alignItems: "center" }}>
+      <div className="pane-toolbar" role="toolbar" aria-label="Source page navigation and zoom controls">
+        <div className="toolbar-group" role="group" aria-label="Page navigation">
           <button
             type="button"
+            className="btn-compact"
+            aria-label="Previous page"
+            disabled={pageNumber <= 1}
+            onClick={() => onNavigatePage(pageNumber - 1)}
+          >
+            ← Prev
+          </button>
+          <form
+            className="page-jump-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              commitPageJump();
+            }}
+          >
+            <label htmlFor="viewer-page-jump" className="hint-text">
+              Page
+            </label>
+            <input
+              id="viewer-page-jump"
+              type="number"
+              className="page-jump-input"
+              aria-label="Jump to page number"
+              min={1}
+              max={pageCount}
+              value={pageJumpInput}
+              onChange={(e) => setPageJumpInput(e.target.value)}
+              onBlur={commitPageJump}
+            />
+            <span className="hint-text">/ {pageCount}</span>
+          </form>
+          <button
+            type="button"
+            className="btn-compact"
+            aria-label="Next page"
+            disabled={pageNumber >= pageCount}
+            onClick={() => onNavigatePage(pageNumber + 1)}
+          >
+            Next →
+          </button>
+        </div>
+
+        <div className="segmented-control" role="group" aria-label="Viewer mode">
+          <button
+            type="button"
+            className={`btn-compact ${viewMode === "overlay" ? "primary" : ""}`.trim()}
+            aria-pressed={viewMode === "overlay"}
+            onClick={() => setViewMode("overlay")}
+          >
+            Scan + Boxes
+          </button>
+          <button
+            type="button"
+            className={`btn-compact ${viewMode === "pdfjs" ? "primary" : ""}`.trim()}
+            aria-pressed={viewMode === "pdfjs"}
+            onClick={() => setViewMode("pdfjs")}
+          >
+            PDF.js
+          </button>
+        </div>
+
+        <div className="toolbar-group" role="group" aria-label="Zoom controls" style={{ marginInlineStart: "auto" }}>
+          <button
+            type="button"
+            className="btn-compact"
             aria-label="Zoom out"
             onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.2).toFixed(2))))}
           >
             −
           </button>
-          <span className="hint-text" style={{ minWidth: "3.2rem", textAlign: "center" }}>
+          <span className="hint-text" style={{ minWidth: "3rem", textAlign: "center", fontWeight: 600 }}>
             {Math.round(zoom * 100)}%
           </span>
           <button
             type="button"
+            className="btn-compact"
             aria-label="Zoom in"
             onClick={() => setZoom((z) => Math.min(2.5, Number((z + 0.2).toFixed(2))))}
           >
             +
           </button>
-          <button type="button" onClick={() => setZoom(1.0)}>
+          <button type="button" className="btn-compact" onClick={() => setZoom(1.0)}>
             Reset
           </button>
         </div>

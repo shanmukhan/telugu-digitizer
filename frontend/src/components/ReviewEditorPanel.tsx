@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
+import { formatEngineLabel } from "../utils/formatters";
 
 interface UndoEntry {
   blockId: string;
@@ -157,20 +158,21 @@ export function ReviewEditorPanel({
         }
       }}
     >
-      <div className="pane-toolbar">
+      <div className="pane-toolbar" role="toolbar" aria-label="Proofreading editor tools">
         <strong>Proofreading Editor</strong>
 
         {usableRuns.length > 0 && (
-          <label className="hint-text">
-            Run:{" "}
+          <label className="hint-text" style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+            <span>Engine</span>
             <select
               aria-label="Primary OCR engine run"
+              className="toolbar-select"
               value={review.primary_run_id ?? ""}
               onChange={(e) => onSelectPrimaryRun(e.target.value)}
             >
               {usableRuns.map((run) => (
-                <option key={run.ocr_run_id} value={run.ocr_run_id}>
-                  {run.engine} ({run.model_id})
+                <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
+                  {formatEngineLabel(run.engine)}
                 </option>
               ))}
             </select>
@@ -179,22 +181,26 @@ export function ReviewEditorPanel({
 
         <button
           type="button"
+          className="btn-compact"
           aria-pressed={filterFlagged}
           onClick={() => setFilterFlagged((v) => !v)}
         >
           Flagged Only ({flaggedCount})
         </button>
 
-        <button type="button" disabled={undoStack.length === 0} onClick={() => void handleUndo()}>
-          Undo
-        </button>
-        <button type="button" disabled={redoStack.length === 0} onClick={() => void handleRedo()}>
-          Redo
-        </button>
+        <div className="toolbar-group" role="group" aria-label="Edit history">
+          <button type="button" className="btn-compact" disabled={undoStack.length === 0} onClick={() => void handleUndo()}>
+            Undo
+          </button>
+          <button type="button" className="btn-compact" disabled={redoStack.length === 0} onClick={() => void handleRedo()}>
+            Redo
+          </button>
+        </div>
 
         <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.4rem", alignItems: "center" }}>
           <select
             aria-label="Page review status"
+            className="toolbar-select"
             value={review.review_status}
             onChange={(e) =>
               void onChangePageStatus(
@@ -202,14 +208,14 @@ export function ReviewEditorPanel({
               )
             }
           >
-            <option value="not_started">Not Started</option>
+            <option value="not_started">Pending Review</option>
             <option value="in_review">In Review</option>
             <option value="needs_attention">Needs Attention</option>
             <option value="approved">Approved</option>
           </select>
           <button
             type="button"
-            className="primary"
+            className="primary btn-compact"
             onClick={() => void onChangePageStatus("approved")}
           >
             Approve Page
@@ -308,7 +314,7 @@ export function ReviewEditorPanel({
                 <div className="comparator-box">
                   <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
                     <div>
-                      <span className="hint-text">{review.comparator_engine} text: </span>
+                      <span className="hint-text">{formatEngineLabel(review.comparator_engine)} comparator: </span>
                       <span className="telugu-text" lang="te">
                         {block.comparator_text}
                       </span>

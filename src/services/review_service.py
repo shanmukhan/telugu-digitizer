@@ -20,6 +20,7 @@ from src.db.models import (
     ModelRegistry,
     OCRBlock,
     OCRRun,
+    ProcessingJob,
     ReviewEdit,
 )
 from src.evaluation.metrics import normalize_nfc
@@ -139,12 +140,17 @@ def list_book_ocr_runs(db: Session, book_id: uuid.UUID) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for run in runs:
         model = db.get(ModelRegistry, run.model_registry_id) if run.model_registry_id else None
+        job = db.get(ProcessingJob, run.processing_job_id) if run.processing_job_id else None
         items.append(
             {
                 "ocr_run_id": run.id,
                 "engine": model.engine_name if model else None,
                 "model_id": model.model_id if model else None,
                 "status": run.status,
+                "progress_current": job.progress_current if job else 0,
+                "progress_total": job.progress_total if job else 0,
+                "started_at": run.started_at,
+                "error_summary": run.error_summary,
                 "config": run.config or {},
                 "created_at": run.created_at,
                 "completed_at": run.completed_at,
