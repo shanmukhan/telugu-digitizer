@@ -22,10 +22,12 @@ interface ReviewEditorPanelProps {
   ocrRunning?: boolean;
   syncTarget?: { blockId: string; seq: number } | null;
   autoSync?: boolean;
+  keyboardOpen?: boolean;
   onSelectBlock: (blockId: string) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
   onSyncToScan?: () => void;
   onToggleAutoSync?: () => void;
+  onToggleKeyboard?: () => void;
   onSelectPrimaryRun: (runId: string) => void;
   onQuickStartOcr?: () => Promise<void>;
   onSaveEdit: (
@@ -52,10 +54,12 @@ export function ReviewEditorPanel({
   ocrRunning = false,
   syncTarget = null,
   autoSync = false,
+  keyboardOpen = false,
   onSelectBlock,
   onLocateBlockOnScan,
   onSyncToScan,
   onToggleAutoSync,
+  onToggleKeyboard,
   onSelectPrimaryRun,
   onQuickStartOcr,
   onSaveEdit,
@@ -266,6 +270,18 @@ export function ReviewEditorPanel({
               </button>
             )}
           </div>
+        )}
+
+        {onToggleKeyboard && (
+          <button
+            type="button"
+            className="btn-compact"
+            aria-pressed={keyboardOpen}
+            title="Open on-screen Telugu InScript & Phonetic keyboard"
+            onClick={onToggleKeyboard}
+          >
+            ⌨ Keyboard
+          </button>
         )}
 
         <div className="toolbar-group" role="group" aria-label="Edit history">

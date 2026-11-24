@@ -162,6 +162,10 @@ button.danger {
   min-block-size: 0;
 }
 
+.app-shell.has-keyboard {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
 .app-header {
   display: flex;
   flex-wrap: wrap;
@@ -761,6 +765,16 @@ progress.ocr-progress-bar:dir(rtl):indeterminate {
     grid-template-rows: auto auto;
   }
 
+  .app-shell.has-keyboard {
+    grid-template-rows: auto auto auto;
+  }
+
+  .telugu-kbd-dock {
+    position: sticky;
+    inset-block-end: 0;
+    z-index: 25;
+  }
+
   .workspace-grid {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto;
@@ -991,5 +1005,240 @@ dialog::backdrop {
 
   button {
     transition-duration: 0.01ms !important;
+  }
+}
+
+
+/* Docked Telugu InScript / Phonetic Virtual Keyboard */
+.telugu-kbd-dock {
+  background: var(--surface);
+  border-block-start: 2px solid var(--border-strong);
+  box-shadow: 0 -4px 16px rgb(15 23 42 / 0.08);
+  padding: 0.65rem 1rem 0.75rem;
+  max-block-size: min(38dvh, 310px);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  z-index: 15;
+}
+
+.telugu-kbd-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: safe center;
+  gap: 0.5rem 0.85rem;
+  margin-block-end: 0.55rem;
+}
+
+.telugu-kbd-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.kbd-tablist {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.kbd-tab-btn {
+  position: relative;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  border-radius: 0.45rem 0.45rem 0 0;
+  min-block-size: 32px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.84rem;
+}
+
+.kbd-tab-btn[aria-selected="true"] {
+  color: var(--info-ink);
+  background: var(--primary-soft);
+}
+
+.kbd-tab-btn[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 3px solid var(--primary);
+}
+
+.kbd-body-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.kbd-signs-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.inscript-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  overflow-x: auto;
+}
+
+.inscript-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.3rem;
+}
+
+.kbd-key {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 2.8rem;
+  min-block-size: 2.65rem;
+  padding: 0.25rem 0.35rem 0.2rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-elevated);
+  color: var(--ink);
+  box-shadow: 0 1px 0 var(--border-strong);
+}
+
+.kbd-key-sign {
+  min-inline-size: 2.25rem;
+  min-block-size: 2.1rem;
+  background: var(--info-bg);
+  border-color: var(--info-border);
+}
+
+.kbd-key-modifier {
+  min-inline-size: 4.5rem;
+  font-weight: 600;
+  font-size: 0.8rem;
+  background: var(--surface-muted);
+}
+
+.kbd-key-modifier.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-ink);
+}
+
+.kbd-qwerty-hint {
+  position: absolute;
+  inset-block-start: 0.14rem;
+  inset-inline-start: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--ink-muted);
+  line-height: 1;
+}
+
+.kbd-primary-glyph {
+  font-family: var(--font-telugu);
+  font-size: 1.08rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.kbd-secondary-glyph {
+  position: absolute;
+  inset-block-start: 0.12rem;
+  inset-inline-end: 0.24rem;
+  font-family: var(--font-telugu);
+  font-size: 0.72rem;
+  color: var(--ink-muted);
+  line-height: 1;
+}
+
+.phonetic-composer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.phonetic-roman-input {
+  flex: 1 1 14rem;
+  min-inline-size: 12rem;
+  min-block-size: 34px;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.875rem;
+}
+
+.phonetic-preview-box {
+  min-inline-size: 8rem;
+  min-block-size: 34px;
+  padding: 0.2rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-ink);
+  font-family: var(--font-telugu);
+  font-size: 1.08rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.phonetic-grids {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.phonetic-section,
+.phonetic-varga-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.phonetic-consonant-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.85rem;
+}
+
+.phonetic-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.kbd-key-phonetic {
+  min-inline-size: 2.65rem;
+  min-block-size: 2.35rem;
+  padding: 0.15rem 0.35rem;
+  gap: 0;
+}
+
+.kbd-roman-hint {
+  font-size: 0.65rem;
+  color: var(--ink-muted);
+  line-height: 1.05;
+}
+
+@media (forced-colors: active) {
+  .kbd-tab-btn[aria-selected="true"]::after {
+    border-block-end-color: Highlight;
+  }
+
+  .telugu-kbd-dock,
+  .kbd-key,
+  .phonetic-preview-box {
+    border: 1px solid CanvasText;
   }
 }

@@ -26,6 +26,7 @@ import {
 } from "./components/OcrStatusBar";
 import { ReviewEditorPanel, type SaveEditOptions } from "./components/ReviewEditorPanel";
 import { SourcePageViewer } from "./components/SourcePageViewer";
+import { TeluguKeyboard } from "./components/TeluguKeyboard";
 import type {
   BookOCRRunSummary,
   BookSummary,
@@ -36,6 +37,12 @@ import type {
   ReviewBlock,
 } from "./types/api";
 import { formatEngineLabel, formatPageKind, formatReviewStatus } from "./utils/formatters";
+import {
+  type EditableTextElement,
+  backspaceAtCursor,
+  insertTextAtCursor,
+  isEditableTextElement,
+} from "./utils/teluguInput";
 
 export function App() {
   const [books, setBooks] = useState<BookSummary[]>([]);
@@ -54,6 +61,9 @@ export function App() {
     seq: number;
   } | null>(null);
   const syncSeqCounterRef = useRef(0);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const lastEditableRef = useRef<EditableTextElement | null>(null);
+  const [keyboardTargetLabel, setKeyboardTargetLabel] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"review" | "memory" | "export">("review");
 
   const [uploadExpanded, setUploadExpanded] = useState(true);
@@ -534,8 +544,73 @@ export function App() {
     [autoSyncBlocks, selectedBlockId, triggerSync],
   );
 
+  useEffect(() => {
+    function handleFocusIn(event: FocusEvent) {
+      const el = event.target;
+      if (isEditableTextElement(el)) {
+        lastEditableRef.current = el;
+        const label =
+          el.getAttribute("aria-label") ||
+          (el.id && document.querySelector(`label[for="${el.id}"]`)?.textContent?.trim()) ||
+          el.getAttribute("name") ||
+          "Active text box";
+        setKeyboardTargetLabel(label);
+      }
+    }
+    document.addEventListener("focusin", handleFocusIn);
+    return () => document.removeEventListener("focusin", handleFocusIn);
+  }, []);
+
+  const resolveKeyboardTarget = useCallback((): EditableTextElement | null => {
+    if (isEditableTextElement(document.activeElement)) {
+      lastEditableRef.current = document.activeElement;
+      return document.activeElement;
+    }
+    if (
+      lastEditableRef.current &&
+      isEditableTextElement(lastEditableRef.current) &&
+      lastEditableRef.current.isConnected
+    ) {
+      return lastEditableRef.current;
+    }
+    if (selectedBlockId) {
+      const escapedId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(selectedBlockId)
+          : selectedBlockId.replace(/"/g, '\\"');
+      const fallbackArea = document.querySelector<HTMLTextAreaElement>(
+        `[data-block-id="${escapedId}"] textarea.block-textarea`,
+      );
+      if (isEditableTextElement(fallbackArea)) {
+        lastEditableRef.current = fallbackArea;
+        return fallbackArea;
+      }
+    }
+    const firstArea = document.querySelector<HTMLTextAreaElement>("textarea.block-textarea");
+    if (isEditableTextElement(firstArea)) {
+      lastEditableRef.current = firstArea;
+      return firstArea;
+    }
+    return null;
+  }, [selectedBlockId]);
+
+  const handleKeyboardInsert = useCallback(
+    (text: string): boolean => {
+      const target = resolveKeyboardTarget();
+      if (!target) return false;
+      return insertTextAtCursor(target, text);
+    },
+    [resolveKeyboardTarget],
+  );
+
+  const handleKeyboardBackspace = useCallback((): boolean => {
+    const target = resolveKeyboardTarget();
+    if (!target) return false;
+    return backspaceAtCursor(target);
+  }, [resolveKeyboardTarget]);
+
   return (
-    <div className="app-shell">
+    <div className={keyboardOpen ? "app-shell has-keyboard" : "app-shell"}>
       <a href="#main-review" className="skip-link visually-hidden">
         Skip to review workspace
       </a>
@@ -555,6 +630,16 @@ export function App() {
 
         <div className="header-actions">
           <HeaderOcrStatusPill book={selectedBook} runs={mergedRuns} />
+
+          <button
+            type="button"
+            className="btn-compact"
+            aria-pressed={keyboardOpen}
+            title="Toggle on-screen Telugu InScript & Phonetic keyboard"
+            onClick={() => setKeyboardOpen((v) => !v)}
+          >
+            ⌨ Telugu Keyboard
+          </button>
 
           <nav className="segmented-nav" aria-label="Workspace views">
             <button
@@ -931,6 +1016,7 @@ export function App() {
                 ocrRunning={isOcrRunning}
                 syncTarget={syncRequest?.target === "editor" ? syncRequest : null}
                 autoSync={autoSyncBlocks}
+                keyboardOpen={keyboardOpen}
                 onQuickStartOcr={() => handleStartOcr()}
                 onSelectBlock={handleSelectFromEditor}
                 onLocateBlockOnScan={(blockId) => {
@@ -943,6 +1029,7 @@ export function App() {
                   }
                 }}
                 onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
+                onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
                 onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
                 onSaveEdit={handleSaveBlockEdit}
                 onAcceptSuggestion={handleAcceptSuggestion}
@@ -953,6 +1040,14 @@ export function App() {
           )}
         </main>
       </div>
+
+      <TeluguKeyboard
+        open={keyboardOpen}
+        onClose={() => setKeyboardOpen(false)}
+        onInsertText={handleKeyboardInsert}
+        onBackspace={handleKeyboardBackspace}
+        targetDescription={keyboardTargetLabel}
+      />
 
       <DeleteConfirmDialog
         open={deleteTarget !== null}

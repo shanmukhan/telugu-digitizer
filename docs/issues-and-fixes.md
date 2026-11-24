@@ -128,3 +128,18 @@ Added IntelliJ "Select Opened File"-style navigation between text boxes on the l
 - **Scroll completion & reduced motion (`frontend/src/utils/scrollSync.ts`, `frontend/src/styles/app.css`):**
   - Uses native scroll promises where available with a `scrollend` + idle-timer fallback (`scrollIntoViewAsync` / `scrollContainerToAsync`), pulsing `.sync-flash` highlights once scrolling settles, `prefers-reduced-motion` safety, and polite ARIA `role="status"` announcements.
 - **Tests:** `frontend/src/components/BlockSync.test.tsx`.
+
+---
+
+## 7. On-Screen Telugu InScript & Phonetic Virtual Keyboard
+
+### Feature Added
+Added a toggleable on-screen **Telugu Virtual Keyboard** dock (`⌨ Telugu Keyboard` in the top header and `⌨ Keyboard` in the Proofreading Editor toolbar) so users can edit/search Telugu text without changing OS keyboard layouts:
+- **InScript (Standard) tab** (`frontend/src/utils/teluguInscript.ts`, `frontend/src/components/TeluguKeyboard.tsx`):
+  - Complete BIS/CDAC QWERTY-mapped Telugu layout (dependent vowel signs on Normal keys, independent vowels on Shift keys, plus a 1-tap `Signs` strip for `్ ా ి ీ ు ూ ృ ె ే ై ొ ో ౌ ం ః ఁ`), `⇧ Shift`, `Space`, `⌫ Backspace`, `↵ New Line`, and an optional **Physical Keys: On/Off** capture mode.
+- **Phonetic (Type / Tap) tab** (`frontend/src/utils/teluguTranslit.ts`):
+  - Live Romanized-to-Telugu converter (`transliterateTeluguPhonetic`: e.g. `telugu` → `తెలుగు`, `pustakaM` → `పుస్తకం`, `ksha` → `క్ష`) with 1-click **Insert Telugu**, plus clickable vowel, matra, and varga consonant grids with transliteration hints.
+- **Caret-preserving React input integration** (`frontend/src/utils/teluguInput.ts`, `frontend/src/App.tsx`):
+  - Pointer clicks keep cursor focus in the active `<textarea>`/`<input>` (`onMouseDown` `preventDefault`) and update React 19 controlled values cleanly at the exact caret index (`insertTextAtCursor` / `backspaceAtCursor`), falling back cleanly to the selected OCR block when clicked after scan selection.
+  - Docked inside `.app-shell.has-keyboard` so sidebar cards and proofreading blocks remain visible and scrollable above the keyboard.
+- **Tests:** `frontend/src/components/TeluguKeyboard.test.tsx`.
