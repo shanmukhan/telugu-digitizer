@@ -148,4 +148,46 @@ describe("ReviewEditorPanel", () => {
       expect(onChangePageStatus).toHaveBeenCalledWith("approved");
     });
   });
+
+  it("preserves unsaved user draft edits when review payload refreshes for the same page", () => {
+    const { rerender } = render(
+      <ReviewEditorPanel
+        review={SAMPLE_REVIEW}
+        selectedBlockId="blk-1"
+        busyBlockId={null}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const textarea = screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "తెలుగు పుస్తకం (ఇంకా సేవ్ చేయనిది)" } });
+    expect(textarea.value).toBe("తెలుగు పుస్తకం (ఇంకా సేవ్ చేయనిది)");
+
+    // Simulate background polling refreshing the review prop with a new object reference
+    rerender(
+      <ReviewEditorPanel
+        review={{
+          ...SAMPLE_REVIEW,
+          blocks: SAMPLE_REVIEW.blocks.map((b) => ({ ...b })),
+        }}
+        selectedBlockId="blk-1"
+        busyBlockId={null}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(
+      (screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement).value,
+    ).toBe("తెలుగు పుస్తకం (ఇంకా సేవ్ చేయనిది)");
+  });
 });

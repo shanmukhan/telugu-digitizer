@@ -25,9 +25,10 @@ from src.db.models import (
 )
 from src.evaluation.metrics import normalize_nfc
 from src.services.correction_service import (
+    build_suggestion_index,
     create_correction_memory_entry,
     extract_span_and_context,
-    find_block_suggestions,
+    find_block_suggestions_from_index,
 )
 
 LOGGER = logging.getLogger("telugu_digitizer.services.review")
@@ -69,16 +70,16 @@ def _is_low_confidence(engine_name: str | None, confidence: float | None) -> boo
 def _match_comparator_block(
     primary_block: OCRBlock,
     primary_bbox: list[float] | None,
-    comparator_blocks: list[OCRBlock],
+    comparator_blocks_with_bbox: list[tuple[OCRBlock, list[float] | None]],
     fallback_idx: int,
 ) -> OCRBlock | None:
-    if not comparator_blocks:
+    _ = primary_block
+    if not comparator_blocks_with_bbox:
         return None
     if primary_bbox is not None:
         best_score = 0.0
         best_block: OCRBlock | None = None
-        for comp in comparator_blocks:
-            comp_bbox = _bbox_from_block(comp)
+        for comp, comp_bbox in comparator_blocks_with_bbox:
             if comp_bbox is None:
                 continue
             y_ov = _vertical_overlap_ratio(primary_bbox, comp_bbox)
@@ -93,8 +94,8 @@ def _match_comparator_block(
                 best_block = comp
         if best_block is not None:
             return best_block
-    if 0 <= fallback_idx < len(comparator_blocks):
-        return comparator_blocks[fallback_idx]
+    if 0 <= fallback_idx < len(comparator_blocks_with_bbox):
+        return comparator_blocks_with_bbox[fallback_idx][0]
     return None
 
 
@@ -127,20 +128,20 @@ def _get_or_create_human_draft_version(db: Session, book_id: uuid.UUID) -> Docum
 
 
 def list_book_ocr_runs(db: Session, book_id: uuid.UUID) -> list[dict[str, Any]]:
-    """List OCR runs for a book ordered newest first."""
+    """List OCR runs for a book ordered newest first using a single joined query."""
     book = db.get(Book, book_id)
     if book is None:
         raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
 
-    runs = list(
-        db.scalars(
-            select(OCRRun).where(OCRRun.book_id == book_id).order_by(OCRRun.created_at.desc())
-        ).all()
-    )
+    rows = db.execute(
+        select(OCRRun, ModelRegistry, ProcessingJob)
+        .outerjoin(ModelRegistry, OCRRun.model_registry_id == ModelRegistry.id)
+        .outerjoin(ProcessingJob, OCRRun.processing_job_id == ProcessingJob.id)
+        .where(OCRRun.book_id == book_id)
+        .order_by(OCRRun.created_at.desc())
+    ).all()
     items: list[dict[str, Any]] = []
-    for run in runs:
-        model = db.get(ModelRegistry, run.model_registry_id) if run.model_registry_id else None
-        job = db.get(ProcessingJob, run.processing_job_id) if run.processing_job_id else None
+    for run, model, job in rows:
         items.append(
             {
                 "ocr_run_id": run.id,
@@ -246,21 +247,30 @@ def get_page_review_payload(
             )
         ).all()
     )
+    by_incorrect, books_by_pair = build_suggestion_index(active_corrections, book.id)
+    comparator_blocks_with_bbox = [(comp, _bbox_from_block(comp)) for comp in comparator_blocks]
+
+    edits_by_block: dict[uuid.UUID, list[ReviewEdit]] = {}
+    if primary_blocks:
+        primary_block_ids = [b.id for b in primary_blocks]
+        all_edits = list(
+            db.scalars(
+                select(ReviewEdit)
+                .where(ReviewEdit.ocr_block_id.in_(primary_block_ids))
+                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+            ).all()
+        )
+        for edit in all_edits:
+            edits_by_block.setdefault(edit.ocr_block_id, []).append(edit)
 
     review_blocks: list[dict[str, Any]] = []
     primary_engine = primary_info["engine"] if primary_info else None
     for idx, blk in enumerate(primary_blocks):
-        edits = list(
-            db.scalars(
-                select(ReviewEdit)
-                .where(ReviewEdit.ocr_block_id == blk.id)
-                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
-            ).all()
-        )
+        edits = edits_by_block.get(blk.id, [])
         latest_edit = edits[-1] if edits else None
         current_text = latest_edit.edited_text if latest_edit else blk.raw_text
         bbox = _bbox_from_block(blk)
-        comp_block = _match_comparator_block(blk, bbox, comparator_blocks, idx)
+        comp_block = _match_comparator_block(blk, bbox, comparator_blocks_with_bbox, idx)
         comp_text = comp_block.raw_text if comp_block else None
 
         disagreement = False
@@ -269,8 +279,9 @@ def get_page_review_payload(
 
         low_conf = _is_low_confidence(primary_engine, blk.confidence)
         short_or_empty = len(blk.raw_text.strip()) <= 1
-        suggestions = find_block_suggestions(
-            active_entries=active_corrections,
+        suggestions = find_block_suggestions_from_index(
+            by_incorrect=by_incorrect,
+            books_by_pair=books_by_pair,
             block_text=current_text,
             book_id=book.id,
         )
@@ -490,30 +501,39 @@ def update_page_review_status(
                     .order_by(OCRBlock.reading_order, OCRBlock.block_index)
                 ).all()
             )
-            for blk in run_blocks:
-                existing_doc_blk = db.scalars(
-                    select(DocumentTextBlock).where(
-                        DocumentTextBlock.version_id == version.id,
-                        DocumentTextBlock.ocr_block_id == blk.id,
-                    )
-                ).first()
-                if existing_doc_blk is None:
-                    latest_edit = db.scalars(
-                        select(ReviewEdit)
-                        .where(ReviewEdit.ocr_block_id == blk.id)
-                        .order_by(ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
-                    ).first()
-                    final_txt = latest_edit.edited_text if latest_edit else blk.raw_text
-                    db.add(
-                        DocumentTextBlock(
-                            version_id=version.id,
-                            book_page_id=page.id,
-                            ocr_block_id=blk.id,
-                            final_text=final_txt,
-                            reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
-                            block_role="paragraph",
+            if run_blocks:
+                run_block_ids = [b.id for b in run_blocks]
+                existing_doc_block_ids = set(
+                    db.scalars(
+                        select(DocumentTextBlock.ocr_block_id).where(
+                            DocumentTextBlock.version_id == version.id,
+                            DocumentTextBlock.ocr_block_id.in_(run_block_ids),
                         )
-                    )
+                    ).all()
+                )
+                missing_blocks = [b for b in run_blocks if b.id not in existing_doc_block_ids]
+                if missing_blocks:
+                    missing_ids = [b.id for b in missing_blocks]
+                    latest_text_by_block: dict[uuid.UUID, str] = {}
+                    for edit in db.scalars(
+                        select(ReviewEdit)
+                        .where(ReviewEdit.ocr_block_id.in_(missing_ids))
+                        .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+                    ).all():
+                        latest_text_by_block[edit.ocr_block_id] = edit.edited_text
+
+                    for blk in missing_blocks:
+                        final_txt = latest_text_by_block.get(blk.id, blk.raw_text)
+                        db.add(
+                            DocumentTextBlock(
+                                version_id=version.id,
+                                book_page_id=page.id,
+                                ocr_block_id=blk.id,
+                                final_text=final_txt,
+                                reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
+                                block_role="paragraph",
+                            )
+                        )
 
         # If all scanned/mixed pages in the book are approved, mark the version approved.
         remaining_unapproved = db.scalar(

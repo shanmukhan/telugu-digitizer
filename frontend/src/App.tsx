@@ -90,6 +90,12 @@ export function App() {
   );
 
   const prevProgressRef = useRef<Record<string, { progress: number; status: string }>>({});
+  const selectedPageNumberRef = useRef(selectedPageNumber);
+  selectedPageNumberRef.current = selectedPageNumber;
+  const selectedPrimaryRunIdRef = useRef(selectedPrimaryRunId);
+  selectedPrimaryRunIdRef.current = selectedPrimaryRunId;
+  const reviewBlocksCountRef = useRef(0);
+  reviewBlocksCountRef.current = review?.blocks.length ?? 0;
 
   const reviewBookId = review?.book_id;
   const reviewPageCount = review?.page_count;
@@ -207,8 +213,9 @@ export function App() {
     const currentBookId = selectedBookId;
     const ids = activeRunIdsKey.split(",").filter(Boolean);
     let cancelled = false;
+    let timerId: number | undefined;
 
-    async function pollOnce() {
+    async function pollLoop() {
       try {
         const fetched = await Promise.all(ids.map((id) => getOcrRunStatus(id)));
         if (cancelled) return;
@@ -221,7 +228,8 @@ export function App() {
           return nextMap;
         });
 
-        let shouldRefreshData = false;
+        let shouldRefreshBookDetail = false;
+        let shouldRefreshCurrentPageReview = false;
         let finishedRun: OCRRunStatus | null = null;
         for (const st of fetched) {
           const prevEntry = prevProgressRef.current[st.ocr_run_id];
@@ -229,7 +237,13 @@ export function App() {
           const becameTerminal =
             st.status === "completed" || st.status === "partial" || st.status === "failed";
           if (advanced || becameTerminal) {
-            shouldRefreshData = true;
+            shouldRefreshBookDetail = true;
+          }
+          if (
+            becameTerminal ||
+            (advanced && reviewBlocksCountRef.current === 0)
+          ) {
+            shouldRefreshCurrentPageReview = true;
           }
           if (becameTerminal && (!prevEntry || prevEntry.status !== st.status)) {
             finishedRun = st;
@@ -240,9 +254,15 @@ export function App() {
           };
         }
 
-        if (shouldRefreshData && !cancelled) {
+        if (shouldRefreshBookDetail && !cancelled) {
           await refreshBookDetail(currentBookId);
-          await refreshReview(currentBookId, selectedPageNumber, selectedPrimaryRunId);
+        }
+        if (shouldRefreshCurrentPageReview && !cancelled) {
+          await refreshReview(
+            currentBookId,
+            selectedPageNumberRef.current,
+            selectedPrimaryRunIdRef.current,
+          );
         }
         if (finishedRun && !cancelled) {
           setBanner({
@@ -252,16 +272,21 @@ export function App() {
         }
       } catch {
         // Ignore transient polling hiccups.
+      } finally {
+        if (!cancelled) {
+          timerId = window.setTimeout(() => void pollLoop(), 1500);
+        }
       }
     }
 
-    void pollOnce();
-    const timer = window.setInterval(() => void pollOnce(), 1500);
+    void pollLoop();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+      }
     };
-  }, [activeRunIdsKey, selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshBookDetail, refreshReview]);
+  }, [activeRunIdsKey, selectedBookId, refreshBookDetail, refreshReview]);
 
   async function handleUpload(formData: FormData) {
     setBusyUpload(true);

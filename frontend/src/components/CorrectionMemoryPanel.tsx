@@ -14,29 +14,41 @@ export function CorrectionMemoryPanel({
   const searchId = useId();
   const statusId = useId();
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [bookOnlyFilter, setBookOnlyFilter] = useState(false);
   const [items, setItems] = useState<CorrectionMemoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await listCorrections({
-        bookId: bookOnlyFilter ? selectedBookId : null,
-        statusFilter,
-        query: query.trim() || undefined,
-      });
-      setItems(data);
-    } catch (err) {
-      onStatusBanner(
-        "error",
-        err instanceof Error ? err.message : "Failed to load correction memory.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [bookOnlyFilter, onStatusBanner, query, selectedBookId, statusFilter]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(query.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const load = useCallback(
+    async (explicitQuery?: string) => {
+      setLoading(true);
+      const effectiveQuery = explicitQuery !== undefined ? explicitQuery.trim() : debouncedQuery;
+      try {
+        const data = await listCorrections({
+          bookId: bookOnlyFilter ? selectedBookId : null,
+          statusFilter,
+          query: effectiveQuery || undefined,
+        });
+        setItems(data);
+      } catch (err) {
+        onStatusBanner(
+          "error",
+          err instanceof Error ? err.message : "Failed to load correction memory.",
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [bookOnlyFilter, debouncedQuery, onStatusBanner, selectedBookId, statusFilter],
+  );
 
   useEffect(() => {
     void load();
@@ -44,7 +56,8 @@ export function CorrectionMemoryPanel({
 
   function handleSearchSubmit(e: FormEvent) {
     e.preventDefault();
-    void load();
+    setDebouncedQuery(query.trim());
+    void load(query);
   }
 
   async function toggleStatus(

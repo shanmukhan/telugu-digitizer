@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
@@ -17,7 +17,7 @@ from src.common.logging_utils import log_event
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
 from src.db.models import Book, BookPage
-from src.pdf.rasterizer import classify_pdf_page
+from src.pdf.rasterizer import classify_and_extract_pdf_page
 
 LOGGER = logging.getLogger("telugu_digitizer.services.books")
 
@@ -119,8 +119,8 @@ def import_pdf_book(
             for zero_idx in range(page_count):
                 page_number = zero_idx + 1
                 page = doc.load_page(zero_idx)
-                page_kind, char_count, coverage = classify_pdf_page(page)
-                digital_text = page.get_text("text") if page_kind in ("digital_text", "mixed") else None
+                page_kind, char_count, coverage, extracted_text = classify_and_extract_pdf_page(page)
+                digital_text = extracted_text if page_kind in ("digital_text", "mixed") else None
 
                 pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
                 png_bytes = pix.tobytes("png")
@@ -163,26 +163,46 @@ def import_pdf_book(
     return book, False
 
 
+def _fetch_page_kind_counts(
+    db: Session,
+    book_ids: list[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, dict[str, int]]:
+    """Aggregate page classification counts per book in a single GROUP BY query."""
+    stmt = select(BookPage.book_id, BookPage.page_kind, func.count(BookPage.id)).group_by(
+        BookPage.book_id,
+        BookPage.page_kind,
+    )
+    if book_ids is not None:
+        if not book_ids:
+            return {}
+        stmt = stmt.where(BookPage.book_id.in_(book_ids))
+
+    counts_by_book: dict[uuid.UUID, dict[str, int]] = {}
+    for b_id, kind, cnt in db.execute(stmt).all():
+        bucket = counts_by_book.setdefault(b_id, {})
+        bucket[str(kind)] = int(cnt)
+    return counts_by_book
+
+
 def list_books_with_counts(db: Session) -> list[dict[str, Any]]:
-    """Return all books along with page classification counts."""
+    """Return all books along with page classification counts in 2 queries (no N+1)."""
     books = list(db.scalars(select(Book).order_by(Book.created_at.desc())).all())
-    results: list[dict[str, Any]] = []
-    for book in books:
-        pages = list(db.scalars(select(BookPage).where(BookPage.book_id == book.id)).all())
-        results.append(_serialize_book_summary(book, pages))
-    return results
+    if not books:
+        return []
+    counts_by_book = _fetch_page_kind_counts(db, [b.id for b in books])
+    return [_serialize_book_summary_from_counts(book, counts_by_book.get(book.id, {})) for book in books]
 
 
 def get_book_with_counts(db: Session, book_id: uuid.UUID) -> dict[str, Any]:
-    """Fetch a single book summary or raise 404."""
+    """Fetch a single book summary or raise 404 without loading full BookPage rows."""
     book = db.get(Book, book_id)
     if book is None:
         raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
-    pages = list(db.scalars(select(BookPage).where(BookPage.book_id == book.id)).all())
-    return _serialize_book_summary(book, pages)
+    counts_by_book = _fetch_page_kind_counts(db, [book.id])
+    return _serialize_book_summary_from_counts(book, counts_by_book.get(book.id, {}))
 
 
-def _serialize_book_summary(book: Book, pages: list[BookPage]) -> dict[str, Any]:
+def _serialize_book_summary_from_counts(book: Book, kind_counts: dict[str, int]) -> dict[str, Any]:
     return {
         "book_id": book.id,
         "title": book.title,
@@ -198,9 +218,9 @@ def _serialize_book_summary(book: Book, pages: list[BookPage]) -> dict[str, Any]
         "training_consent": book.training_consent,
         "created_at": book.created_at,
         "updated_at": book.updated_at,
-        "scanned_pages_count": sum(1 for p in pages if p.page_kind == "scanned_image"),
-        "digital_text_pages_count": sum(1 for p in pages if p.page_kind == "digital_text"),
-        "mixed_pages_count": sum(1 for p in pages if p.page_kind == "mixed"),
+        "scanned_pages_count": int(kind_counts.get("scanned_image", 0)),
+        "digital_text_pages_count": int(kind_counts.get("digital_text", 0)),
+        "mixed_pages_count": int(kind_counts.get("mixed", 0)),
     }
 
 

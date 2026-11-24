@@ -15,11 +15,10 @@ from src.common.manifest import PageManifestEntry
 LOGGER = logging.getLogger("telugu_digitizer.pdf")
 
 
-def classify_pdf_page(page: pymupdf.Page) -> tuple[str, int, float]:
-    """Classify a PDF page as 'digital_text', 'scanned_image', or 'mixed'.
+def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, str]:
+    """Classify a PDF page as 'digital_text', 'scanned_image', or 'mixed' and return extracted text.
 
-    Returns (page_kind, extracted_text_char_count, image_coverage_ratio).
-    Direct extracted text is never used as an OCR benchmark result.
+    Returns (page_kind, extracted_text_char_count, image_coverage_ratio, extracted_text).
     """
     extracted = page.get_text("text") or ""
     char_count = sum(1 for ch in extracted if not ch.isspace())
@@ -47,7 +46,17 @@ def classify_pdf_page(page: pymupdf.Page) -> tuple[str, int, float]:
     else:
         kind = "digital_text"
 
-    return kind, char_count, round(coverage, 4)
+    return kind, char_count, round(coverage, 4), extracted
+
+
+def classify_pdf_page(page: pymupdf.Page) -> tuple[str, int, float]:
+    """Classify a PDF page as 'digital_text', 'scanned_image', or 'mixed'.
+
+    Returns (page_kind, extracted_text_char_count, image_coverage_ratio).
+    Direct extracted text is never used as an OCR benchmark result.
+    """
+    kind, char_count, coverage, _ = classify_and_extract_pdf_page(page)
+    return kind, char_count, coverage
 
 
 def resolve_page_numbers(

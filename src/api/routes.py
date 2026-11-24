@@ -8,8 +8,10 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from src.api.errors import AppError
 from src.api.schemas import (
@@ -131,7 +133,8 @@ async def upload_book(
     training_consent: bool = Form(default=False),
 ) -> BookUploadResponse:
     pdf_bytes = await file.read()
-    book, duplicate = import_pdf_book(
+    book, duplicate = await run_in_threadpool(
+        import_pdf_book,
         db=db,
         storage=storage,
         settings=settings,
@@ -186,7 +189,14 @@ def get_book_pdf(
         raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
     if not storage.exists(book.source_storage_key):
         raise AppError("PDF_FILE_MISSING", "Source PDF file is missing from storage.", status_code=404)
-    return Response(content=storage.read_bytes(book.source_storage_key), media_type="application/pdf")
+    headers = {"Cache-Control": "private, max-age=3600"}
+    if book.source_sha256:
+        headers["ETag"] = f'"{book.source_sha256}"'
+    return FileResponse(
+        path=storage.resolve_key(book.source_storage_key),
+        media_type="application/pdf",
+        headers=headers,
+    )
 
 
 @router.get("/books/{book_id}/ocr-runs", response_model=BookOCRRunsResponse)
@@ -210,24 +220,42 @@ def list_book_pages(
 
     pages = list(
         db.scalars(
-            select(BookPage).where(BookPage.book_id == book_id).order_by(BookPage.page_number)
+            select(BookPage)
+            .options(defer(BookPage.digital_text_content))
+            .where(BookPage.book_id == book_id)
+            .order_by(BookPage.page_number)
         ).all()
     )
-    items = [
-        PageSummaryResponse(
-            page_id=p.id,
-            page_number=p.page_number,
-            page_kind=p.page_kind,
-            width_px=p.width_px,
-            height_px=p.height_px,
-            render_dpi=p.render_dpi,
-            extracted_text_char_count=p.extracted_text_char_count,
-            image_coverage_ratio=p.image_coverage_ratio,
-            review_status=p.review_status,
-            has_image=bool(p.image_storage_key and storage.exists(p.image_storage_key)),
+    pages_dir = storage.workspace_root / "pages" / str(book_id)
+    existing_filenames: set[str] = (
+        {entry.name for entry in pages_dir.iterdir() if entry.is_file()}
+        if pages_dir.is_dir()
+        else set()
+    )
+    expected_prefix = f"pages/{book_id}/"
+    items = []
+    for p in pages:
+        key = p.image_storage_key
+        if not key:
+            has_img = False
+        elif key.startswith(expected_prefix) and "/" not in key[len(expected_prefix) :]:
+            has_img = key[len(expected_prefix) :] in existing_filenames
+        else:
+            has_img = storage.exists(key)
+        items.append(
+            PageSummaryResponse(
+                page_id=p.id,
+                page_number=p.page_number,
+                page_kind=p.page_kind,
+                width_px=p.width_px,
+                height_px=p.height_px,
+                render_dpi=p.render_dpi,
+                extracted_text_char_count=p.extracted_text_char_count,
+                image_coverage_ratio=p.image_coverage_ratio,
+                review_status=p.review_status,
+                has_image=has_img,
+            )
         )
-        for p in pages
-    ]
     return BookPagesResponse(book_id=book.id, page_count=book.page_count, items=items)
 
 
@@ -235,13 +263,16 @@ def list_book_pages(
 def get_page_image(
     book_id: uuid.UUID,
     page_number: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
 ) -> Response:
     if page_number < 1:
         raise AppError("INVALID_PAGE_NUMBER", "page_number must be >= 1.", status_code=400)
     page = db.scalars(
-        select(BookPage).where(BookPage.book_id == book_id, BookPage.page_number == page_number)
+        select(BookPage)
+        .options(defer(BookPage.digital_text_content))
+        .where(BookPage.book_id == book_id, BookPage.page_number == page_number)
     ).first()
     if page is None:
         raise AppError(
@@ -251,7 +282,20 @@ def get_page_image(
         )
     if not page.image_storage_key or not storage.exists(page.image_storage_key):
         raise AppError("PAGE_IMAGE_NOT_FOUND", "Rendered page image is missing.", status_code=404)
-    return Response(content=storage.read_bytes(page.image_storage_key), media_type="image/png")
+
+    headers = {"Cache-Control": "private, max-age=86400"}
+    if page.image_sha256:
+        etag = f'"{page.image_sha256}"'
+        headers["ETag"] = etag
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and etag in {t.strip() for t in if_none_match.split(",")}:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+
+    return FileResponse(
+        path=storage.resolve_key(page.image_storage_key),
+        media_type="image/png",
+        headers=headers,
+    )
 
 
 @router.get("/books/{book_id}/pages/{page_number}/digital-text", response_model=DigitalTextPageResponse)
@@ -632,7 +676,7 @@ def download_export_file(
     if not storage.exists(row.storage_key):
         raise AppError("EXPORT_FILE_MISSING", "Generated export file is missing from storage.", status_code=404)
 
-    content = storage.read_bytes(row.storage_key)
+    content_path = storage.resolve_key(row.storage_key)
     media_type = (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         if row.format == "docx"
@@ -642,8 +686,8 @@ def download_export_file(
     if not ascii_fallback.strip("_."):
         ascii_fallback = f"export.{row.format}"
     disposition = f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(row.filename)}"
-    return Response(
-        content=content,
+    return FileResponse(
+        path=content_path,
         media_type=media_type,
         headers={"Content-Disposition": disposition},
     )

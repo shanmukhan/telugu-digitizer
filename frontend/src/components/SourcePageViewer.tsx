@@ -1,11 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import type { PDFDocumentProxy } from "pdfjs-dist";
 import { resolveAppUrl } from "../api/client";
 import type { ReviewBlock } from "../types/api";
 import { scrollContainerToAsync } from "../utils/scrollSync";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+let pdfjsModulePromise: Promise<typeof import("pdfjs-dist")> | null = null;
+
+async function loadPdfJs() {
+  if (!pdfjsModulePromise) {
+    pdfjsModulePromise = Promise.all([
+      import("pdfjs-dist"),
+      import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+    ]).then(([pdfjs, workerUrlMod]) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrlMod.default;
+      return pdfjs;
+    });
+  }
+  return pdfjsModulePromise;
+}
 
 interface SourcePageViewerProps {
   bookId: string;
@@ -49,6 +61,16 @@ export function SourcePageViewer({
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const syncSeqRef = useRef(0);
   const lastHandledSyncSeqRef = useRef<number | null>(null);
+  const cachedPdfDocRef = useRef<{ bookId: string; doc: PDFDocumentProxy } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (cachedPdfDocRef.current) {
+        cachedPdfDocRef.current.doc.destroy().catch(() => {});
+        cachedPdfDocRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setPageJumpInput(String(pageNumber));
@@ -120,17 +142,33 @@ export function SourcePageViewer({
     if (viewMode !== "pdfjs") return;
     let cancelled = false;
     let activeTask: { cancel: () => void } | null = null;
-    let loadedDoc: { destroy: () => Promise<void> } | null = null;
+    let loadingTask: { destroy?: () => Promise<void> } | null = null;
 
     async function renderPdfPage() {
       const canvas = canvasRef.current;
       if (!canvas) return;
       setPdfStatus("Rendering PDF via PDF.js...");
       try {
-        const loadingTask = pdfjsLib.getDocument(resolveAppUrl(`/api/v1/books/${bookId}/pdf`));
-        const pdfDoc = await loadingTask.promise;
-        loadedDoc = pdfDoc;
+        const pdfjsLib = await loadPdfJs();
         if (cancelled) return;
+
+        let pdfDoc: PDFDocumentProxy;
+        if (cachedPdfDocRef.current && cachedPdfDocRef.current.bookId === bookId) {
+          pdfDoc = cachedPdfDocRef.current.doc;
+        } else {
+          if (cachedPdfDocRef.current) {
+            cachedPdfDocRef.current.doc.destroy().catch(() => {});
+            cachedPdfDocRef.current = null;
+          }
+          const task = pdfjsLib.getDocument(resolveAppUrl(`/api/v1/books/${bookId}/pdf`));
+          loadingTask = task;
+          pdfDoc = await task.promise;
+          if (cancelled) {
+            pdfDoc.destroy().catch(() => {});
+            return;
+          }
+          cachedPdfDocRef.current = { bookId, doc: pdfDoc };
+        }
 
         const page = await pdfDoc.getPage(pageNumber);
         if (cancelled) return;
@@ -168,8 +206,8 @@ export function SourcePageViewer({
       if (activeTask) {
         activeTask.cancel();
       }
-      if (loadedDoc) {
-        loadedDoc.destroy().catch(() => {});
+      if (loadingTask && typeof loadingTask.destroy === "function" && !cachedPdfDocRef.current) {
+        loadingTask.destroy().catch(() => {});
       }
     };
   }, [bookId, pageNumber, viewMode, zoom]);

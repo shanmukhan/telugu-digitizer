@@ -127,6 +127,10 @@ class ModelRegistry(Base):
 
 class ProcessingJob(Base):
     __tablename__ = "processing_jobs"
+    __table_args__ = (
+        Index("ix_processing_jobs_book_id", "book_id"),
+        Index("ix_processing_jobs_status", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     book_id: Mapped[uuid.UUID] = mapped_column(
@@ -148,6 +152,9 @@ class ProcessingJob(Base):
 
 class OCRRun(Base):
     __tablename__ = "ocr_runs"
+    __table_args__ = (
+        Index("ix_ocr_runs_book_created", "book_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     book_id: Mapped[uuid.UUID] = mapped_column(
@@ -231,6 +238,7 @@ class CorrectionMemory(Base):
         CheckConstraint("approved_count >= 0", name="ck_correction_memory_approved_nonneg"),
         CheckConstraint("rejected_count >= 0", name="ck_correction_memory_rejected_nonneg"),
         Index("ix_correction_memory_incorrect", "language_code", "incorrect_text", "status"),
+        Index("ix_correction_memory_book_id", "book_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -304,6 +312,10 @@ class DocumentTextVersion(Base):
 
 class DocumentTextBlock(Base):
     __tablename__ = "document_text_blocks"
+    __table_args__ = (
+        Index("ix_doc_text_blocks_version_ocr_block", "version_id", "ocr_block_id"),
+        Index("ix_doc_text_blocks_version_page", "version_id", "book_page_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     version_id: Mapped[uuid.UUID] = mapped_column(

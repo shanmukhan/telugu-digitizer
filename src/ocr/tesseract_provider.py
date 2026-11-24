@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import io
 import subprocess
 import tempfile
@@ -13,6 +14,21 @@ from typing import Any
 from src.common.io import sha256_file
 from src.common.manifest import resolve_tesseract_command
 from src.ocr.base import OCRProvider
+
+
+@functools.lru_cache(maxsize=16)
+def _cached_traineddata_sha256(path_str: str, mtime_ns: int, size: int) -> str:
+    """Cache traineddata SHA-256 by resolved path, mtime, and byte size."""
+    _ = (mtime_ns, size)
+    return sha256_file(Path(path_str))
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_tesseract_version(tesseract_cmd: str) -> str:
+    """Query `tesseract --version` once per binary path."""
+    proc = subprocess.run([tesseract_cmd, "--version"], capture_output=True, check=True)
+    lines = proc.stdout.decode("utf-8", errors="replace").splitlines()
+    return lines[0].strip() if lines else "unknown"
 
 
 def parse_tesseract_tsv(tsv_text: str) -> list[dict[str, Any]]:
@@ -105,13 +121,16 @@ class TesseractOCRProvider(OCRProvider):
         self.oem = oem
         self.psm = int(psm)
         self.tesseract_cmd = resolve_tesseract_command(tesseract_cmd)
-        self.traineddata_sha256 = sha256_file(self.traineddata_path)
+        st = self.traineddata_path.stat()
+        self.traineddata_sha256 = _cached_traineddata_sha256(
+            str(self.traineddata_path.resolve()),
+            st.st_mtime_ns,
+            st.st_size,
+        )
         self._version_str = self._read_version()
 
     def _read_version(self) -> str:
-        proc = subprocess.run([self.tesseract_cmd, "--version"], capture_output=True, check=True)
-        lines = proc.stdout.decode("utf-8", errors="replace").splitlines()
-        return lines[0].strip() if lines else "unknown"
+        return _cached_tesseract_version(self.tesseract_cmd)
 
     def provider_metadata(self) -> dict[str, Any]:
         return {

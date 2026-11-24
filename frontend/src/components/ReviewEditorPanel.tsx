@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
 import { formatEngineLabel } from "../utils/formatters";
 import { scrollIntoViewAsync } from "../utils/scrollSync";
@@ -14,6 +14,305 @@ export interface SaveEditOptions {
   memoryScope?: "book_only" | "global_suggestion";
   correctionType?: string;
 }
+
+interface ReviewBlockCardProps {
+  block: ReviewBlock;
+  draftText: string;
+  isSelected: boolean;
+  isFlashing: boolean;
+  isBusy: boolean;
+  remember: boolean;
+  scope: "book_only" | "global_suggestion";
+  correctionType: string;
+  primaryEngine: string | null;
+  comparatorEngine: string | null;
+  onSelectBlock: (blockId: string) => void;
+  onLocateBlockOnScan?: (blockId: string) => void;
+  onDraftChange: (blockId: string, value: string) => void;
+  onRememberChange: (blockId: string, checked: boolean) => void;
+  onScopeChange: (blockId: string, scope: "book_only" | "global_suggestion") => void;
+  onTypeChange: (blockId: string, cType: string) => void;
+  onCommitEdit: (
+    block: ReviewBlock,
+    nextText: string,
+    action: "corrected" | "approved" | "reverted",
+    pushHistory?: boolean,
+  ) => Promise<void>;
+  onAcceptSuggestion: (
+    block: ReviewBlock,
+    suggestion: CorrectionSuggestionItem,
+  ) => Promise<void>;
+  onRejectSuggestion: (suggestionId: string) => Promise<void>;
+}
+
+const ReviewBlockCard = memo(function ReviewBlockCard({
+  block,
+  draftText,
+  isSelected,
+  isFlashing,
+  isBusy,
+  remember,
+  scope,
+  correctionType,
+  primaryEngine,
+  comparatorEngine,
+  onSelectBlock,
+  onLocateBlockOnScan,
+  onDraftChange,
+  onRememberChange,
+  onScopeChange,
+  onTypeChange,
+  onCommitEdit,
+  onAcceptSuggestion,
+  onRejectSuggestion,
+}: ReviewBlockCardProps) {
+  const isDirty = draftText !== block.current_text;
+  const isFlagged =
+    block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
+
+  return (
+    <article
+      data-block-id={block.block_id}
+      className={[
+        "block-card",
+        isFlagged ? "flagged" : "",
+        isSelected ? "selected" : "",
+        isFlashing ? "sync-flash" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onClick={() => onSelectBlock(block.block_id)}
+    >
+      <div className="badge-row">
+        <span className="badge">Line {block.block_index + 1}</span>
+        {block.confidence !== null && (
+          <span className={block.low_confidence_flag ? "badge warn" : "badge"}>
+            Conf:{" "}
+            {primaryEngine === "tesseract"
+              ? `${block.confidence.toFixed(1)}%`
+              : block.confidence.toFixed(3)}
+          </span>
+        )}
+        {block.low_confidence_flag && <span className="badge warn">⚠ Low Confidence</span>}
+        {block.disagreement_flag && (
+          <span className="badge warn">⇄ Engine Disagreement ({comparatorEngine})</span>
+        )}
+        {block.short_or_empty_flag && <span className="badge warn">! Short / Empty</span>}
+        {block.suggestions.length > 0 && (
+          <span className="badge">💡 {block.suggestions.length} Suggestion(s)</span>
+        )}
+        {block.is_edited && <span className="badge ok">✓ Edited</span>}
+        {block.latest_action === "approved" && (
+          <span className="badge ok">✓ Block Approved</span>
+        )}
+        {onLocateBlockOnScan && (
+          <button
+            type="button"
+            className="btn-compact sync-card-btn"
+            style={{ marginInlineStart: "auto" }}
+            aria-label={`Locate line ${block.block_index + 1} on scan`}
+            title="Scroll source scan to this line"
+            onClick={(e) => {
+              e.stopPropagation();
+              onLocateBlockOnScan(block.block_id);
+            }}
+          >
+            ⌖ Find on scan
+          </button>
+        )}
+      </div>
+
+      <div className="raw-ocr-box">
+        <span className="hint-text">Raw OCR (immutable): </span>
+        <span className="telugu-text" lang="te">
+          {block.raw_text}
+        </span>
+      </div>
+
+      {block.disagreement_flag && block.comparator_text !== null && (
+        <div className="comparator-box">
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: "0.5rem",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <span className="hint-text">{formatEngineLabel(comparatorEngine)} comparator: </span>
+              <span className="telugu-text" lang="te">
+                {block.comparator_text}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onDraftChange(block.block_id, block.comparator_text ?? "")}
+            >
+              Use Comparator
+            </button>
+          </div>
+        </div>
+      )}
+
+      {block.suggestions.length > 0 && (
+        <div
+          style={{
+            padding: "0.5rem",
+            border: "1px solid var(--border)",
+            borderRadius: "0.45rem",
+            background: "#faf7ef",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.45rem",
+          }}
+        >
+          <strong style={{ fontSize: "0.82rem" }}>Correction Memory Suggestions</strong>
+          {block.suggestions.map((sug) => (
+            <div
+              key={sug.correction_id}
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "0.5rem",
+                padding: "0.35rem 0.45rem",
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "0.35rem",
+              }}
+            >
+              <div>
+                <div className="telugu-text" lang="te">
+                  <span>{sug.incorrect_text}</span> → <strong>{sug.corrected_text}</strong>
+                </div>
+                <div className="badge-row">
+                  <span className="badge">{sug.scope}</span>
+                  <span className="badge">Match: {sug.context_match}</span>
+                  <span className="badge">
+                    +{sug.approved_count} / −{sug.rejected_count}
+                  </span>
+                  <span className="badge">Books: {sug.source_book_count}</span>
+                  {sug.has_conflict && <span className="badge warn">⚠ Conflict</span>}
+                </div>
+              </div>
+              <div className="badge-row">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={isBusy}
+                  onClick={() => void onAcceptSuggestion(block, sug)}
+                >
+                  Apply Suggestion
+                </button>
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => void onRejectSuggestion(sug.correction_id)}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <label htmlFor={`block-input-${block.block_id}`} className="visually-hidden">
+        Edit Telugu text for line {block.block_index + 1}
+      </label>
+      <textarea
+        id={`block-input-${block.block_id}`}
+        lang="te"
+        className="block-textarea"
+        value={draftText}
+        onFocus={() => onSelectBlock(block.block_id)}
+        onChange={(e) => onDraftChange(block.block_id, e.target.value)}
+      />
+
+      {isDirty && (
+        <div className="badge-row" style={{ paddingBlock: "0.2rem" }}>
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.35rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => onRememberChange(block.block_id, e.target.checked)}
+            />
+            Save to correction memory
+          </label>
+          {remember && (
+            <>
+              <select
+                aria-label="Correction memory scope"
+                value={scope}
+                onChange={(e) =>
+                  onScopeChange(
+                    block.block_id,
+                    e.target.value as "book_only" | "global_suggestion",
+                  )
+                }
+              >
+                <option value="book_only">Book only</option>
+                <option value="global_suggestion">Global suggestion</option>
+              </select>
+              <select
+                aria-label="Correction error type"
+                value={correctionType}
+                onChange={(e) => onTypeChange(block.block_id, e.target.value)}
+              >
+                <option value="">Category (optional)</option>
+                <option value="glyph_confusion">glyph_confusion</option>
+                <option value="vowel_sign">vowel_sign</option>
+                <option value="conjunct_or_virama">conjunct_or_virama</option>
+                <option value="word_boundary">word_boundary</option>
+                <option value="punctuation">punctuation</option>
+                <option value="numeral">numeral</option>
+              </select>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="badge-row">
+        <button
+          type="button"
+          className="primary"
+          disabled={isBusy || !isDirty}
+          onClick={() => void onCommitEdit(block, draftText, "corrected")}
+        >
+          {isBusy ? "Saving..." : "Save Correction"}
+        </button>
+        <button
+          type="button"
+          disabled={isBusy}
+          onClick={() => void onCommitEdit(block, draftText, "approved", false)}
+        >
+          Approve Block
+        </button>
+        {block.current_text !== block.raw_text && (
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() => {
+              onDraftChange(block.block_id, block.raw_text);
+              void onCommitEdit(block, block.raw_text, "reverted");
+            }}
+          >
+            Revert to Raw OCR
+          </button>
+        )}
+      </div>
+    </article>
+  );
+});
 
 interface ReviewEditorPanelProps {
   review: PageReviewPayload;
@@ -79,14 +378,61 @@ export function ReviewEditorPanel({
   const paneBodyRef = useRef<HTMLDivElement>(null);
   const syncSeqRef = useRef(0);
   const lastHandledSyncSeqRef = useRef<number | null>(null);
+  const pageContextKeyRef = useRef<string>("");
+  const serverTextsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
-    const nextDrafts: Record<string, string> = {};
+    const contextKey = `${review.book_id}:${review.page_number}:${review.primary_run_id ?? ""}`;
+    const isSamePageContext = pageContextKeyRef.current === contextKey;
+    pageContextKeyRef.current = contextKey;
+
+    const prevServerTexts = serverTextsRef.current;
+    const nextServerTexts: Record<string, string> = {};
     for (const blk of review.blocks) {
-      nextDrafts[blk.block_id] = blk.current_text;
+      nextServerTexts[blk.block_id] = blk.current_text;
     }
-    setDrafts(nextDrafts);
+    serverTextsRef.current = nextServerTexts;
+
+    setDrafts((prevDrafts) => {
+      const nextDrafts: Record<string, string> = {};
+      for (const blk of review.blocks) {
+        const existingDraft = prevDrafts[blk.block_id];
+        const prevServerText = prevServerTexts[blk.block_id];
+        // Preserve unsaved user typing if background polling refreshed the same page
+        if (
+          isSamePageContext &&
+          existingDraft !== undefined &&
+          prevServerText !== undefined &&
+          existingDraft !== prevServerText &&
+          prevServerText === blk.current_text
+        ) {
+          nextDrafts[blk.block_id] = existingDraft;
+        } else {
+          nextDrafts[blk.block_id] = blk.current_text;
+        }
+      }
+      return nextDrafts;
+    });
   }, [review.book_id, review.page_number, review.primary_run_id, review.blocks]);
+
+  const handleDraftChange = useCallback((blockId: string, value: string) => {
+    setDrafts((prev) => ({ ...prev, [blockId]: value }));
+  }, []);
+
+  const handleRememberChange = useCallback((blockId: string, checked: boolean) => {
+    setRememberByBlock((prev) => ({ ...prev, [blockId]: checked }));
+  }, []);
+
+  const handleScopeChange = useCallback(
+    (blockId: string, nextScope: "book_only" | "global_suggestion") => {
+      setScopeByBlock((prev) => ({ ...prev, [blockId]: nextScope }));
+    },
+    [],
+  );
+
+  const handleTypeChange = useCallback((blockId: string, cType: string) => {
+    setTypeByBlock((prev) => ({ ...prev, [blockId]: cType }));
+  }, []);
 
   useEffect(() => {
     setUndoStack([]);
@@ -358,264 +704,30 @@ export function ReviewEditorPanel({
           </div>
         )}
 
-        {visibleBlocks.map((block) => {
-          const draftText = drafts[block.block_id] ?? block.current_text;
-          const isDirty = draftText !== block.current_text;
-          const isSelected = block.block_id === selectedBlockId;
-          const isFlashing = block.block_id === flashingBlockId;
-          const isFlagged =
-            block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
-          const isBusy = busyBlockId === block.block_id;
-          const remember = Boolean(rememberByBlock[block.block_id]);
-          const scope = scopeByBlock[block.block_id] ?? "book_only";
-
-          return (
-            <article
-              key={block.block_id}
-              data-block-id={block.block_id}
-              className={[
-                "block-card",
-                isFlagged ? "flagged" : "",
-                isSelected ? "selected" : "",
-                isFlashing ? "sync-flash" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              onClick={() => onSelectBlock(block.block_id)}
-            >
-              <div className="badge-row">
-                <span className="badge">Line {block.block_index + 1}</span>
-                {block.confidence !== null && (
-                  <span className={block.low_confidence_flag ? "badge warn" : "badge"}>
-                    Conf: {review.primary_engine === "tesseract" ? `${block.confidence.toFixed(1)}%` : block.confidence.toFixed(3)}
-                  </span>
-                )}
-                {block.low_confidence_flag && <span className="badge warn">⚠ Low Confidence</span>}
-                {block.disagreement_flag && (
-                  <span className="badge warn">
-                    ⇄ Engine Disagreement ({review.comparator_engine})
-                  </span>
-                )}
-                {block.short_or_empty_flag && <span className="badge warn">! Short / Empty</span>}
-                {block.suggestions.length > 0 && (
-                  <span className="badge">💡 {block.suggestions.length} Suggestion(s)</span>
-                )}
-                {block.is_edited && <span className="badge ok">✓ Edited</span>}
-                {block.latest_action === "approved" && (
-                  <span className="badge ok">✓ Block Approved</span>
-                )}
-                {onLocateBlockOnScan && (
-                  <button
-                    type="button"
-                    className="btn-compact sync-card-btn"
-                    style={{ marginInlineStart: "auto" }}
-                    aria-label={`Locate line ${block.block_index + 1} on scan`}
-                    title="Scroll source scan to this line"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onLocateBlockOnScan(block.block_id);
-                    }}
-                  >
-                    ⌖ Find on scan
-                  </button>
-                )}
-              </div>
-
-              <div className="raw-ocr-box">
-                <span className="hint-text">Raw OCR (immutable): </span>
-                <span className="telugu-text" lang="te">
-                  {block.raw_text}
-                </span>
-              </div>
-
-              {block.disagreement_flag && block.comparator_text !== null && (
-                <div className="comparator-box">
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
-                    <div>
-                      <span className="hint-text">{formatEngineLabel(review.comparator_engine)} comparator: </span>
-                      <span className="telugu-text" lang="te">
-                        {block.comparator_text}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDrafts((prev) => ({
-                          ...prev,
-                          [block.block_id]: block.comparator_text ?? "",
-                        }))
-                      }
-                    >
-                      Use Comparator
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {block.suggestions.length > 0 && (
-                <div
-                  style={{
-                    padding: "0.5rem",
-                    border: "1px solid var(--border)",
-                    borderRadius: "0.45rem",
-                    background: "#faf7ef",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "0.45rem",
-                  }}
-                >
-                  <strong style={{ fontSize: "0.82rem" }}>Correction Memory Suggestions</strong>
-                  {block.suggestions.map((sug) => (
-                    <div
-                      key={sug.correction_id}
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.35rem 0.45rem",
-                        background: "var(--surface)",
-                        border: "1px solid var(--border)",
-                        borderRadius: "0.35rem",
-                      }}
-                    >
-                      <div>
-                        <div className="telugu-text" lang="te">
-                          <span>{sug.incorrect_text}</span> → <strong>{sug.corrected_text}</strong>
-                        </div>
-                        <div className="badge-row">
-                          <span className="badge">{sug.scope}</span>
-                          <span className="badge">Match: {sug.context_match}</span>
-                          <span className="badge">
-                            +{sug.approved_count} / −{sug.rejected_count}
-                          </span>
-                          <span className="badge">Books: {sug.source_book_count}</span>
-                          {sug.has_conflict && <span className="badge warn">⚠ Conflict</span>}
-                        </div>
-                      </div>
-                      <div className="badge-row">
-                        <button
-                          type="button"
-                          className="primary"
-                          disabled={isBusy}
-                          onClick={() => void onAcceptSuggestion(block, sug)}
-                        >
-                          Apply Suggestion
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void onRejectSuggestion(sug.correction_id)}
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <label htmlFor={`block-input-${block.block_id}`} className="visually-hidden">
-                Edit Telugu text for line {block.block_index + 1}
-              </label>
-              <textarea
-                id={`block-input-${block.block_id}`}
-                lang="te"
-                className="block-textarea"
-                value={draftText}
-                onFocus={() => onSelectBlock(block.block_id)}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setDrafts((prev) => ({ ...prev, [block.block_id]: val }));
-                }}
-              />
-
-              {isDirty && (
-                <div className="badge-row" style={{ paddingBlock: "0.2rem" }}>
-                  <label style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.85rem" }}>
-                    <input
-                      type="checkbox"
-                      checked={remember}
-                      onChange={(e) =>
-                        setRememberByBlock((prev) => ({
-                          ...prev,
-                          [block.block_id]: e.target.checked,
-                        }))
-                      }
-                    />
-                    Save to correction memory
-                  </label>
-                  {remember && (
-                    <>
-                      <select
-                        aria-label="Correction memory scope"
-                        value={scope}
-                        onChange={(e) =>
-                          setScopeByBlock((prev) => ({
-                            ...prev,
-                            [block.block_id]: e.target.value as "book_only" | "global_suggestion",
-                          }))
-                        }
-                      >
-                        <option value="book_only">Book only</option>
-                        <option value="global_suggestion">Global suggestion</option>
-                      </select>
-                      <select
-                        aria-label="Correction error type"
-                        value={typeByBlock[block.block_id] ?? ""}
-                        onChange={(e) =>
-                          setTypeByBlock((prev) => ({
-                            ...prev,
-                            [block.block_id]: e.target.value,
-                          }))
-                        }
-                      >
-                        <option value="">Category (optional)</option>
-                        <option value="glyph_confusion">glyph_confusion</option>
-                        <option value="vowel_sign">vowel_sign</option>
-                        <option value="conjunct_or_virama">conjunct_or_virama</option>
-                        <option value="word_boundary">word_boundary</option>
-                        <option value="punctuation">punctuation</option>
-                        <option value="numeral">numeral</option>
-                      </select>
-                    </>
-                  )}
-                </div>
-              )}
-
-              <div className="badge-row">
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={isBusy || !isDirty}
-                  onClick={() => void commitEdit(block, draftText, "corrected")}
-                >
-                  {isBusy ? "Saving..." : "Save Correction"}
-                </button>
-                <button
-                  type="button"
-                  disabled={isBusy}
-                  onClick={() => void commitEdit(block, draftText, "approved", false)}
-                >
-                  Approve Block
-                </button>
-                {block.current_text !== block.raw_text && (
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={() => {
-                      setDrafts((prev) => ({ ...prev, [block.block_id]: block.raw_text }));
-                      void commitEdit(block, block.raw_text, "reverted");
-                    }}
-                  >
-                    Revert to Raw OCR
-                  </button>
-                )}
-              </div>
-            </article>
-          );
-        })}
+        {visibleBlocks.map((block) => (
+          <ReviewBlockCard
+            key={block.block_id}
+            block={block}
+            draftText={drafts[block.block_id] ?? block.current_text}
+            isSelected={block.block_id === selectedBlockId}
+            isFlashing={block.block_id === flashingBlockId}
+            isBusy={busyBlockId === block.block_id}
+            remember={Boolean(rememberByBlock[block.block_id])}
+            scope={scopeByBlock[block.block_id] ?? "book_only"}
+            correctionType={typeByBlock[block.block_id] ?? ""}
+            primaryEngine={review.primary_engine}
+            comparatorEngine={review.comparator_engine}
+            onSelectBlock={onSelectBlock}
+            onLocateBlockOnScan={onLocateBlockOnScan}
+            onDraftChange={handleDraftChange}
+            onRememberChange={handleRememberChange}
+            onScopeChange={handleScopeChange}
+            onTypeChange={handleTypeChange}
+            onCommitEdit={commitEdit}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onRejectSuggestion={onRejectSuggestion}
+          />
+        ))}
       </div>
     </section>
   );

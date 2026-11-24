@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.api.errors import AppError
-from src.common.io import sha256_bytes
+from src.common.io import sha256_bytes, sha256_file
 from src.common.logging_utils import log_event
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
@@ -224,8 +224,30 @@ class OCRJobExecutor:
         self.settings = settings
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-worker")
         self._futures: dict[uuid.UUID, Future[Any]] = {}
+        self._providers: dict[tuple[str, int], OCRProvider] = {}
+
+    def get_provider(self, canonical_engine: str, *, tesseract_psm: int = 6) -> OCRProvider:
+        """Return a cached OCRProvider instance so warm model weights persist across runs."""
+        cache_key = (
+            canonical_engine,
+            int(tesseract_psm) if canonical_engine == "tesseract_tel_best" else 0,
+        )
+        provider = self._providers.get(cache_key)
+        if provider is None:
+            provider = build_ocr_provider(
+                canonical_engine,
+                self.settings,
+                tesseract_psm=tesseract_psm,
+            )
+            self._providers[cache_key] = provider
+        return provider
 
     def submit_runs(self, run_ids: list[uuid.UUID]) -> None:
+        # Prune older completed futures to prevent unbounded memory retention.
+        if len(self._futures) > 64:
+            done_ids = [rid for rid, f in self._futures.items() if f.done()]
+            for rid in done_ids[:-32]:
+                self._futures.pop(rid, None)
         for run_id in run_ids:
             fut = self._executor.submit(self.execute_run, run_id)
             self._futures[run_id] = fut
@@ -237,6 +259,8 @@ class OCRJobExecutor:
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
+        self._futures.clear()
+        self._providers.clear()
 
     def _ensure_page_image_path(
         self,
@@ -244,6 +268,7 @@ class OCRJobExecutor:
         book: Book,
         page: BookPage,
         requested_dpi: int,
+        open_pdf_doc: pymupdf.Document | None = None,
     ) -> tuple[Path, str, str]:
         """Resolve or deterministically render the page PNG at requested_dpi."""
         if (
@@ -252,20 +277,25 @@ class OCRJobExecutor:
             and self.storage.exists(page.image_storage_key)
         ):
             img_path = self.storage.resolve_key(page.image_storage_key)
-            img_sha = page.image_sha256 or sha256_bytes(img_path.read_bytes())
+            img_sha = page.image_sha256 or sha256_file(img_path)
             return img_path, page.image_storage_key, img_sha
 
         custom_key = f"pages/{book.id}/dpi-{requested_dpi}/page-{page.page_number:04d}.png"
         if self.storage.exists(custom_key):
             img_path = self.storage.resolve_key(custom_key)
-            return img_path, custom_key, sha256_bytes(img_path.read_bytes())
+            return img_path, custom_key, sha256_file(img_path)
 
-        source_pdf_path = self.storage.resolve_key(book.source_storage_key)
         matrix = pymupdf.Matrix(requested_dpi / 72.0, requested_dpi / 72.0)
-        with pymupdf.open(source_pdf_path) as doc:
-            pdf_page = doc.load_page(page.page_number - 1)
+        if open_pdf_doc is not None:
+            pdf_page = open_pdf_doc.load_page(page.page_number - 1)
             pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
             png_bytes = pix.tobytes("png")
+        else:
+            source_pdf_path = self.storage.resolve_key(book.source_storage_key)
+            with pymupdf.open(source_pdf_path) as doc:
+                pdf_page = doc.load_page(page.page_number - 1)
+                pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
+                png_bytes = pix.tobytes("png")
         img_path = self.storage.write_bytes(custom_key, png_bytes, read_only=False)
         return img_path, custom_key, sha256_bytes(png_bytes)
 
@@ -314,9 +344,8 @@ class OCRJobExecutor:
             db.commit()
 
             try:
-                provider = build_ocr_provider(
+                provider = self.get_provider(
                     canonical_engine,
-                    self.settings,
                     tesseract_psm=tesseract_psm,
                 )
             except Exception as exc:
@@ -333,102 +362,116 @@ class OCRJobExecutor:
             completed_pages = 0
             failed_errors: list[dict[str, Any]] = []
             engine_dir = "paddle" if canonical_engine == "paddle_ppocrv5_te" else "tesseract"
+            open_pdf_doc: pymupdf.Document | None = None
 
-            for page in target_pages:
-                existing_blocks = db.scalars(
-                    select(OCRBlock.id).where(
-                        OCRBlock.ocr_run_id == ocr_run.id,
-                        OCRBlock.book_page_id == page.id,
-                    )
-                ).first()
-                # Check if page marker file already exists (handles 0-block blank pages on resume too).
-                page_json_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/page-{page.page_number:04d}.json"
-                if existing_blocks is not None or self.storage.exists(page_json_key):
-                    completed_pages += 1
-                    if job is not None:
-                        job.progress_current = completed_pages
-                        db.commit()
-                    continue
-
-                try:
-                    img_path, img_key, img_sha = self._ensure_page_image_path(
-                        book=book,
-                        page=page,
-                        requested_dpi=render_dpi,
-                    )
-                    recognition = provider.recognize(img_path)
-
-                    raw_payload = recognition["raw_payload"]
-                    if provider.engine_name == "paddleocr":
-                        raw_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.json"
-                        self.storage.write_json(raw_key, raw_payload)
-                    else:
-                        raw_txt_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.txt"
-                        raw_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.tsv"
-                        self.storage.write_text(raw_txt_key, str(raw_payload.get("txt", "")))
-                        self.storage.write_text(raw_key, str(raw_payload.get("tsv", "")))
-
-                    structured = build_page_ocr_record(
-                        book_id=str(book.id),
-                        page_number=page.page_number,
-                        source_pdf_sha256=book.source_sha256,
-                        render_dpi=render_dpi,
-                        image_path=img_key,
-                        image_sha256=img_sha,
-                        recognition_result=recognition,
-                        raw_result_path=raw_key,
-                    )
-                    self.storage.write_json(page_json_key, structured)
-
-                    for blk in recognition["blocks"]:
-                        raw_text = str(blk["text"])
-                        db.add(
-                            OCRBlock(
-                                ocr_run_id=ocr_run.id,
-                                book_page_id=page.id,
-                                block_index=int(blk["block_index"]),
-                                block_type=str(blk.get("block_type", "text_line")),
-                                raw_text=raw_text,
-                                normalized_text=normalize_nfc(raw_text),
-                                confidence=blk.get("confidence"),
-                                polygon=blk.get("polygon"),
-                                reading_order=blk.get("reading_order"),
-                                raw_engine_payload=blk,
-                            )
+            try:
+                for page in target_pages:
+                    existing_blocks = db.scalars(
+                        select(OCRBlock.id).where(
+                            OCRBlock.ocr_run_id == ocr_run.id,
+                            OCRBlock.book_page_id == page.id,
                         )
+                    ).first()
+                    # Check if page marker file already exists (handles 0-block blank pages on resume too).
+                    page_json_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/page-{page.page_number:04d}.json"
+                    if existing_blocks is not None or self.storage.exists(page_json_key):
+                        completed_pages += 1
+                        if job is not None:
+                            job.progress_current = completed_pages
+                            db.commit()
+                        continue
 
-                    completed_pages += 1
-                    if job is not None:
-                        job.progress_current = completed_pages
-                    db.commit()
-                    log_event(
-                        LOGGER,
-                        logging.INFO,
-                        "Completed OCR page in backend job",
-                        run_id=str(ocr_run.id),
-                        book_id=str(book.id),
-                        page_number=page.page_number,
-                        engine=canonical_engine,
-                        block_count=len(recognition["blocks"]),
-                    )
-                except Exception as exc:
-                    db.rollback()
-                    err_entry = {
-                        "page_number": page.page_number,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                    failed_errors.append(err_entry)
-                    log_event(
-                        LOGGER,
-                        logging.ERROR,
-                        "Failed OCR page in backend job",
-                        run_id=str(ocr_run.id),
-                        book_id=str(book.id),
-                        page_number=page.page_number,
-                        error_type=type(exc).__name__,
-                        error_message=str(exc),
-                    )
+                    try:
+                        needs_custom_render = not (
+                            page.image_storage_key
+                            and page.render_dpi == render_dpi
+                            and self.storage.exists(page.image_storage_key)
+                        )
+                        if needs_custom_render and open_pdf_doc is None and self.storage.exists(book.source_storage_key):
+                            open_pdf_doc = pymupdf.open(self.storage.resolve_key(book.source_storage_key))
+
+                        img_path, img_key, img_sha = self._ensure_page_image_path(
+                            book=book,
+                            page=page,
+                            requested_dpi=render_dpi,
+                            open_pdf_doc=open_pdf_doc,
+                        )
+                        recognition = provider.recognize(img_path)
+
+                        raw_payload = recognition["raw_payload"]
+                        if provider.engine_name == "paddleocr":
+                            raw_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.json"
+                            self.storage.write_json(raw_key, raw_payload)
+                        else:
+                            raw_txt_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.txt"
+                            raw_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/raw/page-{page.page_number:04d}.raw.tsv"
+                            self.storage.write_text(raw_txt_key, str(raw_payload.get("txt", "")))
+                            self.storage.write_text(raw_key, str(raw_payload.get("tsv", "")))
+
+                        structured = build_page_ocr_record(
+                            book_id=str(book.id),
+                            page_number=page.page_number,
+                            source_pdf_sha256=book.source_sha256,
+                            render_dpi=render_dpi,
+                            image_path=img_key,
+                            image_sha256=img_sha,
+                            recognition_result=recognition,
+                            raw_result_path=raw_key,
+                        )
+                        self.storage.write_json(page_json_key, structured)
+
+                        for blk in recognition["blocks"]:
+                            raw_text = str(blk["text"])
+                            db.add(
+                                OCRBlock(
+                                    ocr_run_id=ocr_run.id,
+                                    book_page_id=page.id,
+                                    block_index=int(blk["block_index"]),
+                                    block_type=str(blk.get("block_type", "text_line")),
+                                    raw_text=raw_text,
+                                    normalized_text=normalize_nfc(raw_text),
+                                    confidence=blk.get("confidence"),
+                                    polygon=blk.get("polygon"),
+                                    reading_order=blk.get("reading_order"),
+                                    raw_engine_payload=blk,
+                                )
+                            )
+
+                        completed_pages += 1
+                        if job is not None:
+                            job.progress_current = completed_pages
+                        db.commit()
+                        log_event(
+                            LOGGER,
+                            logging.INFO,
+                            "Completed OCR page in backend job",
+                            run_id=str(ocr_run.id),
+                            book_id=str(book.id),
+                            page_number=page.page_number,
+                            engine=canonical_engine,
+                            block_count=len(recognition["blocks"]),
+                        )
+                    except Exception as exc:
+                        db.rollback()
+                        err_entry = {
+                            "page_number": page.page_number,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                        }
+                        failed_errors.append(err_entry)
+                        log_event(
+                            LOGGER,
+                            logging.ERROR,
+                            "Failed OCR page in backend job",
+                            run_id=str(ocr_run.id),
+                            book_id=str(book.id),
+                            page_number=page.page_number,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                        )
+            finally:
+                if open_pdf_doc is not None:
+                    open_pdf_doc.close()
 
             finished_at = datetime.now(timezone.utc)
             if not failed_errors:
@@ -556,7 +599,7 @@ def create_or_reuse_ocr_runs(
                 continue
 
         reused_all = False
-        provider = build_ocr_provider(canon, settings, tesseract_psm=tesseract_psm)
+        provider = executor.get_provider(canon, tesseract_psm=tesseract_psm)
         model_reg = get_or_create_model_registry(db, provider)
 
         job = ProcessingJob(

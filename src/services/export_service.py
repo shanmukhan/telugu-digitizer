@@ -109,20 +109,32 @@ def _select_ocr_run(
             )
         return run
 
-    runs = list(
-        db.scalars(
-            select(OCRRun)
-            .where(OCRRun.book_id == book_id, OCRRun.status.in_(["completed", "partial"]))
-            .order_by(OCRRun.created_at.desc())
-        ).all()
-    )
-    if not runs:
+    rows = db.execute(
+        select(OCRRun, ModelRegistry)
+        .outerjoin(ModelRegistry, OCRRun.model_registry_id == ModelRegistry.id)
+        .where(OCRRun.book_id == book_id, OCRRun.status.in_(["completed", "partial"]))
+        .order_by(OCRRun.created_at.desc())
+    ).all()
+    if not rows:
         return None
-    for run in runs:
-        model = db.get(ModelRegistry, run.model_registry_id) if run.model_registry_id else None
+    for run, model in rows:
         if model and model.engine_name == "paddleocr":
             return run
-    return runs[0]
+    return rows[0][0]
+
+
+def _resolve_page_pt_dims(
+    page: BookPage,
+    fallback_first_page_dims: tuple[float, float] | None,
+) -> tuple[float | None, float | None]:
+    if page.width_px and page.height_px and page.render_dpi and page.render_dpi > 0:
+        return (
+            round(float(page.width_px) * 72.0 / float(page.render_dpi), 3),
+            round(float(page.height_px) * 72.0 / float(page.render_dpi), 3),
+        )
+    if fallback_first_page_dims is not None:
+        return fallback_first_page_dims
+    return None, None
 
 
 def _collect_export_pages(
@@ -152,13 +164,36 @@ def _collect_export_pages(
         else None
     )
 
-    page_dims: dict[int, tuple[float, float]] = {}
-    if storage.exists(book.source_storage_key):
-        pdf_path = storage.resolve_key(book.source_storage_key)
-        with pymupdf.open(pdf_path) as pdf_doc:
-            for idx in range(pdf_doc.page_count):
-                rect = pdf_doc.load_page(idx).rect
-                page_dims[idx + 1] = (float(rect.width), float(rect.height))
+    fallback_first_page_dims: tuple[float, float] | None = None
+    if pages and not (pages[0].width_px and pages[0].height_px and pages[0].render_dpi):
+        if storage.exists(book.source_storage_key):
+            pdf_path = storage.resolve_key(book.source_storage_key)
+            with pymupdf.open(pdf_path) as pdf_doc:
+                if pdf_doc.page_count > 0:
+                    rect = pdf_doc.load_page(0).rect
+                    fallback_first_page_dims = (float(rect.width), float(rect.height))
+
+    blocks_by_page: dict[uuid.UUID, list[OCRBlock]] = {}
+    latest_edit_by_block: dict[uuid.UUID, str] = {}
+    if selected_run is not None:
+        all_run_blocks = list(
+            db.scalars(
+                select(OCRBlock)
+                .where(OCRBlock.ocr_run_id == selected_run.id)
+                .order_by(OCRBlock.book_page_id, OCRBlock.reading_order, OCRBlock.block_index)
+            ).all()
+        )
+        for blk in all_run_blocks:
+            blocks_by_page.setdefault(blk.book_page_id, []).append(blk)
+
+        if text_version != "raw_ocr" and all_run_blocks:
+            all_block_ids = [b.id for b in all_run_blocks]
+            for edit in db.scalars(
+                select(ReviewEdit)
+                .where(ReviewEdit.ocr_block_id.in_(all_block_ids))
+                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+            ).all():
+                latest_edit_by_block[edit.ocr_block_id] = edit.edited_text
 
     collected: list[PageExportContent] = []
     reviewed_pages: list[int] = []
@@ -166,8 +201,7 @@ def _collect_export_pages(
     total_blocks = 0
 
     for page in pages:
-        dims = page_dims.get(page.page_number)
-        width_pt, height_pt = dims if dims else (None, None)
+        width_pt, height_pt = _resolve_page_pt_dims(page, fallback_first_page_dims)
 
         if page.page_kind == "digital_text":
             lines = [ln.strip() for ln in (page.digital_text_content or "").splitlines() if ln.strip()]
@@ -191,26 +225,12 @@ def _collect_export_pages(
 
         page_blocks: list[str] = []
         if selected_run is not None:
-            ocr_blocks = list(
-                db.scalars(
-                    select(OCRBlock)
-                    .where(
-                        OCRBlock.ocr_run_id == selected_run.id,
-                        OCRBlock.book_page_id == page.id,
-                    )
-                    .order_by(OCRBlock.reading_order, OCRBlock.block_index)
-                ).all()
-            )
+            ocr_blocks = blocks_by_page.get(page.id, [])
             for blk in ocr_blocks:
                 if text_version == "raw_ocr":
                     txt = blk.raw_text
                 else:
-                    latest_edit = db.scalars(
-                        select(ReviewEdit)
-                        .where(ReviewEdit.ocr_block_id == blk.id)
-                        .order_by(ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
-                    ).first()
-                    txt = latest_edit.edited_text if latest_edit else blk.raw_text
+                    txt = latest_edit_by_block.get(blk.id, blk.raw_text)
                 if txt.strip():
                     page_blocks.append(txt)
         elif page.page_kind == "mixed" and page.digital_text_content:

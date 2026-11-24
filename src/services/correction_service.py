@@ -131,8 +131,8 @@ def create_correction_memory_entry(
             "book_id is required when scope='book_only'.",
             status_code=400,
         )
-    inc = incorrect_text.strip()
-    cor = corrected_text.strip()
+    inc = normalize_nfc(incorrect_text).strip()
+    cor = normalize_nfc(corrected_text).strip()
     if not inc or not cor:
         raise AppError(
             "INVALID_CORRECTION_TEXT",
@@ -144,8 +144,8 @@ def create_correction_memory_entry(
         language_code=language_code,
         incorrect_text=inc,
         corrected_text=cor,
-        left_context=left_context.strip() if left_context and left_context.strip() else None,
-        right_context=right_context.strip() if right_context and right_context.strip() else None,
+        left_context=normalize_nfc(left_context).strip() if left_context and left_context.strip() else None,
+        right_context=normalize_nfc(right_context).strip() if right_context and right_context.strip() else None,
         correction_type=correction_type.strip() if correction_type and correction_type.strip() else None,
         scope=scope,
         book_id=book_id,
@@ -181,14 +181,14 @@ def search_corrections(
     if not target_nfc:
         return []
 
-    rows = list(
-        db.scalars(
-            select(CorrectionMemory).where(
-                CorrectionMemory.language_code == language_code,
-                CorrectionMemory.status == "active",
-            )
-        ).all()
+    raw_trimmed = incorrect_text.strip()
+    lookup_forms = list({target_nfc, raw_trimmed})
+    stmt = select(CorrectionMemory).where(
+        CorrectionMemory.language_code == language_code,
+        CorrectionMemory.incorrect_text.in_(lookup_forms),
+        CorrectionMemory.status == "active",
     )
+    rows = list(db.scalars(stmt).all())
 
     matched: list[CorrectionMemory] = []
     for row in rows:
@@ -240,34 +240,41 @@ def search_corrections(
     return [pair[1] for pair in scored]
 
 
-def find_block_suggestions(
-    *,
+def build_suggestion_index(
     active_entries: list[CorrectionMemory],
-    block_text: str,
     book_id: uuid.UUID,
-    max_ngram: int = 4,
-) -> list[dict[str, Any]]:
-    """Find contextual correction candidates for spans inside one OCR block without mutating text."""
-    tokens = block_text.split()
-    if not tokens or not active_entries:
-        return []
-
-    visible_entries = [
-        e
-        for e in active_entries
-        if e.scope == "global_suggestion" or (e.scope == "book_only" and e.book_id == book_id)
-    ]
-    if not visible_entries:
-        return []
-
+) -> tuple[dict[str, list[CorrectionMemory]], dict[tuple[str, str], set[uuid.UUID]]]:
+    """Pre-index active correction memory entries once per page review request."""
     by_incorrect: dict[str, list[CorrectionMemory]] = {}
     books_by_pair: dict[tuple[str, str], set[uuid.UUID]] = {}
-    for entry in visible_entries:
+    for entry in active_entries:
+        if not (
+            entry.scope == "global_suggestion"
+            or (entry.scope == "book_only" and entry.book_id == book_id)
+        ):
+            continue
         inc_key = normalize_nfc(entry.incorrect_text).strip()
         cor_key = normalize_nfc(entry.corrected_text).strip()
         by_incorrect.setdefault(inc_key, []).append(entry)
         if entry.book_id is not None:
             books_by_pair.setdefault((inc_key, cor_key), set()).add(entry.book_id)
+    return by_incorrect, books_by_pair
+
+
+def find_block_suggestions_from_index(
+    *,
+    by_incorrect: dict[str, list[CorrectionMemory]],
+    books_by_pair: dict[tuple[str, str], set[uuid.UUID]],
+    block_text: str,
+    book_id: uuid.UUID,
+    max_ngram: int = 4,
+) -> list[dict[str, Any]]:
+    """Find contextual correction candidates for one block using a prebuilt suggestion index."""
+    if not by_incorrect:
+        return []
+    tokens = block_text.split()
+    if not tokens:
+        return []
 
     suggestions: list[dict[str, Any]] = []
     seen_ids: set[uuid.UUID] = set()
@@ -318,6 +325,26 @@ def find_block_suggestions(
     for s in suggestions:
         s.pop("_rank", None)
     return suggestions
+
+
+def find_block_suggestions(
+    *,
+    active_entries: list[CorrectionMemory],
+    block_text: str,
+    book_id: uuid.UUID,
+    max_ngram: int = 4,
+) -> list[dict[str, Any]]:
+    """Find contextual correction candidates for spans inside one OCR block without mutating text."""
+    if not active_entries or not block_text:
+        return []
+    by_incorrect, books_by_pair = build_suggestion_index(active_entries, book_id)
+    return find_block_suggestions_from_index(
+        by_incorrect=by_incorrect,
+        books_by_pair=books_by_pair,
+        block_text=block_text,
+        book_id=book_id,
+        max_ngram=max_ngram,
+    )
 
 
 def approve_correction(db: Session, correction_id: uuid.UUID) -> CorrectionMemory:

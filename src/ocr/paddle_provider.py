@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import os
 import time
@@ -10,6 +11,25 @@ from typing import Any
 
 from src.common.io import sha256_file
 from src.ocr.base import OCRProvider
+
+
+@functools.lru_cache(maxsize=16)
+def _cached_file_sha256(path_str: str, mtime_ns: int, size: int) -> str:
+    """Cache SHA-256 checksums of model weight files keyed by path, mtime, and size."""
+    _ = (mtime_ns, size)
+    return sha256_file(Path(path_str))
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_package_versions() -> dict[str, str | None]:
+    """Resolve paddleocr/paddlex/paddlepaddle package versions once per process."""
+    versions: dict[str, str | None] = {}
+    for pkg in ("paddleocr", "paddlex", "paddlepaddle"):
+        try:
+            versions[pkg] = importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            versions[pkg] = None
+    return versions
 
 
 def _to_json_compatible(value: Any) -> Any:
@@ -101,17 +121,16 @@ class PaddleOCRProvider(OCRProvider):
         for model_name in filter(None, (self._det_model_name, self._rec_model_name)):
             params_path = self.models_dir / model_name / "inference.pdiparams"
             if params_path.is_file():
-                checksums[model_name] = sha256_file(params_path)
+                st = params_path.stat()
+                checksums[model_name] = _cached_file_sha256(
+                    str(params_path.resolve()),
+                    st.st_mtime_ns,
+                    st.st_size,
+                )
         return checksums
 
     def _package_versions(self) -> dict[str, str | None]:
-        versions: dict[str, str | None] = {}
-        for pkg in ("paddleocr", "paddlex", "paddlepaddle"):
-            try:
-                versions[pkg] = importlib.metadata.version(pkg)
-            except importlib.metadata.PackageNotFoundError:
-                versions[pkg] = None
-        return versions
+        return dict(_cached_package_versions())
 
     def provider_metadata(self) -> dict[str, Any]:
         det_name = self._det_model_name or "PP-OCRv5_server_det"

@@ -165,6 +165,14 @@ def test_phase2_upload_ocr_idempotency_resume_and_delete(phase2_client) -> None:
     img_res = client.get(f"/api/v1/books/{book_id}/pages/1/image")
     assert img_res.status_code == 200
     assert img_res.content.startswith(b"\x89PNG")
+    assert "max-age=" in img_res.headers.get("cache-control", "")
+    img_etag = img_res.headers.get("etag")
+    assert img_etag
+    cached_img_res = client.get(
+        f"/api/v1/books/{book_id}/pages/1/image",
+        headers={"If-None-Match": img_etag},
+    )
+    assert cached_img_res.status_code == 304
 
     digital_res = client.get(f"/api/v1/books/{book_id}/pages/2/digital-text")
     assert digital_res.status_code == 200
