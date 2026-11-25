@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import importlib.metadata
 import os
+import platform
 import time
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,9 @@ class PaddleOCRProvider(OCRProvider):
         use_textline_orientation: bool = False,
         disable_model_source_check: bool = True,
         models_dir: Path | None = None,
+        cpu_threads: int | None = None,
+        text_det_limit_side_len: int | None = None,
+        text_det_limit_type: str | None = None,
     ) -> None:
         if lang != "te":
             raise ValueError(f"Phase 1 requires Telugu lang='te', got {lang!r}.")
@@ -64,6 +68,32 @@ class PaddleOCRProvider(OCRProvider):
             raise ValueError(
                 f"Phase 1 requires explicit ocr_version='PP-OCRv5' for Telugu support, got {ocr_version!r}."
             )
+
+        is_linux_arm64 = platform.system() == "Linux" and platform.machine().lower() in {
+            "aarch64",
+            "arm64",
+        }
+        if cpu_threads is None:
+            env_threads = os.environ.get("PADDLE_CPU_THREADS") or os.environ.get(
+                "PADDLE_PDX_CPU_NUM_THREADS"
+            )
+            if env_threads and env_threads.isdigit():
+                cpu_threads = max(1, int(env_threads))
+            elif is_linux_arm64:
+                # OpenBLAS-backed PaddlePaddle on ARM64 segfaults with PaddleX's default 10 threads.
+                cpu_threads = 1
+
+        if text_det_limit_side_len is None:
+            env_limit = os.environ.get("PADDLE_DET_LIMIT_SIDE_LEN")
+            if env_limit and env_limit.isdigit():
+                text_det_limit_side_len = max(320, int(env_limit))
+            elif is_linux_arm64:
+                text_det_limit_side_len = 1280
+            else:
+                text_det_limit_side_len = 1920
+
+        if text_det_limit_type is None:
+            text_det_limit_type = "max"
 
         self.lang = lang
         self.ocr_version = ocr_version
@@ -73,6 +103,9 @@ class PaddleOCRProvider(OCRProvider):
         self.use_textline_orientation = use_textline_orientation
         self.disable_model_source_check = disable_model_source_check
         self.models_dir = models_dir or (Path.home() / ".paddlex" / "official_models")
+        self.cpu_threads = cpu_threads
+        self.text_det_limit_side_len = text_det_limit_side_len
+        self.text_det_limit_type = text_det_limit_type
 
         self._ocr: Any = None
         self._cold_start_ms: float | None = None
@@ -86,18 +119,26 @@ class PaddleOCRProvider(OCRProvider):
 
         if self.disable_model_source_check and "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK" not in os.environ:
             os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+        if self.cpu_threads is not None and "PADDLE_PDX_CPU_NUM_THREADS" not in os.environ:
+            os.environ["PADDLE_PDX_CPU_NUM_THREADS"] = str(self.cpu_threads)
 
         from paddleocr import PaddleOCR
 
+        init_kwargs: dict[str, Any] = {
+            "lang": self.lang,
+            "ocr_version": self.ocr_version,
+            "device": self.device,
+            "use_doc_orientation_classify": self.use_doc_orientation_classify,
+            "use_doc_unwarping": self.use_doc_unwarping,
+            "use_textline_orientation": self.use_textline_orientation,
+            "text_det_limit_side_len": self.text_det_limit_side_len,
+            "text_det_limit_type": self.text_det_limit_type,
+        }
+        if self.cpu_threads is not None:
+            init_kwargs["cpu_threads"] = self.cpu_threads
+
         t0 = time.perf_counter()
-        ocr = PaddleOCR(
-            lang=self.lang,
-            ocr_version=self.ocr_version,
-            device=self.device,
-            use_doc_orientation_classify=self.use_doc_orientation_classify,
-            use_doc_unwarping=self.use_doc_unwarping,
-            use_textline_orientation=self.use_textline_orientation,
-        )
+        ocr = PaddleOCR(**init_kwargs)
         self._cold_start_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
         params = getattr(ocr, "_params", {}) or {}

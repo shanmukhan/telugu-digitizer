@@ -199,3 +199,75 @@ def test_phase3_review_edits_preserve_raw_ocr_and_approve_page(phase3_client) ->
     assert review_after["blocks"][0]["raw_text"] == original_raw
     assert review_after["blocks"][0]["current_text"] == corrected_text
     assert review_after["blocks"][0]["is_edited"] is True
+
+
+def test_phase3_review_prefers_populated_run_over_empty_partial_paddle_run(phase3_client) -> None:
+    """When a 0-page partial PaddleOCR run coexists with a completed Tesseract run, pick Tesseract."""
+    client, app, settings = phase3_client
+    if not (settings.tessdata_dir / "tel.traineddata").is_file():
+        pytest.skip("tel.traineddata missing.")
+
+    pdf_bytes = _build_fixture_pdf_bytes()
+    book_id = client.post(
+        "/api/v1/books",
+        files={"file": ("fallback_sample.pdf", pdf_bytes, "application/pdf")},
+        data={"title": "Fallback Engine Priority Test"},
+    ).json()["book_id"]
+
+    # Complete Tesseract run first
+    tess_resp = client.post(
+        f"/api/v1/books/{book_id}/ocr-runs",
+        json={"engines": ["tesseract_tel_best"]},
+    ).json()
+    tess_run_id = tess_resp["ocr_run_id"]
+    app.state.ocr_executor.wait_for_run(UUID(tess_run_id), timeout=30.0)
+
+    # Create a 0-progress partial PaddleOCR run record directly (simulating a crash before page 1 completed)
+    from src.db.models import ModelRegistry, OCRRun, ProcessingJob
+
+    with app.state.session_factory() as db:
+        paddle_model = ModelRegistry(
+            engine_name="paddleocr",
+            engine_version="3.7.0",
+            model_family="PP-OCRv5",
+            model_id="PP-OCRv5_server_det+te_PP-OCRv5_mobile_rec",
+        )
+        db.add(paddle_model)
+        db.flush()
+        paddle_job = ProcessingJob(
+            book_id=UUID(book_id),
+            job_type="ocr:paddle_ppocrv5_te",
+            status="partial",
+            progress_current=0,
+            progress_total=1,
+            error_details={},
+        )
+        db.add(paddle_job)
+        db.flush()
+        db.add(
+            OCRRun(
+                book_id=UUID(book_id),
+                model_registry_id=paddle_model.id,
+                processing_job_id=paddle_job.id,
+                status="partial",
+                idempotency_key="empty-partial-paddle-test",
+                error_summary="Interrupted before completion; ready to resume.",
+                config={"engine": "paddle_ppocrv5_te", "start_page": 1, "end_page": 1},
+            )
+        )
+        db.commit()
+
+    review = client.get(f"/api/v1/books/{book_id}/pages/1/review").json()
+    assert review["primary_run_id"] == tess_run_id
+    assert review["primary_engine"] == "tesseract"
+    assert len(review["blocks"]) >= 1
+
+    # Export without explicit primary_run_id also selects the completed Tesseract run instead of empty partial Paddle
+    exp = client.post(
+        f"/api/v1/books/{book_id}/exports",
+        json={"format": "txt", "layout_mode": "page_preserving", "text_version": "raw_ocr"},
+    )
+    assert exp.status_code == 201
+    dl = client.get(exp.json()["download_url"])
+    assert dl.status_code == 200
+    assert review["blocks"][0]["raw_text"] in dl.content.decode("utf-8")

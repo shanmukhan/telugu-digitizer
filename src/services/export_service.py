@@ -32,6 +32,7 @@ from src.db.models import (
     ModelRegistry,
     OCRBlock,
     OCRRun,
+    ProcessingJob,
     ReviewEdit,
 )
 from src.evaluation.metrics import normalize_nfc
@@ -118,17 +119,24 @@ def _select_ocr_run(
         return run
 
     rows = db.execute(
-        select(OCRRun, ModelRegistry)
+        select(OCRRun, ModelRegistry, ProcessingJob)
         .outerjoin(ModelRegistry, OCRRun.model_registry_id == ModelRegistry.id)
+        .outerjoin(ProcessingJob, OCRRun.processing_job_id == ProcessingJob.id)
         .where(OCRRun.book_id == book_id, OCRRun.status.in_(["completed", "partial"]))
         .order_by(OCRRun.created_at.desc())
     ).all()
     if not rows:
         return None
-    for run, model in rows:
-        if model and model.engine_name == "paddleocr":
-            return run
-    return rows[0][0]
+    best_run, _, _ = max(
+        rows,
+        key=lambda row: (
+            (row[2].progress_current if row[2] else 0) > 0 or row[0].status == "completed",
+            row[0].status == "completed",
+            bool(row[1] and row[1].engine_name == "paddleocr"),
+            row[2].progress_current if row[2] else 0,
+        ),
+    )
+    return best_run
 
 
 def _resolve_page_pt_dims(

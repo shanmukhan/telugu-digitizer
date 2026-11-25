@@ -13,7 +13,9 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
-# Hardening
+# Hardening & memory protection (prevent OOM thrashing from locking out SSH)
+MemoryHigh=3500M
+MemoryMax=4500M
 NoNewPrivileges=true
 PrivateTmp=true
 

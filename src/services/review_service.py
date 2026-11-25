@@ -193,6 +193,15 @@ def get_page_review_payload(
 
     runs_info = list_book_ocr_runs(db, book_id)
     usable_runs = [r for r in runs_info if r["status"] in ("completed", "partial")]
+    block_count_by_run: dict[uuid.UUID, int] = {}
+    if usable_runs:
+        usable_ids = [r["ocr_run_id"] for r in usable_runs]
+        counts = db.execute(
+            select(OCRBlock.ocr_run_id, func.count(OCRBlock.id))
+            .where(OCRBlock.book_page_id == page.id, OCRBlock.ocr_run_id.in_(usable_ids))
+            .group_by(OCRBlock.ocr_run_id)
+        ).all()
+        block_count_by_run = {row[0]: int(row[1]) for row in counts}
 
     primary_info: dict[str, Any] | None = None
     if primary_run_id is not None:
@@ -204,9 +213,18 @@ def get_page_review_payload(
                 status_code=404,
             )
     elif usable_runs:
-        # Prefer PaddleOCR PP-OCRv5 Telugu as primary when both engines exist.
-        paddle_runs = [r for r in usable_runs if r["engine"] == "paddleocr"]
-        primary_info = paddle_runs[0] if paddle_runs else usable_runs[0]
+        # Prefer runs that actually extracted blocks on this page (and have non-zero progress),
+        # preferring PaddleOCR PP-OCRv5 over Tesseract only when both are populated.
+        primary_info = max(
+            usable_runs,
+            key=lambda r: (
+                block_count_by_run.get(r["ocr_run_id"], 0) > 0,
+                (r.get("progress_current") or 0) > 0 or r["status"] == "completed",
+                r["engine"] == "paddleocr",
+                r["status"] == "completed",
+                r.get("progress_current") or 0,
+            ),
+        )
 
     comparator_info: dict[str, Any] | None = None
     if comparator_run_id is not None:
@@ -215,9 +233,22 @@ def get_page_review_payload(
         others = [
             r
             for r in usable_runs
-            if r["ocr_run_id"] != primary_info["ocr_run_id"] and r["engine"] != primary_info["engine"]
+            if r["ocr_run_id"] != primary_info["ocr_run_id"]
+            and r["engine"] != primary_info["engine"]
+            and (block_count_by_run.get(r["ocr_run_id"], 0) > 0 or (r.get("progress_current") or 0) > 0)
         ]
-        comparator_info = others[0] if others else None
+        comparator_info = (
+            max(
+                others,
+                key=lambda r: (
+                    block_count_by_run.get(r["ocr_run_id"], 0) > 0,
+                    r["status"] == "completed",
+                    r.get("progress_current") or 0,
+                ),
+            )
+            if others
+            else None
+        )
 
     primary_blocks: list[OCRBlock] = []
     if primary_info is not None:

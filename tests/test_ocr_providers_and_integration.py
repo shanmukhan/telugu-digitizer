@@ -33,11 +33,18 @@ def _system_telugu_font() -> str:
     return ""
 
 
-def test_paddle_provider_rejects_non_telugu_or_wrong_version() -> None:
+def test_paddle_provider_rejects_non_telugu_or_wrong_version(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         PaddleOCRProvider(lang="en", ocr_version="PP-OCRv5")
     with pytest.raises(ValueError):
         PaddleOCRProvider(lang="te", ocr_version="PP-OCRv6")
+
+    monkeypatch.setattr("src.ocr.paddle_provider.platform.system", lambda: "Linux")
+    monkeypatch.setattr("src.ocr.paddle_provider.platform.machine", lambda: "aarch64")
+    arm_provider = PaddleOCRProvider(lang="te", ocr_version="PP-OCRv5")
+    assert arm_provider.cpu_threads == 1
+    assert arm_provider.text_det_limit_type == "max"
+    assert arm_provider.text_det_limit_side_len == 1280
 
 
 def test_tesseract_tsv_parser_handles_quotes_and_missing_confidence() -> None:

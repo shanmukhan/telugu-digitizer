@@ -228,4 +228,55 @@ describe("ReviewEditorPanel", () => {
       );
     });
   });
+
+  it("shows Switch to alternate populated engine button when selected partial run has 0 blocks", () => {
+    const onSelectPrimaryRun = vi.fn();
+    render(
+      <ReviewEditorPanel
+        review={{
+          ...SAMPLE_REVIEW,
+          primary_run_id: "run-paddle-empty",
+          primary_engine: "paddleocr",
+          blocks: [],
+          available_runs: [
+            {
+              ocr_run_id: "run-paddle-empty",
+              engine: "paddleocr",
+              model_id: "PP-OCRv5_server_det+te_PP-OCRv5_mobile_rec",
+              status: "partial",
+              progress_current: 0,
+              progress_total: 15,
+              error_summary: "Interrupted before completion; ready to resume.",
+              config: {},
+              created_at: "2026-11-23T00:00:00Z",
+              completed_at: null,
+            },
+            {
+              ocr_run_id: "run-tess-done",
+              engine: "tesseract",
+              model_id: "tesseract-5-tel-best",
+              status: "completed",
+              progress_current: 15,
+              progress_total: 15,
+              config: {},
+              created_at: "2026-11-23T00:00:00Z",
+              completed_at: "2026-11-23T00:05:00Z",
+            },
+          ],
+        }}
+        selectedBlockId={null}
+        busyBlockId={null}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={onSelectPrimaryRun}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const switchBtn = screen.getByRole("button", { name: "Switch to Tesseract 5 Telugu" });
+    fireEvent.click(switchBtn);
+    expect(onSelectPrimaryRun).toHaveBeenCalledWith("run-tess-done");
+  });
 });

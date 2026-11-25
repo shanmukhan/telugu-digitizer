@@ -644,6 +644,12 @@ export function ReviewEditorPanel({
   const usableRuns = review.available_runs.filter(
     (r) => r.status === "completed" || r.status === "partial",
   );
+  const selectedRun =
+    review.available_runs.find((r) => r.ocr_run_id === review.primary_run_id) ?? null;
+  const alternatePopulatedRun =
+    usableRuns.find(
+      (r) => r.ocr_run_id !== review.primary_run_id && ((r.progress_current ?? 0) > 0 || r.status === "completed"),
+    ) ?? null;
 
   useEffect(() => {
     if (!syncTarget) return;
@@ -718,6 +724,9 @@ export function ReviewEditorPanel({
               {usableRuns.map((run) => (
                 <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
                   {formatEngineLabel(run.engine)}
+                  {run.status === "partial"
+                    ? ` (partial ${run.progress_current ?? 0}/${run.progress_total ?? "?"})`
+                    : ""}
                 </option>
               ))}
             </select>
@@ -964,18 +973,31 @@ export function ReviewEditorPanel({
             <p className="hint-text">
               {review.available_runs.length === 0
                 ? "Run OCR from the sidebar (or click below) before inspecting or exporting DOCX/TXT."
-                : "This page appears blank or had no detected text lines in the selected OCR run."}
+                : selectedRun && (selectedRun.status === "partial" || selectedRun.status === "failed") && (selectedRun.progress_current ?? 0) === 0
+                  ? `${formatEngineLabel(selectedRun.engine)} stopped before processing this page (${selectedRun.error_summary || "0 pages completed"}).`
+                  : "This page appears blank or had no detected text lines in the selected OCR run."}
             </p>
-            {review.available_runs.length === 0 && onQuickStartOcr && (
-              <button
-                type="button"
-                className="primary"
-                disabled={ocrRunning}
-                onClick={() => void onQuickStartOcr()}
-              >
-                {ocrRunning ? "OCR Running..." : "Run Selected OCR Now"}
-              </button>
-            )}
+            <div className="badge-row">
+              {alternatePopulatedRun && (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => onSelectPrimaryRun(alternatePopulatedRun.ocr_run_id)}
+                >
+                  Switch to {formatEngineLabel(alternatePopulatedRun.engine)}
+                </button>
+              )}
+              {review.available_runs.length === 0 && onQuickStartOcr && (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={ocrRunning}
+                  onClick={() => void onQuickStartOcr()}
+                >
+                  {ocrRunning ? "OCR Running..." : "Run Selected OCR Now"}
+                </button>
+              )}
+            </div>
           </div>
         )}
 

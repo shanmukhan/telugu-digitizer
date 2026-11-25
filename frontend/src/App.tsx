@@ -273,9 +273,11 @@ export function App() {
           );
         }
         if (finishedRun && !cancelled) {
+          const isZeroPartial =
+            finishedRun.status === "partial" && (finishedRun.progress_current ?? 0) === 0;
           setBanner({
-            kind: finishedRun.status === "failed" ? "error" : "success",
-            text: `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages).`,
+            kind: finishedRun.status === "failed" || isZeroPartial ? "error" : finishedRun.status === "partial" ? "info" : "success",
+            text: `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages)${finishedRun.error_summary ? `: ${finishedRun.error_summary}` : "."}`,
           });
         }
       } catch {
