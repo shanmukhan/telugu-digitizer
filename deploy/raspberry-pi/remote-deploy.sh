@@ -59,6 +59,7 @@ rsync -az --delete \
   --exclude '.pytest_cache/' \
   --exclude '__pycache__/' \
   --exclude 'frontend/node_modules/' \
+  --exclude 'mobile/' \
   --exclude 'workspace/' \
   --exclude 'artifacts/' \
   --exclude 'data/originals/' \
