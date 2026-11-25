@@ -140,13 +140,35 @@ def create_correction_memory_entry(
             status_code=400,
         )
 
+    norm_left = normalize_nfc(left_context).strip() if left_context and left_context.strip() else None
+    norm_right = normalize_nfc(right_context).strip() if right_context and right_context.strip() else None
+    norm_type = correction_type.strip() if correction_type and correction_type.strip() else None
+
+    # Deduplicate if an identical rule with the same scope/book/context already exists.
+    existing_stmt = select(CorrectionMemory).where(
+        CorrectionMemory.language_code == language_code,
+        CorrectionMemory.incorrect_text == inc,
+        CorrectionMemory.corrected_text == cor,
+        CorrectionMemory.scope == scope,
+    )
+    if scope == "book_only":
+        existing_stmt = existing_stmt.where(CorrectionMemory.book_id == book_id)
+    for candidate in db.scalars(existing_stmt).all():
+        if candidate.left_context == norm_left and candidate.right_context == norm_right:
+            candidate.approved_count += 1
+            candidate.status = "active"
+            if norm_type and not candidate.correction_type:
+                candidate.correction_type = norm_type
+            db.flush()
+            return candidate
+
     entry = CorrectionMemory(
         language_code=language_code,
         incorrect_text=inc,
         corrected_text=cor,
-        left_context=normalize_nfc(left_context).strip() if left_context and left_context.strip() else None,
-        right_context=normalize_nfc(right_context).strip() if right_context and right_context.strip() else None,
-        correction_type=correction_type.strip() if correction_type and correction_type.strip() else None,
+        left_context=norm_left,
+        right_context=norm_right,
+        correction_type=norm_type,
         scope=scope,
         book_id=book_id,
         source_ocr_block_id=source_ocr_block_id,
@@ -261,6 +283,22 @@ def build_suggestion_index(
     return by_incorrect, books_by_pair
 
 
+_EDGE_PUNCT = ".,!?;:\"'()[]{}—–-।॥"
+
+
+def _strip_edge_punctuation(span: str) -> tuple[str, str, str]:
+    """Split a token span into (leading_punct, core_text, trailing_punct)."""
+    if not span:
+        return "", "", ""
+    start = 0
+    end = len(span)
+    while start < end and span[start] in _EDGE_PUNCT:
+        start += 1
+    while end > start and span[end - 1] in _EDGE_PUNCT:
+        end -= 1
+    return span[:start], span[start:end], span[end:]
+
+
 def find_block_suggestions_from_index(
     *,
     by_incorrect: dict[str, list[CorrectionMemory]],
@@ -284,7 +322,15 @@ def find_block_suggestions_from_index(
             span_tokens = tokens[start : start + length]
             span_raw = " ".join(span_tokens)
             span_nfc = normalize_nfc(span_raw).strip()
-            candidates = by_incorrect.get(span_nfc)
+            lead_punct = ""
+            trail_punct = ""
+            lookup_key = span_nfc
+            candidates = by_incorrect.get(lookup_key)
+            if not candidates:
+                lead_punct, core_span, trail_punct = _strip_edge_punctuation(span_nfc)
+                if core_span and core_span != span_nfc:
+                    lookup_key = core_span
+                    candidates = by_incorrect.get(lookup_key)
             if not candidates:
                 continue
 
@@ -298,7 +344,8 @@ def find_block_suggestions_from_index(
                     continue
                 seen_ids.add(entry.id)
                 ctx_label, ctx_rank = _context_score(entry, left_ctx, right_ctx, book_id)
-                proposed_tokens = tokens[:start] + entry.corrected_text.split() + tokens[start + length :]
+                replacement_span = f"{lead_punct}{entry.corrected_text}{trail_punct}"
+                proposed_tokens = tokens[:start] + replacement_span.split() + tokens[start + length :]
                 proposed_block_text = " ".join(proposed_tokens)
                 cor_key = normalize_nfc(entry.corrected_text).strip()
                 suggestions.append(
@@ -315,7 +362,7 @@ def find_block_suggestions_from_index(
                         "approved_count": entry.approved_count,
                         "rejected_count": entry.rejected_count,
                         "context_match": ctx_label,
-                        "source_book_count": len(books_by_pair.get((span_nfc, cor_key), set())),
+                        "source_book_count": len(books_by_pair.get((lookup_key, cor_key), set())),
                         "has_conflict": has_conflict,
                         "proposed_block_text": proposed_block_text,
                     }
@@ -380,18 +427,33 @@ def update_correction_status(
     db: Session,
     correction_id: uuid.UUID,
     status: str,
+    scope: str | None = None,
 ) -> CorrectionMemory:
-    """Update governance state ('active' | 'disabled' | 'superseded' | 'rejected')."""
+    """Update governance state ('active' | 'disabled' | 'superseded' | 'rejected') and optional scope."""
     if status not in ALLOWED_STATUSES:
         raise AppError(
             "INVALID_CORRECTION_STATUS",
             f"Unsupported status {status!r}. Allowed: {sorted(ALLOWED_STATUSES)}.",
             status_code=400,
         )
+    if scope is not None and scope not in ALLOWED_SCOPES:
+        raise AppError(
+            "INVALID_CORRECTION_SCOPE",
+            f"Unsupported scope {scope!r}. Allowed: {sorted(ALLOWED_SCOPES)}.",
+            status_code=400,
+        )
     entry = db.get(CorrectionMemory, correction_id)
     if entry is None:
         raise AppError("CORRECTION_NOT_FOUND", f"Correction {correction_id} not found.", status_code=404)
     entry.status = status
+    if scope is not None:
+        if scope == "book_only" and entry.book_id is None:
+            raise AppError(
+                "BOOK_ID_REQUIRED",
+                "Cannot set scope='book_only' on a correction record without a source book_id.",
+                status_code=400,
+            )
+        entry.scope = scope
     db.commit()
     db.refresh(entry)
     return entry

@@ -27,6 +27,7 @@ from src.db.models import (
     Book,
     BookPage,
     DocumentExport,
+    DocumentTextBlock,
     DocumentTextVersion,
     ModelRegistry,
     OCRBlock,
@@ -43,6 +44,12 @@ ALLOWED_TEXT_VERSIONS = {"human_approved", "raw_ocr"}
 
 
 @dataclass
+class ExportBlockItem:
+    text: str
+    role: str = "paragraph"
+
+
+@dataclass
 class PageExportContent:
     page_number: int
     page_kind: str
@@ -50,6 +57,7 @@ class PageExportContent:
     width_pt: float | None
     height_pt: float | None
     blocks: list[str]
+    block_items: list[ExportBlockItem] | None = None
 
 
 def sanitize_export_stem(title: str, book_id: uuid.UUID) -> str:
@@ -175,6 +183,8 @@ def _collect_export_pages(
 
     blocks_by_page: dict[uuid.UUID, list[OCRBlock]] = {}
     latest_edit_by_block: dict[uuid.UUID, str] = {}
+    latest_action_by_block: dict[uuid.UUID, str] = {}
+    doc_block_by_ocr_id: dict[uuid.UUID, DocumentTextBlock] = {}
     if selected_run is not None:
         all_run_blocks = list(
             db.scalars(
@@ -194,6 +204,17 @@ def _collect_export_pages(
                 .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
             ).all():
                 latest_edit_by_block[edit.ocr_block_id] = edit.edited_text
+                latest_action_by_block[edit.ocr_block_id] = edit.action
+
+            if version_row is not None:
+                for dblk in db.scalars(
+                    select(DocumentTextBlock).where(
+                        DocumentTextBlock.version_id == version_row.id,
+                        DocumentTextBlock.ocr_block_id.in_(all_block_ids),
+                    )
+                ).all():
+                    if dblk.ocr_block_id is not None:
+                        doc_block_by_ocr_id[dblk.ocr_block_id] = dblk
 
     collected: list[PageExportContent] = []
     reviewed_pages: list[int] = []
@@ -214,6 +235,7 @@ def _collect_export_pages(
                     width_pt=width_pt,
                     height_pt=height_pt,
                     blocks=lines,
+                    block_items=[ExportBlockItem(text=ln, role="paragraph") for ln in lines],
                 )
             )
             reviewed_pages.append(page.page_number)
@@ -224,17 +246,32 @@ def _collect_export_pages(
             reviewed_pages.append(page.page_number)
 
         page_blocks: list[str] = []
+        page_block_items: list[ExportBlockItem] = []
         if selected_run is not None:
             ocr_blocks = blocks_by_page.get(page.id, [])
             for blk in ocr_blocks:
                 if text_version == "raw_ocr":
+                    if blk.block_type == "manual_line":
+                        continue
                     txt = blk.raw_text
+                    role = "paragraph"
                 else:
-                    txt = latest_edit_by_block.get(blk.id, blk.raw_text)
+                    dblk = doc_block_by_ocr_id.get(blk.id)
+                    action = latest_action_by_block.get(blk.id)
+                    role = dblk.block_role if dblk is not None else ("ignore" if action == "ignored" else "paragraph")
+                    if role == "ignore" or action == "ignored":
+                        continue
+                    txt = (
+                        dblk.final_text
+                        if dblk is not None
+                        else latest_edit_by_block.get(blk.id, blk.raw_text)
+                    )
                 if txt.strip():
                     page_blocks.append(txt)
+                    page_block_items.append(ExportBlockItem(text=txt, role=role))
         elif page.page_kind == "mixed" and page.digital_text_content:
             page_blocks = [ln.strip() for ln in page.digital_text_content.splitlines() if ln.strip()]
+            page_block_items = [ExportBlockItem(text=ln, role="paragraph") for ln in page_blocks]
 
         total_blocks += len(page_blocks)
         collected.append(
@@ -245,6 +282,7 @@ def _collect_export_pages(
                 width_pt=width_pt,
                 height_pt=height_pt,
                 blocks=page_blocks,
+                block_items=page_block_items,
             )
         )
 
@@ -348,11 +386,26 @@ def _build_docx_bytes(
                 marker.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 marker.paragraph_format.space_after = Pt(4)
 
-        for block_text in page.blocks:
-            p = doc.add_paragraph()
-            run = p.add_run(block_text)
-            run.font.name = font_family
-            run.font.size = Pt(body_font_size)
+        items = page.block_items or [ExportBlockItem(text=t, role="paragraph") for t in page.blocks]
+        for item in items:
+            block_text = item.text
+            if item.role == "heading_1":
+                p = doc.add_heading(level=1)
+                run = p.add_run(block_text)
+                run.font.name = font_family
+                run.font.size = Pt(20)
+                run.font.bold = True
+            elif item.role == "heading_2":
+                p = doc.add_heading(level=2)
+                run = p.add_run(block_text)
+                run.font.name = font_family
+                run.font.size = Pt(15)
+                run.font.bold = True
+            else:
+                p = doc.add_paragraph()
+                run = p.add_run(block_text)
+                run.font.name = font_family
+                run.font.size = Pt(body_font_size)
             expected_blocks.append(block_text)
 
     buf = io.BytesIO()

@@ -126,6 +126,7 @@ interface OcrProgressStripProps {
   onQuickStartSample: () => Promise<void>;
   onQuickStartFull: () => Promise<void>;
   onResumeRun: (runId: string) => Promise<void>;
+  onCancelRun?: (runId: string) => Promise<void>;
   onGoToExport: () => void;
   onGoToReview: () => void;
 }
@@ -138,6 +139,7 @@ export function OcrProgressStrip({
   onQuickStartSample,
   onQuickStartFull,
   onResumeRun,
+  onCancelRun,
   onGoToExport,
   onGoToReview,
 }: OcrProgressStripProps) {
@@ -208,6 +210,15 @@ export function OcrProgressStrip({
                 "Estimating pace after page 1 finishes..."
               )}
             </span>
+            {onCancelRun && (
+              <button
+                type="button"
+                className="danger btn-compact"
+                onClick={() => void onCancelRun(telemetry.ocrRunId)}
+              >
+                Cancel OCR
+              </button>
+            )}
           </div>
         </div>
 

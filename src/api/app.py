@@ -41,16 +41,16 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Recover any runs left in 'running' state by a previous unexpected shutdown.
+        # Recover any runs left in 'running' or 'queued' state by a previous unexpected shutdown.
         with session_factory() as db:
             db.execute(
                 update(OCRRun)
-                .where(OCRRun.status == "running")
+                .where(OCRRun.status.in_(["running", "queued"]))
                 .values(status="partial", error_summary="Interrupted before completion; ready to resume.")
             )
             db.execute(
                 update(ProcessingJob)
-                .where(ProcessingJob.status == "running")
+                .where(ProcessingJob.status.in_(["running", "queued"]))
                 .values(status="partial")
             )
             db.commit()

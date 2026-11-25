@@ -11,7 +11,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from src.common.io import atomic_write_json, atomic_write_text, sanitize_id, validate_within_workspace
-from src.pdf.rasterizer import render_pdf_pages, resolve_page_numbers
+from src.pdf.rasterizer import has_legacy_font_encoding, render_pdf_pages, resolve_page_numbers
 
 
 def _build_two_page_pdf(pdf_path: Path) -> None:
@@ -135,3 +135,11 @@ def test_render_pdf_pages_per_page_failure_does_not_abort(tmp_path: Path) -> Non
     assert entries[0].status == "failed"
     assert entries[0].error_type == "RuntimeError"
     assert entries[1].status == "rendered"
+
+
+def test_has_legacy_font_encoding_detects_non_unicode_pua_and_symbol_maps() -> None:
+    assert has_legacy_font_encoding("తెలుగు పుస్తక పరీక్ష 2026") is False
+    assert has_legacy_font_encoding("Digital born PDF text for classification verification.") is False
+    assert has_legacy_font_encoding("\ue001\ue002\ue003" * 15) is True
+    assert has_legacy_font_encoding("ÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞß" * 2) is True
+

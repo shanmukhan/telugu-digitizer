@@ -74,6 +74,16 @@ export function CorrectionMemoryPanel({
     }
   }
 
+  async function promoteToGlobal(record: CorrectionMemoryRecord) {
+    try {
+      await updateCorrectionStatus(record.correction_id, record.status, "global_suggestion");
+      onStatusBanner("success", "Promoted correction rule to global suggestion.");
+      await load();
+    } catch (err) {
+      onStatusBanner("error", err instanceof Error ? err.message : "Failed to promote correction.");
+    }
+  }
+
   // Flag conflicting mappings among active entries sharing the same incorrect_text
   const activeTargetsByIncorrect = new Map<string, Set<string>>();
   for (const item of items) {
@@ -194,21 +204,31 @@ export function CorrectionMemoryPanel({
                       +{item.approved_count} / −{item.rejected_count}
                     </td>
                     <td>
-                      {item.status === "active" ? (
-                        <button
-                          type="button"
-                          onClick={() => void toggleStatus(item, "disabled")}
-                        >
-                          Disable
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => void toggleStatus(item, "active")}
-                        >
-                          Re-enable
-                        </button>
-                      )}
+                      <div className="badge-row">
+                        {item.status === "active" ? (
+                          <button
+                            type="button"
+                            onClick={() => void toggleStatus(item, "disabled")}
+                          >
+                            Disable
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void toggleStatus(item, "active")}
+                          >
+                            Re-enable
+                          </button>
+                        )}
+                        {item.scope === "book_only" && (
+                          <button
+                            type="button"
+                            onClick={() => void promoteToGlobal(item)}
+                          >
+                            Promote to Global
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

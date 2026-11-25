@@ -39,6 +39,8 @@ ENGINE_ALIASES: dict[str, str] = {
     "tesseract_tel_best": "tesseract_tel_best",
 }
 
+ALLOWED_PREPROCESSING_PROFILES = {"none", "deskew", "contrast_clahe"}
+
 
 def canonicalize_engine_name(raw_name: str) -> str:
     """Map API engine names to canonical Phase 1/2 engine identifiers."""
@@ -225,6 +227,7 @@ class OCRJobExecutor:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-worker")
         self._futures: dict[uuid.UUID, Future[Any]] = {}
         self._providers: dict[tuple[str, int], OCRProvider] = {}
+        self._cancelled_runs: set[uuid.UUID] = set()
 
     def get_provider(self, canonical_engine: str, *, tesseract_psm: int = 6) -> OCRProvider:
         """Return a cached OCRProvider instance so warm model weights persist across runs."""
@@ -249,8 +252,16 @@ class OCRJobExecutor:
             for rid in done_ids[:-32]:
                 self._futures.pop(rid, None)
         for run_id in run_ids:
+            self._cancelled_runs.discard(run_id)
             fut = self._executor.submit(self.execute_run, run_id)
             self._futures[run_id] = fut
+
+    def cancel_run(self, run_id: uuid.UUID) -> None:
+        """Mark an active or queued run for cooperative cancellation."""
+        self._cancelled_runs.add(run_id)
+        fut = self._futures.get(run_id)
+        if fut is not None and not fut.done():
+            fut.cancel()
 
     def wait_for_run(self, run_id: uuid.UUID, timeout: float | None = 120.0) -> None:
         fut = self._futures.get(run_id)
@@ -299,6 +310,75 @@ class OCRJobExecutor:
         img_path = self.storage.write_bytes(custom_key, png_bytes, read_only=False)
         return img_path, custom_key, sha256_bytes(png_bytes)
 
+    def _apply_preprocessing_profile(
+        self,
+        *,
+        img_path: Path,
+        img_key: str,
+        img_sha: str,
+        book_id: uuid.UUID,
+        page_number: int,
+        render_dpi: int,
+        profile: str,
+    ) -> tuple[Path, str, str]:
+        """Apply optional non-destructive preprocessing without modifying the original render."""
+        if profile == "none":
+            return img_path, img_key, img_sha
+
+        derived_key = f"pages/{book_id}/pre-{profile}-dpi-{render_dpi}/page-{page_number:04d}.png"
+        if self.storage.exists(derived_key):
+            derived_path = self.storage.resolve_key(derived_key)
+            return derived_path, derived_key, sha256_file(derived_path)
+
+        import cv2
+        import numpy as np
+
+        img_bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            return img_path, img_key, img_sha
+
+        if profile == "contrast_clahe":
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            out_img = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        elif profile == "deskew":
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            inv = cv2.bitwise_not(gray)
+            thresh = cv2.threshold(inv, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+            coords = np.column_stack(np.where(thresh > 0))
+            angle = 0.0
+            if len(coords) >= 50:
+                rect_angle = float(cv2.minAreaRect(coords)[-1])
+                if rect_angle < -45:
+                    angle = -(90 + rect_angle)
+                elif rect_angle > 45:
+                    angle = 90 - rect_angle
+                else:
+                    angle = -rect_angle
+            if 0.4 <= abs(angle) <= 15.0:
+                h, w = img_bgr.shape[:2]
+                center = (w // 2, h // 2)
+                rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+                out_img = cv2.warpAffine(
+                    img_bgr,
+                    rot_mat,
+                    (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE,
+                )
+            else:
+                out_img = img_bgr
+        else:
+            return img_path, img_key, img_sha
+
+        ok, enc = cv2.imencode(".png", out_img)
+        if not ok:
+            return img_path, img_key, img_sha
+        png_bytes = enc.tobytes()
+        derived_path = self.storage.write_bytes(derived_key, png_bytes, read_only=False)
+        return derived_path, derived_key, sha256_bytes(png_bytes)
+
     def execute_run(self, run_id: uuid.UUID) -> None:
         """Execute or resume a durable OCRRun page-by-page without losing progress."""
         with self.session_factory() as db:
@@ -315,8 +395,17 @@ class OCRJobExecutor:
             start_page = int(cfg["start_page"])
             end_page = int(cfg["end_page"])
             render_dpi = int(cfg.get("render_dpi") if cfg.get("render_dpi") is not None else 300)
+            preprocessing_profile = str(cfg.get("preprocessing_profile") or "none")
             tesseract_psm = int(cfg.get("tesseract_psm") if cfg.get("tesseract_psm") is not None else 6)
             include_digital = bool(cfg.get("include_digital_text_pages", False))
+
+            if run_id in self._cancelled_runs:
+                ocr_run.status = "partial"
+                ocr_run.error_summary = "Cancelled by user; ready to resume."
+                if job is not None:
+                    job.status = "partial"
+                db.commit()
+                return
 
             target_pages = list(
                 db.scalars(
@@ -361,11 +450,16 @@ class OCRJobExecutor:
 
             completed_pages = 0
             failed_errors: list[dict[str, Any]] = []
+            was_cancelled = False
             engine_dir = "paddle" if canonical_engine == "paddle_ppocrv5_te" else "tesseract"
             open_pdf_doc: pymupdf.Document | None = None
 
             try:
                 for page in target_pages:
+                    if run_id in self._cancelled_runs:
+                        was_cancelled = True
+                        break
+
                     existing_blocks = db.scalars(
                         select(OCRBlock.id).where(
                             OCRBlock.ocr_run_id == ocr_run.id,
@@ -395,6 +489,15 @@ class OCRJobExecutor:
                             page=page,
                             requested_dpi=render_dpi,
                             open_pdf_doc=open_pdf_doc,
+                        )
+                        img_path, img_key, img_sha = self._apply_preprocessing_profile(
+                            img_path=img_path,
+                            img_key=img_key,
+                            img_sha=img_sha,
+                            book_id=book.id,
+                            page_number=page.page_number,
+                            render_dpi=render_dpi,
+                            profile=preprocessing_profile,
                         )
                         recognition = provider.recognize(img_path)
 
@@ -474,7 +577,9 @@ class OCRJobExecutor:
                     open_pdf_doc.close()
 
             finished_at = datetime.now(timezone.utc)
-            if not failed_errors:
+            if was_cancelled or run_id in self._cancelled_runs:
+                final_status = "partial"
+            elif not failed_errors:
                 final_status = "completed"
             elif completed_pages > 0:
                 final_status = "partial"
@@ -486,9 +591,12 @@ class OCRJobExecutor:
             if ocr_run is not None:
                 ocr_run.status = final_status
                 ocr_run.completed_at = finished_at
-                ocr_run.error_summary = (
-                    f"{len(failed_errors)} page(s) failed" if failed_errors else None
-                )
+                if was_cancelled or run_id in self._cancelled_runs:
+                    ocr_run.error_summary = "Cancelled by user; ready to resume."
+                else:
+                    ocr_run.error_summary = (
+                        f"{len(failed_errors)} page(s) failed" if failed_errors else None
+                    )
             if job is not None:
                 job.status = final_status
                 job.progress_current = completed_pages
@@ -513,10 +621,10 @@ def create_or_reuse_ocr_runs(
     force_rerun: bool,
 ) -> dict[str, Any]:
     """Create durable ProcessingJob + OCRRun rows or reuse matching completed runs."""
-    if preprocessing_profile != "none":
+    if preprocessing_profile not in ALLOWED_PREPROCESSING_PROFILES:
         raise AppError(
             "UNSUPPORTED_PREPROCESSING",
-            "Only preprocessing_profile='none' is enabled in Phase 2 baseline.",
+            f"Unsupported preprocessing_profile={preprocessing_profile!r}. Allowed: {sorted(ALLOWED_PREPROCESSING_PROFILES)}.",
             status_code=400,
         )
 
@@ -664,11 +772,36 @@ def resume_ocr_run(
     if ocr_run.status == "completed":
         return ocr_run
     ocr_run.status = "queued"
+    ocr_run.error_summary = None
     if ocr_run.processing_job_id:
         job = db.get(ProcessingJob, ocr_run.processing_job_id)
         if job is not None:
             job.status = "queued"
     db.commit()
     executor.submit_runs([ocr_run.id])
+    db.refresh(ocr_run)
+    return ocr_run
+
+
+def cancel_ocr_run(
+    *,
+    db: Session,
+    executor: OCRJobExecutor,
+    run_id: uuid.UUID,
+) -> OCRRun:
+    """Cancel a queued or running OCR run, preserving completed pages as 'partial'."""
+    ocr_run = db.get(OCRRun, run_id)
+    if ocr_run is None:
+        raise AppError("OCR_RUN_NOT_FOUND", f"OCR run {run_id} not found.", status_code=404)
+    if ocr_run.status in ("completed", "failed"):
+        return ocr_run
+    executor.cancel_run(ocr_run.id)
+    ocr_run.status = "partial"
+    ocr_run.error_summary = "Cancelled by user; ready to resume."
+    if ocr_run.processing_job_id:
+        job = db.get(ProcessingJob, ocr_run.processing_job_id)
+        if job is not None:
+            job.status = "partial"
+    db.commit()
     db.refresh(ocr_run)
     return ocr_run

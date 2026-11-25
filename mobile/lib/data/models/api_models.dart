@@ -404,6 +404,7 @@ class ReviewBlock {
     required this.blockIndex,
     required this.readingOrder,
     required this.blockType,
+    this.blockRole = 'paragraph',
     required this.rawText,
     required this.normalizedText,
     required this.currentText,
@@ -424,6 +425,7 @@ class ReviewBlock {
   final int blockIndex;
   final int? readingOrder;
   final String blockType;
+  final String blockRole;
   final String rawText;
   final String? normalizedText;
   final String currentText;
@@ -475,6 +477,7 @@ class ReviewBlock {
       blockIndex: (json['block_index'] as num?)?.toInt() ?? 0,
       readingOrder: (json['reading_order'] as num?)?.toInt(),
       blockType: json['block_type'] as String? ?? 'text_line',
+      blockRole: json['block_role'] as String? ?? 'paragraph',
       rawText: json['raw_text'] as String? ?? '',
       normalizedText: json['normalized_text'] as String?,
       currentText: json['current_text'] as String? ?? '',

@@ -15,6 +15,29 @@ from src.common.manifest import PageManifestEntry
 LOGGER = logging.getLogger("telugu_digitizer.pdf")
 
 
+def has_legacy_font_encoding(extracted: str) -> bool:
+    """Detect legacy non-Unicode font encodings (PUA glyphs or Anu/Shree-Lipi symbol maps).
+
+    Pages whose text layer uses Private Use Area codepoints (U+E000..U+F8FF) or
+    high-density non-Unicode symbol/Latin-1 glyph mappings cannot be used as
+    valid digital text and must be routed through visual OCR.
+    """
+    non_ws = [ch for ch in extracted if not ch.isspace()]
+    if not non_ws:
+        return False
+    pua_count = sum(1 for ch in non_ws if "\ue000" <= ch <= "\uf8ff")
+    if pua_count > 0 and (pua_count / len(non_ws)) >= 0.10:
+        return True
+    # Anu / Shree-Lipi legacy 8-bit fonts map Telugu syllables onto Latin-1 supplement (U+00A1..U+00FF)
+    # and ASCII punctuation/symbols with zero Telugu Unicode characters.
+    telugu_count = sum(1 for ch in non_ws if "\u0c00" <= ch <= "\u0c7f")
+    if telugu_count == 0:
+        latin1_sym_count = sum(1 for ch in non_ws if "\u00a1" <= ch <= "\u00ff")
+        if (latin1_sym_count / len(non_ws)) >= 0.25:
+            return True
+    return False
+
+
 def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, str]:
     """Classify a PDF page as 'digital_text', 'scanned_image', or 'mixed' and return extracted text.
 
@@ -22,6 +45,7 @@ def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, 
     """
     extracted = page.get_text("text") or ""
     char_count = sum(1 for ch in extracted if not ch.isspace())
+    legacy_encoded = has_legacy_font_encoding(extracted)
 
     page_rect = page.rect
     page_area = max(float(page_rect.width * page_rect.height), 1.0)
@@ -37,7 +61,9 @@ def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, 
     coverage = min(image_area / page_area, 1.0)
 
     has_images = len(image_infos) > 0 or len(page.get_images(full=False)) > 0
-    if char_count >= 25 and coverage < 0.15:
+    if legacy_encoded:
+        kind = "scanned_image"
+    elif char_count >= 25 and coverage < 0.15:
         kind = "digital_text"
     elif char_count >= 25 and coverage >= 0.15:
         kind = "mixed"
@@ -46,7 +72,7 @@ def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, 
     else:
         kind = "digital_text"
 
-    return kind, char_count, round(coverage, 4), extracted
+    return kind, char_count, round(coverage, 4), ("" if legacy_encoded else extracted)
 
 
 def classify_pdf_page(page: pymupdf.Page) -> tuple[str, int, float]:

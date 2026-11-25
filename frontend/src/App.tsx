@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiClientError,
   approveCorrection,
+  cancelOcrRun,
+  createManualPageBlock,
   deleteBook,
   getHostCapabilities,
   getOcrRunStatus,
@@ -13,6 +15,7 @@ import {
   resumeOcrRun,
   startOcrRun,
   submitBlockEdit,
+  updatePageDigitalText,
   updatePageReviewStatus,
   uploadBook,
 } from "./api/client";
@@ -34,6 +37,7 @@ import {
 } from "./components/StudioChrome";
 import { TeluguKeyboard } from "./components/TeluguKeyboard";
 import type {
+  BlockRole,
   BookOCRRunSummary,
   BookSummary,
   CorrectionSuggestionItem,
@@ -82,6 +86,10 @@ export function App() {
   const [capabilities, setCapabilities] = useState<HostCapabilities | null>(null);
   const [ocrStartPage, setOcrStartPage] = useState("1");
   const [ocrEndPage, setOcrEndPage] = useState("");
+  const [ocrPreprocessing, setOcrPreprocessing] = useState<"none" | "deskew" | "contrast_clahe">("none");
+  const [ocrRenderDpi, setOcrRenderDpi] = useState<number>(300);
+  const [ocrForceRerun, setOcrForceRerun] = useState<boolean>(false);
+  const [ocrIncludeDigital, setOcrIncludeDigital] = useState<boolean>(false);
   const [busyUpload, setBusyUpload] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<BookSummary | null>(null);
@@ -365,7 +373,13 @@ export function App() {
     }
 
     try {
-      const created = await startOcrRun(selectedBookId, engines, { pageRange });
+      const created = await startOcrRun(selectedBookId, engines, {
+        pageRange,
+        renderDpi: ocrRenderDpi !== 300 ? ocrRenderDpi : undefined,
+        preprocessingProfile: ocrPreprocessing !== "none" ? ocrPreprocessing : undefined,
+        forceRerun: ocrForceRerun || undefined,
+        includeDigitalTextPages: ocrIncludeDigital ? true : undefined,
+      });
       const runIdsToFetch = created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
       const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
       setLiveStatuses((prev) => {
@@ -415,10 +429,29 @@ export function App() {
     }
   }
 
+  async function handleCancelRun(runId: string) {
+    try {
+      const cancelled = await cancelOcrRun(runId);
+      setLiveStatuses((prev) => ({ ...prev, [cancelled.ocr_run_id]: cancelled }));
+      if (selectedBookId) {
+        await refreshBookDetail(selectedBookId);
+      }
+      setBanner({
+        kind: "info",
+        text: `Cancelled ${formatEngineLabel(cancelled.engine)} (${cancelled.progress_current}/${cancelled.progress_total} pages saved; ready to resume).`,
+      });
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Cancel failed.",
+      });
+    }
+  }
+
   async function handleSaveBlockEdit(
     blockId: string,
     editedText: string,
-    action: "corrected" | "approved" | "reverted",
+    action: "corrected" | "approved" | "reverted" | "ignored",
     reviewNote?: string,
     options?: SaveEditOptions,
   ) {
@@ -428,6 +461,7 @@ export function App() {
       const res = await submitBlockEdit(blockId, {
         edited_text: editedText,
         action,
+        block_role: options?.blockRole,
         review_note: reviewNote,
         add_to_correction_memory: options?.addToMemory ?? false,
         memory_scope: options?.memoryScope ?? "book_only",
@@ -521,6 +555,88 @@ export function App() {
       setBanner({
         kind: "error",
         text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Status update failed.",
+      });
+    }
+  }
+
+  async function handleAddManualBlock(text: string, blockRole: BlockRole) {
+    if (!selectedBookId) return;
+    try {
+      await createManualPageBlock(selectedBookId, selectedPageNumber, {
+        text,
+        block_role: blockRole,
+        primary_run_id: review?.primary_run_id,
+      });
+      await Promise.all([
+        refreshBookDetail(selectedBookId),
+        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+      ]);
+      setBanner({
+        kind: "success",
+        text: `Inserted manual line on Page ${selectedPageNumber}.`,
+      });
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to insert line.",
+      });
+    }
+  }
+
+  async function handleSaveDigitalText(digitalTextContent: string) {
+    if (!selectedBookId) return;
+    try {
+      await updatePageDigitalText(selectedBookId, selectedPageNumber, digitalTextContent);
+      await Promise.all([
+        refreshBookDetail(selectedBookId),
+        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+      ]);
+      setBanner({
+        kind: "success",
+        text: `Saved born-digital text for Page ${selectedPageNumber}.`,
+      });
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to save digital text.",
+      });
+    }
+  }
+
+  async function handleBatchApproveUnflagged() {
+    if (!selectedBookId || !review) return;
+    const targets = review.blocks.filter(
+      (b) =>
+        b.latest_action !== "approved" &&
+        b.latest_action !== "ignored" &&
+        !b.low_confidence_flag &&
+        !b.disagreement_flag &&
+        !b.short_or_empty_flag,
+    );
+    if (targets.length === 0) {
+      setBanner({ kind: "info", text: "All unflagged blocks on this page are already approved." });
+      return;
+    }
+    try {
+      for (const blk of targets) {
+        await submitBlockEdit(blk.block_id, {
+          edited_text: blk.current_text,
+          action: "approved",
+          block_role: blk.block_role ?? "paragraph",
+        });
+      }
+      await Promise.all([
+        refreshBookDetail(selectedBookId),
+        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+      ]);
+      setBanner({
+        kind: "success",
+        text: `Approved ${targets.length} unflagged block(s) on Page ${selectedPageNumber}.`,
+      });
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch approval failed.",
       });
     }
   }
@@ -930,6 +1046,57 @@ export function App() {
                 </p>
               </fieldset>
 
+              <details style={{ marginTop: "0.5rem" }}>
+                <summary className="hint-text" style={{ cursor: "pointer", userSelect: "none" }}>
+                  Advanced Preprocessing &amp; DPI
+                </summary>
+                <div style={{ marginTop: "0.45rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                  <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                    <span>Scan Preprocessing</span>
+                    <select
+                      aria-label="OCR preprocessing profile"
+                      value={ocrPreprocessing}
+                      onChange={(e) =>
+                        setOcrPreprocessing(e.target.value as "none" | "deskew" | "contrast_clahe")
+                      }
+                    >
+                      <option value="none">None (Raw 300 DPI scan)</option>
+                      <option value="deskew">Auto-Deskew + Contrast</option>
+                      <option value="contrast_clahe">CLAHE Adaptive Contrast + Denoise</option>
+                    </select>
+                  </label>
+                  <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                    <span>Render Resolution</span>
+                    <select
+                      aria-label="OCR render DPI"
+                      value={ocrRenderDpi}
+                      onChange={(e) => setOcrRenderDpi(Number(e.target.value))}
+                    >
+                      <option value={300}>300 DPI (Standard)</option>
+                      <option value={400}>400 DPI (Fine / Faded print)</option>
+                    </select>
+                  </label>
+                  <div className="checkbox-row">
+                    <input
+                      id="ocr-force-rerun"
+                      type="checkbox"
+                      checked={ocrForceRerun}
+                      onChange={(e) => setOcrForceRerun(e.target.checked)}
+                    />
+                    <label htmlFor="ocr-force-rerun">Force fresh OCR re-run</label>
+                  </div>
+                  <div className="checkbox-row">
+                    <input
+                      id="ocr-include-digital"
+                      type="checkbox"
+                      checked={ocrIncludeDigital}
+                      onChange={(e) => setOcrIncludeDigital(e.target.checked)}
+                    />
+                    <label htmlFor="ocr-include-digital">Include digital-text pages in visual OCR</label>
+                  </div>
+                </div>
+              </details>
+
               <div style={{ marginTop: "0.65rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
                 <button
                   type="button"
@@ -1050,6 +1217,7 @@ export function App() {
               onQuickStartSample={() => handleStartOcr("sample_5")}
               onQuickStartFull={() => handleStartOcr("full")}
               onResumeRun={handleResumeRun}
+              onCancelRun={handleCancelRun}
               onGoToExport={() => setActiveView("export")}
               onGoToReview={() => setActiveView("review")}
             />
@@ -1145,6 +1313,9 @@ export function App() {
                 onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
                 onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
                 onSaveEdit={handleSaveBlockEdit}
+                onAddManualBlock={handleAddManualBlock}
+                onSaveDigitalText={handleSaveDigitalText}
+                onBatchApproveUnflagged={handleBatchApproveUnflagged}
                 onAcceptSuggestion={handleAcceptSuggestion}
                 onRejectSuggestion={handleRejectSuggestion}
                 onChangePageStatus={handlePageStatusChange}

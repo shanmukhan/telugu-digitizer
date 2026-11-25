@@ -538,6 +538,19 @@ class _PageReviewTabViewState extends State<PageReviewTabView> {
                                           text: '✓ Approved',
                                           isOk: true,
                                         ),
+                                      if (block.latestAction == 'ignored' ||
+                                          block.blockRole == 'ignore')
+                                        const _Badge(
+                                          text: '✕ Ignored',
+                                          isWarn: true,
+                                        ),
+                                      if (block.blockRole == 'heading_1' ||
+                                          block.blockRole == 'heading_2')
+                                        _Badge(
+                                          text: block.blockRole == 'heading_1'
+                                              ? 'H1'
+                                              : 'H2',
+                                        ),
                                     ],
                                   ),
                                   const SizedBox(height: 8),
@@ -762,6 +775,19 @@ class _PageReviewTabViewState extends State<PageReviewTabView> {
                                                 ),
                                         child: const Text('Approve Block'),
                                       ),
+                                      if (block.latestAction != 'ignored' &&
+                                          block.blockRole != 'ignore')
+                                        TextButton(
+                                          onPressed: isBusy
+                                              ? null
+                                              : () => vm.saveBlockEdit(
+                                                    blockId: block.blockId,
+                                                    editedText: controller.text,
+                                                    action: 'ignored',
+                                                    blockRole: 'ignore',
+                                                  ),
+                                          child: const Text('Ignore Box'),
+                                        ),
                                       if (block.currentText != block.rawText)
                                         TextButton(
                                           onPressed: isBusy

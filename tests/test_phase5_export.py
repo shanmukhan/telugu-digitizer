@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from src.api.app import create_app
 from src.core.config import AppSettings
+from src.db.models import TrainingSample
 from src.db.session import build_engine
 
 TEST_DB_URL = os.environ.get(
@@ -272,3 +273,99 @@ def test_phase5_export_rejected_when_no_ocr_run_exists(phase5_client) -> None:
         assert export_resp.status_code == 409
         body = export_resp.json()
         assert body["error"]["code"] == "NO_OCR_RUN_AVAILABLE"
+
+
+def test_phase5_heading_roles_ignored_blocks_manual_line_and_training_crop(phase5_client) -> None:
+    """Verify semantic heading roles, ignored noisy blocks, manual line insertion, and training crop capture."""
+    from sqlalchemy import select
+
+    client, app, settings = phase5_client
+    if not (settings.tessdata_dir / "tel.traineddata").is_file():
+        pytest.skip("tel.traineddata missing.")
+
+    pdf_bytes = _build_two_page_scanned_pdf()
+    book_id = client.post(
+        "/api/v1/books",
+        files={"file": ("roles_book.pdf", pdf_bytes, "application/pdf")},
+        data={
+            "title": "శీర్షిక మరియు శిక్షణ పుస్తకం",
+            "training_consent": "true",
+        },
+    ).json()["book_id"]
+
+    run_resp = client.post(
+        f"/api/v1/books/{book_id}/ocr-runs",
+        json={
+            "engines": ["tesseract_tel_best"],
+            "preprocessing_profile": "contrast_clahe",
+        },
+    ).json()
+    app.state.ocr_executor.wait_for_run(UUID(run_resp["ocr_run_id"]), timeout=30.0)
+
+    rev_p1 = client.get(f"/api/v1/books/{book_id}/pages/1/review").json()
+    rev_p2 = client.get(f"/api/v1/books/{book_id}/pages/2/review").json()
+
+    # 1. Mark page 1 block as heading_1 and verify TrainingSample crop is captured
+    heading_text = "మొదటి అధ్యాయం: తెలుగు సాహిత్యం"
+    edit_h1 = client.post(
+        f"/api/v1/ocr-blocks/{rev_p1['blocks'][0]['block_id']}/edits",
+        json={
+            "edited_text": heading_text,
+            "action": "corrected",
+            "block_role": "heading_1",
+        },
+    )
+    assert edit_h1.status_code == 201
+    assert edit_h1.json()["block_role"] == "heading_1"
+
+    with app.state.session_factory() as db:
+        samples = list(
+            db.scalars(select(TrainingSample).where(TrainingSample.book_id == UUID(book_id))).all()
+        )
+        assert len(samples) == 1
+        assert samples[0].verified_text == heading_text
+        assert (settings.workspace_dir / samples[0].image_crop_storage_key).is_file()
+
+    # 2. Insert a manual line on page 1
+    manual_text = "ఇది మానవీయంగా జోడించిన పంక్తి."
+    manual_resp = client.post(
+        f"/api/v1/books/{book_id}/pages/1/blocks",
+        json={
+            "text": manual_text,
+            "block_role": "paragraph",
+            "primary_run_id": rev_p1["primary_run_id"],
+        },
+    )
+    assert manual_resp.status_code == 201
+
+    # 3. Mark page 2 block as ignored noise
+    ignore_resp = client.post(
+        f"/api/v1/ocr-blocks/{rev_p2['blocks'][0]['block_id']}/edits",
+        json={
+            "edited_text": rev_p2["blocks"][0]["current_text"],
+            "action": "ignored",
+            "block_role": "ignore",
+        },
+    )
+    assert ignore_resp.status_code == 201
+
+    # 4. Export human_approved DOCX and verify Heading 1 style is present, manual line is included, and ignored block is omitted
+    exp_resp = client.post(
+        f"/api/v1/books/{book_id}/exports",
+        json={
+            "format": "docx",
+            "layout_mode": "editable_flow",
+            "text_version": "human_approved",
+            "include_table_of_contents": True,
+        },
+    )
+    assert exp_resp.status_code == 201
+    dl = client.get(exp_resp.json()["download_url"])
+    doc = docx.Document(io.BytesIO(dl.content))
+    heading_paras = [p for p in doc.paragraphs if p.text == heading_text]
+    assert len(heading_paras) == 1
+    assert heading_paras[0].style.name.startswith("Heading")
+    all_texts = [p.text for p in doc.paragraphs if p.text.strip()]
+    assert manual_text in all_texts
+    assert rev_p2["blocks"][0]["current_text"] not in all_texts
+

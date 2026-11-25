@@ -99,6 +99,9 @@ class DigitizerRepository {
   Future<BookOcrRunSummary> resumeOcrRun(String runId) =>
       _apiService.resumeOcrRun(runId);
 
+  Future<BookOcrRunSummary> cancelOcrRun(String runId) =>
+      _apiService.cancelOcrRun(runId);
+
   Future<PageReviewPayload> getPageReview({
     required String bookId,
     required int pageNumber,
@@ -114,6 +117,7 @@ class DigitizerRepository {
     required String blockId,
     required String editedText,
     required String action,
+    String? blockRole,
     String? reviewNote,
     bool addToCorrectionMemory = false,
     String memoryScope = 'book_only',
@@ -123,6 +127,7 @@ class DigitizerRepository {
         blockId: blockId,
         editedText: editedText,
         action: action,
+        blockRole: blockRole,
         reviewNote: reviewNote,
         addToCorrectionMemory: addToCorrectionMemory,
         memoryScope: memoryScope,
@@ -165,10 +170,12 @@ class DigitizerRepository {
   Future<CorrectionMemoryRecord> updateCorrectionStatus({
     required String correctionId,
     required String status,
+    String? scope,
   }) =>
       _apiService.updateCorrectionStatus(
         correctionId: correctionId,
         status: status,
+        scope: scope,
       );
 
   Future<List<ExportRecord>> listBookExports(String bookId) =>

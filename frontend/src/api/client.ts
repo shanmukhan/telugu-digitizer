@@ -1,6 +1,7 @@
 import type {
   ApiErrorDetail,
   BlockEditResult,
+  BlockRole,
   BookOCRRunSummary,
   BookSummary,
   BookUploadResult,
@@ -8,6 +9,7 @@ import type {
   ExportCreatePayload,
   ExportRecord,
   HostCapabilities,
+  ManualBlockCreateResult,
   OCRRunCreateResult,
   OCRRunStatus,
   PageReviewPayload,
@@ -94,18 +96,29 @@ export async function startOcrRun(
   options?: {
     forceRerun?: boolean;
     pageRange?: { start: number; end: number } | null;
+    renderDpi?: number;
+    preprocessingProfile?: "none" | "deskew" | "contrast_clahe";
+    tesseractPsm?: number;
+    includeDigitalTextPages?: boolean;
   },
 ): Promise<OCRRunCreateResult> {
+  const body: Record<string, unknown> = {
+    engines,
+    page_range: options?.pageRange ?? null,
+    render_dpi: options?.renderDpi ?? 300,
+    preprocessing_profile: options?.preprocessingProfile ?? "none",
+    force_rerun: options?.forceRerun ?? false,
+  };
+  if (options?.tesseractPsm !== undefined) {
+    body.tesseract_psm = options.tesseractPsm;
+  }
+  if (options?.includeDigitalTextPages !== undefined) {
+    body.include_digital_text_pages = options.includeDigitalTextPages;
+  }
   return requestJson<OCRRunCreateResult>(`/api/v1/books/${bookId}/ocr-runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      engines,
-      page_range: options?.pageRange ?? null,
-      render_dpi: 300,
-      preprocessing_profile: "none",
-      force_rerun: options?.forceRerun ?? false,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -115,6 +128,10 @@ export async function getOcrRunStatus(runId: string): Promise<OCRRunStatus> {
 
 export async function resumeOcrRun(runId: string): Promise<OCRRunStatus> {
   return requestJson<OCRRunStatus>(`/api/v1/ocr-runs/${runId}/resume`, { method: "POST" });
+}
+
+export async function cancelOcrRun(runId: string): Promise<OCRRunStatus> {
+  return requestJson<OCRRunStatus>(`/api/v1/ocr-runs/${runId}/cancel`, { method: "POST" });
 }
 
 export async function getPageReview(
@@ -137,7 +154,8 @@ export async function submitBlockEdit(
   blockId: string,
   payload: {
     edited_text: string;
-    action: "corrected" | "approved" | "reverted";
+    action: "corrected" | "approved" | "reverted" | "ignored";
+    block_role?: BlockRole;
     review_note?: string;
     add_to_correction_memory?: boolean;
     memory_scope?: "book_only" | "global_suggestion";
@@ -189,11 +207,41 @@ export async function rejectCorrection(
 export async function updateCorrectionStatus(
   correctionId: string,
   status: "active" | "disabled" | "superseded" | "rejected",
+  scope?: "book_only" | "global_suggestion",
 ): Promise<CorrectionMemoryRecord> {
   return requestJson<CorrectionMemoryRecord>(`/api/v1/corrections/${correctionId}/status`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(scope ? { status, scope } : { status }),
+  });
+}
+
+export async function createManualPageBlock(
+  bookId: string,
+  pageNumber: number,
+  payload: {
+    text: string;
+    block_role?: BlockRole;
+    primary_run_id?: string | null;
+    bbox?: number[] | null;
+  },
+): Promise<ManualBlockCreateResult> {
+  return requestJson<ManualBlockCreateResult>(`/api/v1/books/${bookId}/pages/${pageNumber}/blocks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updatePageDigitalText(
+  bookId: string,
+  pageNumber: number,
+  digitalTextContent: string,
+): Promise<{ book_id: string; page_number: number; digital_text_content: string; review_status: string }> {
+  return requestJson(`/api/v1/books/${bookId}/pages/${pageNumber}/digital-text`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ digital_text_content: digitalTextContent }),
   });
 }
 

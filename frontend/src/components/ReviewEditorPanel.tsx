@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import type { CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
+import type { BlockRole, CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
 import { formatEngineLabel } from "../utils/formatters";
 import { scrollIntoViewAsync } from "../utils/scrollSync";
 
@@ -13,11 +13,13 @@ export interface SaveEditOptions {
   addToMemory?: boolean;
   memoryScope?: "book_only" | "global_suggestion";
   correctionType?: string;
+  blockRole?: BlockRole;
 }
 
 interface ReviewBlockCardProps {
   block: ReviewBlock;
   draftText: string;
+  role: BlockRole;
   isSelected: boolean;
   isFlashing: boolean;
   isBusy: boolean;
@@ -29,14 +31,16 @@ interface ReviewBlockCardProps {
   onSelectBlock: (blockId: string) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
   onDraftChange: (blockId: string, value: string) => void;
+  onRoleChange: (blockId: string, role: BlockRole) => void;
   onRememberChange: (blockId: string, checked: boolean) => void;
   onScopeChange: (blockId: string, scope: "book_only" | "global_suggestion") => void;
   onTypeChange: (blockId: string, cType: string) => void;
   onCommitEdit: (
     block: ReviewBlock,
     nextText: string,
-    action: "corrected" | "approved" | "reverted",
+    action: "corrected" | "approved" | "reverted" | "ignored",
     pushHistory?: boolean,
+    overrideRole?: BlockRole,
   ) => Promise<void>;
   onAcceptSuggestion: (
     block: ReviewBlock,
@@ -48,6 +52,7 @@ interface ReviewBlockCardProps {
 const ReviewBlockCard = memo(function ReviewBlockCard({
   block,
   draftText,
+  role,
   isSelected,
   isFlashing,
   isBusy,
@@ -59,6 +64,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   onSelectBlock,
   onLocateBlockOnScan,
   onDraftChange,
+  onRoleChange,
   onRememberChange,
   onScopeChange,
   onTypeChange,
@@ -66,9 +72,10 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   onAcceptSuggestion,
   onRejectSuggestion,
 }: ReviewBlockCardProps) {
-  const isDirty = draftText !== block.current_text;
+  const isDirty = draftText !== block.current_text || role !== (block.block_role ?? "paragraph");
   const isFlagged =
     block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
+  const isIgnored = block.latest_action === "ignored" || role === "ignore";
 
   return (
     <article
@@ -104,6 +111,10 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         {block.is_edited && <span className="badge ok">✓ Edited</span>}
         {block.latest_action === "approved" && (
           <span className="badge ok">✓ Block Approved</span>
+        )}
+        {isIgnored && <span className="badge warn">✕ Ignored in Export</span>}
+        {role !== "paragraph" && role !== "ignore" && (
+          <span className="badge">{role === "heading_1" ? "H1" : role === "heading_2" ? "H2" : "Verse"}</span>
         )}
         {onLocateBlockOnScan && (
           <button
@@ -308,6 +319,32 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         >
           Approve Block
         </button>
+        <select
+          aria-label={`Layout role for line ${block.block_index + 1}`}
+          className="toolbar-select"
+          value={role}
+          disabled={isBusy}
+          onChange={(e) => onRoleChange(block.block_id, e.target.value as BlockRole)}
+        >
+          <option value="paragraph">Paragraph</option>
+          <option value="heading_1">Heading 1 (TOC)</option>
+          <option value="heading_2">Heading 2 (TOC)</option>
+          <option value="verse">Verse / Stanza</option>
+          <option value="ignore">Ignore / Noise</option>
+        </select>
+        {!isIgnored && (
+          <button
+            type="button"
+            disabled={isBusy}
+            title="Mark this bounding box as margin noise or artifact so it is excluded from DOCX/TXT exports"
+            onClick={() => {
+              onRoleChange(block.block_id, "ignore");
+              void onCommitEdit(block, draftText, "ignored", false, "ignore");
+            }}
+          >
+            Ignore Box
+          </button>
+        )}
         {block.current_text !== block.raw_text && (
           <button
             type="button"
@@ -364,10 +401,13 @@ interface ReviewEditorPanelProps {
   onSaveEdit: (
     blockId: string,
     editedText: string,
-    action: "corrected" | "approved" | "reverted",
+    action: "corrected" | "approved" | "reverted" | "ignored",
     reviewNote?: string,
     options?: SaveEditOptions,
   ) => Promise<void>;
+  onAddManualBlock?: (text: string, blockRole: BlockRole) => Promise<void>;
+  onSaveDigitalText?: (text: string) => Promise<void>;
+  onBatchApproveUnflagged?: () => Promise<void>;
   onAcceptSuggestion: (
     block: ReviewBlock,
     suggestion: CorrectionSuggestionItem,
@@ -394,11 +434,15 @@ export function ReviewEditorPanel({
   onSelectPrimaryRun,
   onQuickStartOcr,
   onSaveEdit,
+  onAddManualBlock,
+  onSaveDigitalText,
+  onBatchApproveUnflagged,
   onAcceptSuggestion,
   onRejectSuggestion,
   onChangePageStatus,
 }: ReviewEditorPanelProps) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [roleByBlock, setRoleByBlock] = useState<Record<string, BlockRole>>({});
   const [rememberByBlock, setRememberByBlock] = useState<Record<string, boolean>>({});
   const [scopeByBlock, setScopeByBlock] = useState<Record<string, "book_only" | "global_suggestion">>({});
   const [typeByBlock, setTypeByBlock] = useState<Record<string, string>>({});
@@ -409,6 +453,10 @@ export function ReviewEditorPanel({
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
   const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string>("");
+  const [showAddManualLine, setShowAddManualLine] = useState(false);
+  const [manualLineText, setManualLineText] = useState("");
+  const [manualLineRole, setManualLineRole] = useState<BlockRole>("paragraph");
+  const [digitalDraft, setDigitalDraft] = useState<string>(review.digital_text_content ?? "");
   const paneBodyRef = useRef<HTMLDivElement>(null);
   const syncSeqRef = useRef(0);
   const lastHandledSyncSeqRef = useRef<number | null>(null);
@@ -447,10 +495,22 @@ export function ReviewEditorPanel({
       }
       return nextDrafts;
     });
-  }, [review.book_id, review.page_number, review.primary_run_id, review.blocks]);
+    setRoleByBlock(() => {
+      const nextRoles: Record<string, BlockRole> = {};
+      for (const blk of review.blocks) {
+        nextRoles[blk.block_id] = blk.block_role ?? "paragraph";
+      }
+      return nextRoles;
+    });
+    setDigitalDraft(review.digital_text_content ?? "");
+  }, [review.book_id, review.page_number, review.primary_run_id, review.blocks, review.digital_text_content]);
 
   const handleDraftChange = useCallback((blockId: string, value: string) => {
     setDrafts((prev) => ({ ...prev, [blockId]: value }));
+  }, []);
+
+  const handleRoleChange = useCallback((blockId: string, role: BlockRole) => {
+    setRoleByBlock((prev) => ({ ...prev, [blockId]: role }));
   }, []);
 
   const handleRememberChange = useCallback((blockId: string, checked: boolean) => {
@@ -476,19 +536,28 @@ export function ReviewEditorPanel({
   async function commitEdit(
     block: ReviewBlock,
     nextText: string,
-    action: "corrected" | "approved" | "reverted",
+    action: "corrected" | "approved" | "reverted" | "ignored",
     pushHistory = true,
+    overrideRole?: BlockRole,
   ) {
     const prevText = block.current_text;
     const addMem = action === "corrected" && Boolean(rememberByBlock[block.block_id]);
     const scope = scopeByBlock[block.block_id] ?? "book_only";
     const cType = typeByBlock[block.block_id] || undefined;
-
-    await onSaveEdit(block.block_id, nextText, action, undefined, {
+    const effectiveRole = overrideRole ?? roleByBlock[block.block_id] ?? block.block_role;
+    const opts: SaveEditOptions = {
       addToMemory: addMem,
       memoryScope: scope,
       correctionType: cType,
-    });
+    };
+    if (
+      (effectiveRole && effectiveRole !== "paragraph") ||
+      (block.block_role && block.block_role !== "paragraph" && effectiveRole === "paragraph")
+    ) {
+      opts.blockRole = effectiveRole;
+    }
+
+    await onSaveEdit(block.block_id, nextText, action, undefined, opts);
     if (addMem) {
       setRememberByBlock((prev) => ({ ...prev, [block.block_id]: false }));
     }
@@ -753,7 +822,27 @@ export function ReviewEditorPanel({
           </button>
         </div>
 
-        <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.4rem", alignItems: "center" }}>
+        <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+          {onAddManualBlock && review.page_kind !== "digital_text" && (
+            <button
+              type="button"
+              className="btn-compact"
+              aria-pressed={showAddManualLine}
+              onClick={() => setShowAddManualLine((v) => !v)}
+            >
+              ＋ Add Line
+            </button>
+          )}
+          {onBatchApproveUnflagged && review.blocks.length > 0 && (
+            <button
+              type="button"
+              className="btn-compact"
+              title="Approve all unflagged blocks on this page"
+              onClick={() => void onBatchApproveUnflagged()}
+            >
+              Approve Unflagged
+            </button>
+          )}
           <select
             aria-label="Page review status"
             className="toolbar-select"
@@ -788,14 +877,82 @@ export function ReviewEditorPanel({
         className="pane-body"
         style={{ "--telugu-scale": String(teluguFontScale) } as React.CSSProperties}
       >
+        {showAddManualLine && onAddManualBlock && (
+          <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
+            <div className="badge-row" style={{ marginBottom: "0.45rem", justifyContent: "space-between" }}>
+              <strong>Insert Missed Telugu Line</strong>
+              <select
+                aria-label="New line layout role"
+                className="toolbar-select"
+                value={manualLineRole}
+                onChange={(e) => setManualLineRole(e.target.value as BlockRole)}
+              >
+                <option value="paragraph">Paragraph</option>
+                <option value="heading_1">Heading 1 (TOC)</option>
+                <option value="heading_2">Heading 2 (TOC)</option>
+                <option value="verse">Verse / Stanza</option>
+              </select>
+            </div>
+            <textarea
+              lang="te"
+              className="block-textarea"
+              aria-label="Manual Telugu line text"
+              placeholder="Type missed Telugu line…"
+              value={manualLineText}
+              onChange={(e) => setManualLineText(e.target.value)}
+            />
+            <div className="badge-row" style={{ marginTop: "0.45rem" }}>
+              <button
+                type="button"
+                className="primary"
+                disabled={!manualLineText.trim()}
+                onClick={async () => {
+                  await onAddManualBlock(manualLineText.trim(), manualLineRole);
+                  setManualLineText("");
+                  setShowAddManualLine(false);
+                }}
+              >
+                Insert Line
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAddManualLine(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {review.page_kind === "digital_text" && (
           <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
-            <div className="badge-row" style={{ marginBottom: "0.5rem" }}>
+            <div className="badge-row" style={{ marginBottom: "0.5rem", justifyContent: "space-between" }}>
               <span className="badge ok">Born-Digital Text Path (Not OCR)</span>
+              {onSaveDigitalText && (
+                <button
+                  type="button"
+                  className="primary btn-compact"
+                  disabled={digitalDraft === (review.digital_text_content ?? "")}
+                  onClick={() => void onSaveDigitalText(digitalDraft)}
+                >
+                  Save Digital Text
+                </button>
+              )}
             </div>
-            <pre className="telugu-text" lang="te" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-              {review.digital_text_content || "(Empty extracted digital text)"}
-            </pre>
+            {onSaveDigitalText ? (
+              <textarea
+                lang="te"
+                aria-label="Born-digital page text"
+                className="block-textarea"
+                rows={8}
+                value={digitalDraft}
+                onChange={(e) => setDigitalDraft(e.target.value)}
+              />
+            ) : (
+              <pre className="telugu-text" lang="te" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                {review.digital_text_content || "(Empty extracted digital text)"}
+              </pre>
+            )}
           </div>
         )}
 
@@ -827,6 +984,7 @@ export function ReviewEditorPanel({
             key={block.block_id}
             block={block}
             draftText={drafts[block.block_id] ?? block.current_text}
+            role={roleByBlock[block.block_id] ?? block.block_role ?? "paragraph"}
             isSelected={block.block_id === selectedBlockId}
             isFlashing={block.block_id === flashingBlockId}
             isBusy={busyBlockId === block.block_id}
@@ -838,6 +996,7 @@ export function ReviewEditorPanel({
             onSelectBlock={onSelectBlock}
             onLocateBlockOnScan={onLocateBlockOnScan}
             onDraftChange={handleDraftChange}
+            onRoleChange={handleRoleChange}
             onRememberChange={handleRememberChange}
             onScopeChange={handleScopeChange}
             onTypeChange={handleTypeChange}

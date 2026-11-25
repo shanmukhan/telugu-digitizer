@@ -31,10 +31,13 @@ from src.api.schemas import (
     CorrectionStatusRequest,
     CorrectionSuggestionItem,
     DigitalTextPageResponse,
+    DigitalTextUpdateRequest,
     ExportCreateRequest,
     ExportListResponse,
     ExportRecordResponse,
     HealthResponse,
+    ManualBlockCreateRequest,
+    ManualBlockCreateResponse,
     OCRBlockResponse,
     OCRRunCreateRequest,
     OCRRunCreateResponse,
@@ -64,14 +67,17 @@ from src.services.correction_service import (
 from src.services.export_service import create_book_export, list_book_exports
 from src.services.ocr_service import (
     OCRJobExecutor,
+    cancel_ocr_run,
     create_or_reuse_ocr_runs,
     inspect_host_ocr_capabilities,
     resume_ocr_run,
 )
 from src.services.review_service import (
     get_page_review_payload,
+    insert_manual_review_block,
     list_book_ocr_runs,
     submit_block_edit,
+    update_digital_page_text,
     update_page_review_status,
 )
 
@@ -406,6 +412,20 @@ def resume_existing_ocr_run(
     return _serialize_run_status(db, ocr_run)
 
 
+@router.post(
+    "/ocr-runs/{run_id}/cancel",
+    response_model=OCRRunStatusResponse,
+    status_code=status.HTTP_200_OK,
+)
+def cancel_existing_ocr_run(
+    run_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    executor: Annotated[OCRJobExecutor, Depends(get_executor)],
+) -> OCRRunStatusResponse:
+    ocr_run = cancel_ocr_run(db=db, executor=executor, run_id=run_id)
+    return _serialize_run_status(db, ocr_run)
+
+
 @router.get("/ocr-runs/{run_id}/pages/{page_number}", response_model=PageOCRResponse)
 def get_ocr_run_page(
     run_id: uuid.UUID,
@@ -485,12 +505,14 @@ def post_block_edit(
     block_id: uuid.UUID,
     payload: BlockEditRequest,
     db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
 ) -> BlockEditResponse:
     result = submit_block_edit(
         db=db,
         block_id=block_id,
         edited_text=payload.edited_text,
         action=payload.action,
+        block_role=payload.block_role,
         review_note=payload.review_note,
         reviewer_id=payload.reviewer_id,
         add_to_correction_memory=payload.add_to_correction_memory,
@@ -498,8 +520,50 @@ def post_block_edit(
         correction_type=payload.correction_type,
         incorrect_span=payload.incorrect_span,
         corrected_span=payload.corrected_span,
+        storage=storage,
     )
     return BlockEditResponse(**result)
+
+
+@router.post(
+    "/books/{book_id}/pages/{page_number}/blocks",
+    response_model=ManualBlockCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_manual_page_block(
+    book_id: uuid.UUID,
+    page_number: int,
+    payload: ManualBlockCreateRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> ManualBlockCreateResponse:
+    result = insert_manual_review_block(
+        db=db,
+        book_id=book_id,
+        page_number=page_number,
+        text=payload.text,
+        block_role=payload.block_role,
+        primary_run_id=payload.primary_run_id,
+    )
+    return ManualBlockCreateResponse(**result)
+
+
+@router.patch(
+    "/books/{book_id}/pages/{page_number}/digital-text",
+    response_model=DigitalTextPageResponse,
+)
+def patch_page_digital_text(
+    book_id: uuid.UUID,
+    page_number: int,
+    payload: DigitalTextUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> DigitalTextPageResponse:
+    result = update_digital_page_text(
+        db=db,
+        book_id=book_id,
+        page_number=page_number,
+        digital_text_content=payload.text,
+    )
+    return DigitalTextPageResponse(**result)
 
 
 @router.patch("/books/{book_id}/pages/{page_number}/review-status", response_model=PageReviewStatusResponse)
@@ -595,7 +659,9 @@ def patch_correction_status(
     payload: CorrectionStatusRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> CorrectionMemoryRecord:
-    return _serialize_correction_record(update_correction_status(db, correction_id, payload.status))
+    return _serialize_correction_record(
+        update_correction_status(db, correction_id, payload.status, scope=payload.scope)
+    )
 
 
 def _serialize_export_record(row: DocumentExport) -> ExportRecordResponse:

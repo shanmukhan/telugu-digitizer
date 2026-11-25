@@ -232,6 +232,7 @@ class DigitizerApiService {
     int? startPage,
     int? endPage,
     bool forceRerun = false,
+    String preprocessingProfile = 'none',
   }) async {
     final payload = <String, dynamic>{
       'engines': engines,
@@ -239,7 +240,7 @@ class DigitizerApiService {
           ? {'start': startPage, 'end': endPage}
           : null,
       'render_dpi': 300,
-      'preprocessing_profile': 'none',
+      'preprocessing_profile': preprocessingProfile,
       'force_rerun': forceRerun,
     };
     final res = await _client.post(
@@ -281,6 +282,19 @@ class DigitizerApiService {
     _throwError(res);
   }
 
+  Future<BookOcrRunSummary> cancelOcrRun(String runId) async {
+    final res = await _client.post(
+      resolveUri('/api/v1/ocr-runs/$runId/cancel'),
+      headers: buildHeaders(),
+    );
+    if (res.statusCode == 200 || res.statusCode == 202) {
+      return BookOcrRunSummary.fromJson(
+        jsonDecode(res.body) as Map<String, dynamic>,
+      );
+    }
+    _throwError(res);
+  }
+
   Future<PageReviewPayload> getPageReview({
     required String bookId,
     required int pageNumber,
@@ -307,6 +321,7 @@ class DigitizerApiService {
     required String blockId,
     required String editedText,
     required String action,
+    String? blockRole,
     String? reviewNote,
     bool addToCorrectionMemory = false,
     String memoryScope = 'book_only',
@@ -315,6 +330,7 @@ class DigitizerApiService {
     final payload = <String, dynamic>{
       'edited_text': editedText,
       'action': action,
+      if (blockRole != null && blockRole.isNotEmpty) 'block_role': blockRole,
       'review_note': ?reviewNote,
       'add_to_correction_memory': addToCorrectionMemory,
       'memory_scope': memoryScope,
@@ -417,11 +433,15 @@ class DigitizerApiService {
   Future<CorrectionMemoryRecord> updateCorrectionStatus({
     required String correctionId,
     required String status,
+    String? scope,
   }) async {
     final res = await _client.patch(
       resolveUri('/api/v1/corrections/$correctionId/status'),
       headers: buildHeaders(jsonBody: true),
-      body: jsonEncode({'status': status}),
+      body: jsonEncode({
+        'status': status,
+        if (scope != null && scope.isNotEmpty) 'scope': scope,
+      }),
     );
     if (res.statusCode == 200) {
       return CorrectionMemoryRecord.fromJson(

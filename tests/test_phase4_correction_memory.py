@@ -232,4 +232,39 @@ def test_phase4_scope_context_conflicts_and_governance(phase4_client) -> None:
 
     all_records = client.get("/api/v1/corrections").json()["items"]
     assert any(r["correction_id"] == cm_global_id and r["rejected_count"] == 1 for r in all_records)
+
+    # 5. Deduplication: submitting the exact same correction rule increments approved_count instead of duplicating
+    dup_edit = client.post(
+        f"/api/v1/ocr-blocks/{blk_a_id}/edits",
+        json={
+            "edited_text": "పాఠశాల పుస్తకం బాగుంది",
+            "action": "corrected",
+            "add_to_correction_memory": True,
+            "memory_scope": "book_only",
+            "incorrect_span": "పస్తకం",
+            "corrected_span": "పుస్తకం",
+        },
+    )
+    assert dup_edit.status_code == 201
+    assert dup_edit.json()["correction_memory_id"] == cm_book_only_id
+
+    # 6. Promote book_only rule to global_suggestion and verify punctuation-tolerant token matching on Book B
+    promoted = client.patch(
+        f"/api/v1/corrections/{cm_book_only_id}/status",
+        json={"status": "active", "scope": "global_suggestion"},
+    ).json()
+    assert promoted["scope"] == "global_suggestion"
+    assert promoted["approved_count"] >= 2
+
+    with app.state.session_factory() as db:
+        blk_b_row = db.get(OCRBlock, UUID(blk_b_id))
+        assert blk_b_row is not None
+        blk_b_row.raw_text = "పాఠశాల పస్తకం, చదువు."
+        db.commit()
+
+    rev_b_punct = client.get(f"/api/v1/books/{book_b_id}/pages/1/review").json()
+    sug_b = rev_b_punct["blocks"][0]["suggestions"]
+    assert len(sug_b) == 1
+    assert sug_b[0]["correction_id"] == cm_book_only_id
+    assert sug_b[0]["proposed_block_text"] == "పాఠశాల పుస్తకం, చదువు."
     _ = raw_b

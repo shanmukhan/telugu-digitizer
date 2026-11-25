@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import uuid
 from typing import Any
 
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
+from src.common.io import sha256_bytes
 from src.common.logging_utils import log_event
+from src.core.storage import LocalFilesystemStorage
 from src.db.models import (
     Book,
     BookPage,
@@ -22,6 +26,7 @@ from src.db.models import (
     OCRRun,
     ProcessingJob,
     ReviewEdit,
+    TrainingSample,
 )
 from src.evaluation.metrics import normalize_nfc
 from src.services.correction_service import (
@@ -33,7 +38,8 @@ from src.services.correction_service import (
 
 LOGGER = logging.getLogger("telugu_digitizer.services.review")
 
-ALLOWED_EDIT_ACTIONS = {"corrected", "approved", "reverted"}
+ALLOWED_EDIT_ACTIONS = {"corrected", "approved", "reverted", "ignored"}
+ALLOWED_BLOCK_ROLES = {"paragraph", "heading_1", "heading_2", "verse", "ignore"}
 ALLOWED_REVIEW_STATUSES = {"not_started", "in_review", "approved", "needs_attention"}
 
 
@@ -251,6 +257,7 @@ def get_page_review_payload(
     comparator_blocks_with_bbox = [(comp, _bbox_from_block(comp)) for comp in comparator_blocks]
 
     edits_by_block: dict[uuid.UUID, list[ReviewEdit]] = {}
+    doc_role_by_block: dict[uuid.UUID, str] = {}
     if primary_blocks:
         primary_block_ids = [b.id for b in primary_blocks]
         all_edits = list(
@@ -263,12 +270,35 @@ def get_page_review_payload(
         for edit in all_edits:
             edits_by_block.setdefault(edit.ocr_block_id, []).append(edit)
 
+        draft_ver = db.scalars(
+            select(DocumentTextVersion)
+            .where(
+                DocumentTextVersion.book_id == book.id,
+                DocumentTextVersion.origin == "human_approved",
+            )
+            .order_by(DocumentTextVersion.version_number.desc())
+        ).first()
+        if draft_ver is not None:
+            for dblk in db.scalars(
+                select(DocumentTextBlock).where(
+                    DocumentTextBlock.version_id == draft_ver.id,
+                    DocumentTextBlock.ocr_block_id.in_(primary_block_ids),
+                )
+            ).all():
+                if dblk.ocr_block_id is not None:
+                    doc_role_by_block[dblk.ocr_block_id] = dblk.block_role
+
     review_blocks: list[dict[str, Any]] = []
     primary_engine = primary_info["engine"] if primary_info else None
     for idx, blk in enumerate(primary_blocks):
         edits = edits_by_block.get(blk.id, [])
         latest_edit = edits[-1] if edits else None
         current_text = latest_edit.edited_text if latest_edit else blk.raw_text
+        latest_action = latest_edit.action if latest_edit else None
+        block_role = doc_role_by_block.get(
+            blk.id,
+            "ignore" if latest_action == "ignored" else "paragraph",
+        )
         bbox = _bbox_from_block(blk)
         comp_block = _match_comparator_block(blk, bbox, comparator_blocks_with_bbox, idx)
         comp_text = comp_block.raw_text if comp_block else None
@@ -292,11 +322,12 @@ def get_page_review_payload(
                 "block_index": blk.block_index,
                 "reading_order": blk.reading_order,
                 "block_type": blk.block_type,
+                "block_role": block_role,
                 "raw_text": blk.raw_text,
                 "normalized_text": blk.normalized_text,
                 "current_text": current_text,
                 "is_edited": bool(latest_edit and current_text != blk.raw_text),
-                "latest_action": latest_edit.action if latest_edit else None,
+                "latest_action": latest_action,
                 "confidence": blk.confidence,
                 "low_confidence_flag": low_conf,
                 "disagreement_flag": disagreement,
@@ -342,12 +373,78 @@ def get_page_review_payload(
     }
 
 
+def _maybe_record_training_sample(
+    *,
+    db: Session,
+    storage: LocalFilesystemStorage | None,
+    book: Book | None,
+    page: BookPage,
+    block: OCRBlock,
+    verified_text: str,
+    reviewer_id: str | None,
+) -> None:
+    """When book.training_consent is True, crop the verified line region and store a TrainingSample."""
+    if storage is None or book is None or not book.training_consent:
+        return
+    if not verified_text.strip() or not page.image_storage_key or not storage.exists(page.image_storage_key):
+        return
+    bbox = _bbox_from_block(block)
+    if bbox is None or len(bbox) != 4:
+        return
+    try:
+        img_path = storage.resolve_key(page.image_storage_key)
+        with Image.open(img_path) as im:
+            w, h = im.size
+            x1 = max(0, min(int(bbox[0]), w - 1))
+            y1 = max(0, min(int(bbox[1]), h - 1))
+            x2 = max(x1 + 1, min(int(bbox[2]), w))
+            y2 = max(y1 + 1, min(int(bbox[3]), h))
+            crop = im.crop((x1, y1, x2, y2))
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            crop_bytes = buf.getvalue()
+        crop_key = f"training_crops/{book.id}/{block.id}.png"
+        storage.write_bytes(crop_key, crop_bytes, read_only=False)
+        crop_sha = sha256_bytes(crop_bytes)
+
+        existing = db.scalars(
+            select(TrainingSample).where(
+                TrainingSample.book_id == book.id,
+                TrainingSample.image_crop_storage_key == crop_key,
+            )
+        ).first()
+        if existing is None:
+            db.add(
+                TrainingSample(
+                    book_id=book.id,
+                    book_page_id=page.id,
+                    image_crop_storage_key=crop_key,
+                    image_crop_sha256=crop_sha,
+                    ocr_text=block.raw_text,
+                    verified_text=verified_text,
+                    annotation_status="verified",
+                    reviewer_id=reviewer_id,
+                    allowed_for_training=True,
+                )
+            )
+        else:
+            existing.image_crop_sha256 = crop_sha
+            existing.verified_text = verified_text
+            existing.annotation_status = "verified"
+            existing.reviewer_id = reviewer_id
+            existing.allowed_for_training = True
+    except Exception:
+        # Never block review edit saving if optional crop extraction fails.
+        pass
+
+
 def submit_block_edit(
     *,
     db: Session,
     block_id: uuid.UUID,
     edited_text: str,
     action: str = "corrected",
+    block_role: str | None = None,
     review_note: str | None = None,
     reviewer_id: str | None = None,
     add_to_correction_memory: bool = False,
@@ -355,12 +452,19 @@ def submit_block_edit(
     correction_type: str | None = None,
     incorrect_span: str | None = None,
     corrected_span: str | None = None,
+    storage: LocalFilesystemStorage | None = None,
 ) -> dict[str, Any]:
     """Persist an append-only review edit without ever overwriting ocr_blocks.raw_text."""
     if action not in ALLOWED_EDIT_ACTIONS:
         raise AppError(
             "INVALID_REVIEW_ACTION",
             f"Unsupported action {action!r}. Allowed: {sorted(ALLOWED_EDIT_ACTIONS)}.",
+            status_code=400,
+        )
+    if block_role is not None and block_role not in ALLOWED_BLOCK_ROLES:
+        raise AppError(
+            "INVALID_BLOCK_ROLE",
+            f"Unsupported block_role {block_role!r}. Allowed: {sorted(ALLOWED_BLOCK_ROLES)}.",
             status_code=400,
         )
 
@@ -371,6 +475,7 @@ def submit_block_edit(
     page = db.get(BookPage, blk.book_page_id)
     if page is None:
         raise AppError("PAGE_NOT_FOUND", "Associated book page not found.", status_code=404)
+    book = db.get(Book, page.book_id)
 
     latest_edit = db.scalars(
         select(ReviewEdit)
@@ -397,6 +502,14 @@ def submit_block_edit(
             DocumentTextBlock.ocr_block_id == blk.id,
         )
     ).first()
+    effective_role = (
+        "ignore"
+        if action == "ignored"
+        else (block_role if block_role is not None else (doc_block.block_role if doc_block else "paragraph"))
+    )
+    if action == "reverted" and block_role is None:
+        effective_role = "paragraph"
+
     if doc_block is None:
         db.add(
             DocumentTextBlock(
@@ -405,14 +518,26 @@ def submit_block_edit(
                 ocr_block_id=blk.id,
                 final_text=edited_text,
                 reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
-                block_role="paragraph",
+                block_role=effective_role,
             )
         )
     else:
         doc_block.final_text = edited_text
+        doc_block.block_role = effective_role
 
     if page.review_status == "not_started":
         page.review_status = "in_review"
+
+    if action in ("corrected", "approved") and effective_role != "ignore":
+        _maybe_record_training_sample(
+            db=db,
+            storage=storage,
+            book=book,
+            page=page,
+            block=blk,
+            verified_text=edited_text,
+            reviewer_id=reviewer_id,
+        )
 
     correction_entry_id: uuid.UUID | None = None
     if add_to_correction_memory and action == "corrected" and previous_text.strip() != edited_text.strip():
@@ -444,6 +569,7 @@ def submit_block_edit(
         block_id=str(blk.id),
         page_number=page.page_number,
         action=action,
+        block_role=effective_role,
         correction_memory_id=str(correction_entry_id) if correction_entry_id else None,
     )
     return {
@@ -453,9 +579,130 @@ def submit_block_edit(
         "previous_text": edit_row.previous_text,
         "current_text": edit_row.edited_text,
         "action": edit_row.action,
+        "block_role": effective_role,
         "page_review_status": page.review_status,
         "correction_memory_id": correction_entry_id,
         "created_at": edit_row.created_at,
+    }
+
+
+def insert_manual_review_block(
+    *,
+    db: Session,
+    book_id: uuid.UUID,
+    page_number: int,
+    text: str,
+    block_role: str = "paragraph",
+    primary_run_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """Insert a reviewer-authored line block when OCR missed a printed line."""
+    cleaned = text.strip()
+    if not cleaned:
+        raise AppError("EMPTY_BLOCK_TEXT", "Manual block text must not be empty.", status_code=400)
+    if block_role not in ALLOWED_BLOCK_ROLES:
+        raise AppError(
+            "INVALID_BLOCK_ROLE",
+            f"Unsupported block_role {block_role!r}. Allowed: {sorted(ALLOWED_BLOCK_ROLES)}.",
+            status_code=400,
+        )
+
+    page = db.scalars(
+        select(BookPage).where(BookPage.book_id == book_id, BookPage.page_number == page_number)
+    ).first()
+    if page is None:
+        raise AppError("PAGE_NOT_FOUND", f"Page {page_number} not found for book {book_id}.", status_code=404)
+
+    target_run: OCRRun | None = None
+    if primary_run_id is not None:
+        target_run = db.get(OCRRun, primary_run_id)
+    if target_run is None:
+        runs_info = list_book_ocr_runs(db, book_id)
+        usable = [r for r in runs_info if r["status"] in ("completed", "partial")]
+        if usable:
+            paddle = [r for r in usable if r["engine"] == "paddleocr"]
+            chosen = paddle[0] if paddle else usable[0]
+            target_run = db.get(OCRRun, chosen["ocr_run_id"])
+    if target_run is None:
+        raise AppError(
+            "NO_OCR_RUN_AVAILABLE",
+            "Run OCR on this book first before inserting manual OCR blocks.",
+            status_code=409,
+        )
+
+    max_idx = db.scalar(
+        select(func.coalesce(func.max(OCRBlock.block_index), -1)).where(
+            OCRBlock.ocr_run_id == target_run.id,
+            OCRBlock.book_page_id == page.id,
+        )
+    )
+    next_idx = int(max_idx if max_idx is not None else -1) + 1
+
+    new_blk = OCRBlock(
+        ocr_run_id=target_run.id,
+        book_page_id=page.id,
+        block_index=next_idx,
+        block_type="manual_line",
+        raw_text=cleaned,
+        normalized_text=normalize_nfc(cleaned),
+        confidence=None,
+        polygon=None,
+        reading_order=next_idx,
+        raw_engine_payload={"source": "human_inserted"},
+    )
+    db.add(new_blk)
+    db.flush()
+
+    version = _get_or_create_human_draft_version(db, page.book_id)
+    db.add(
+        DocumentTextBlock(
+            version_id=version.id,
+            book_page_id=page.id,
+            ocr_block_id=new_blk.id,
+            final_text=cleaned,
+            reading_order=next_idx,
+            block_role=block_role,
+        )
+    )
+    if page.review_status == "not_started":
+        page.review_status = "in_review"
+    db.commit()
+    db.refresh(new_blk)
+    return {
+        "block_id": new_blk.id,
+        "block_index": new_blk.block_index,
+        "reading_order": new_blk.reading_order,
+        "block_type": new_blk.block_type,
+        "block_role": block_role,
+        "raw_text": new_blk.raw_text,
+        "current_text": new_blk.raw_text,
+    }
+
+
+def update_digital_page_text(
+    *,
+    db: Session,
+    book_id: uuid.UUID,
+    page_number: int,
+    digital_text_content: str,
+) -> dict[str, Any]:
+    """Update extracted digital text on a born-digital or mixed page during human review."""
+    page = db.scalars(
+        select(BookPage).where(BookPage.book_id == book_id, BookPage.page_number == page_number)
+    ).first()
+    if page is None:
+        raise AppError("PAGE_NOT_FOUND", f"Page {page_number} not found for book {book_id}.", status_code=404)
+    page.digital_text_content = digital_text_content
+    page.extracted_text_char_count = sum(1 for ch in digital_text_content if not ch.isspace())
+    if page.review_status == "not_started":
+        page.review_status = "in_review"
+    db.commit()
+    db.refresh(page)
+    return {
+        "book_id": book_id,
+        "page_number": page.page_number,
+        "page_kind": page.page_kind,
+        "extracted_text_char_count": page.extracted_text_char_count,
+        "text": page.digital_text_content or "",
     }
 
 

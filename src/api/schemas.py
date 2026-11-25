@@ -213,6 +213,7 @@ class ReviewBlockResponse(BaseModel):
     block_index: int
     reading_order: int | None
     block_type: str
+    block_role: str = "paragraph"
     raw_text: str
     normalized_text: str | None
     current_text: str
@@ -253,6 +254,7 @@ class PageReviewResponse(BaseModel):
 class BlockEditRequest(BaseModel):
     edited_text: str
     action: str = "corrected"
+    block_role: str | None = None
     review_note: str | None = None
     reviewer_id: str | None = None
     add_to_correction_memory: bool = False
@@ -269,9 +271,30 @@ class BlockEditResponse(BaseModel):
     previous_text: str
     current_text: str
     action: str
+    block_role: str = "paragraph"
     page_review_status: str
     correction_memory_id: UUID | None = None
     created_at: datetime
+
+
+class ManualBlockCreateRequest(BaseModel):
+    text: str
+    block_role: str = "paragraph"
+    primary_run_id: UUID | None = None
+
+
+class ManualBlockCreateResponse(BaseModel):
+    block_id: UUID
+    block_index: int
+    reading_order: int | None
+    block_type: str
+    block_role: str
+    raw_text: str
+    current_text: str
+
+
+class DigitalTextUpdateRequest(BaseModel):
+    text: str
 
 
 class PageReviewStatusRequest(BaseModel):
@@ -317,6 +340,7 @@ class CorrectionRejectRequest(BaseModel):
 
 class CorrectionStatusRequest(BaseModel):
     status: str
+    scope: str | None = None
 
 
 class ExportCreateRequest(BaseModel):

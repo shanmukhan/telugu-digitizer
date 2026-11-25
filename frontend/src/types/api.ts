@@ -100,11 +100,13 @@ export interface OCRRunStatus {
   created_at: string;
 }
 
+export type BlockRole = "paragraph" | "heading_1" | "heading_2" | "verse" | "ignore";
+
 export interface ReviewEditHistoryItem {
   edit_id: string;
   previous_text: string;
   edited_text: string;
-  action: "corrected" | "approved" | "reverted";
+  action: "corrected" | "approved" | "reverted" | "ignored";
   reviewer_id: string | null;
   review_note: string | null;
   created_at: string;
@@ -150,11 +152,12 @@ export interface ReviewBlock {
   block_index: number;
   reading_order: number | null;
   block_type: string;
+  block_role?: BlockRole;
   raw_text: string;
   normalized_text: string | null;
   current_text: string;
   is_edited: boolean;
-  latest_action: "corrected" | "approved" | "reverted" | null;
+  latest_action: "corrected" | "approved" | "reverted" | "ignored" | null;
   confidence: number | null;
   low_confidence_flag: boolean;
   disagreement_flag: boolean;
@@ -193,10 +196,20 @@ export interface BlockEditResult {
   raw_text: string;
   previous_text: string;
   current_text: string;
-  action: "corrected" | "approved" | "reverted";
+  action: "corrected" | "approved" | "reverted" | "ignored";
+  block_role?: BlockRole;
   page_review_status: "not_started" | "in_review" | "approved" | "needs_attention";
   correction_memory_id: string | null;
   created_at: string;
+}
+
+export interface ManualBlockCreateResult {
+  block_id: string;
+  ocr_run_id: string;
+  block_index: number;
+  raw_text: string;
+  current_text: string;
+  block_role: BlockRole;
 }
 
 export interface ExportCreatePayload {

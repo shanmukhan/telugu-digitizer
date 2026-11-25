@@ -195,14 +195,26 @@ class _CorrectionMemoryTabViewState extends State<CorrectionMemoryTabView> {
                                       ),
                                     ],
                                   ),
-                                  trailing: OutlinedButton(
-                                    onPressed: () =>
-                                        vm.toggleCorrectionStatus(item),
-                                    child: Text(
-                                      item.status == 'active'
-                                          ? 'Disable'
-                                          : 'Re-enable',
-                                    ),
+                                  trailing: Wrap(
+                                    spacing: 6,
+                                    children: [
+                                      if (item.scope == 'book_only')
+                                        TextButton(
+                                          onPressed: () =>
+                                              vm.promoteCorrectionToGlobal(
+                                                  item),
+                                          child: const Text('Promote'),
+                                        ),
+                                      OutlinedButton(
+                                        onPressed: () =>
+                                            vm.toggleCorrectionStatus(item),
+                                        child: Text(
+                                          item.status == 'active'
+                                              ? 'Disable'
+                                              : 'Re-enable',
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),

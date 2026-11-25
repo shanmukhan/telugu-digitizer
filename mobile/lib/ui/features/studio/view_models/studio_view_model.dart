@@ -382,6 +382,18 @@ class StudioViewModel extends ChangeNotifier {
     }
   }
 
+  Future<void> cancelOcrRun(String runId) async {
+    try {
+      final cancelled = await _repository.cancelOcrRun(runId);
+      await refreshSelectedBookDetails(loadReview: false);
+      setBanner(
+        'Cancelled ${formatEngineLabel(cancelled.engine)} (${cancelled.progressCurrent}/${cancelled.progressTotal} pages saved).',
+      );
+    } catch (e) {
+      setBanner('Failed to cancel OCR: $e', isError: true);
+    }
+  }
+
   void _schedulePollingIfNeeded() {
     _pollTimer?.cancel();
     final activeIds =
@@ -414,6 +426,7 @@ class StudioViewModel extends ChangeNotifier {
     required String blockId,
     required String editedText,
     required String action,
+    String? blockRole,
     String? reviewNote,
     bool addToMemory = false,
     String memoryScope = 'book_only',
@@ -426,6 +439,7 @@ class StudioViewModel extends ChangeNotifier {
         blockId: blockId,
         editedText: editedText,
         action: action,
+        blockRole: blockRole,
         reviewNote: reviewNote,
         addToCorrectionMemory: addToMemory,
         memoryScope: memoryScope,
@@ -534,6 +548,20 @@ class StudioViewModel extends ChangeNotifier {
       await loadCorrections();
     } catch (e) {
       setBanner('Failed to update correction status: $e', isError: true);
+    }
+  }
+
+  Future<void> promoteCorrectionToGlobal(CorrectionMemoryRecord record) async {
+    try {
+      await _repository.updateCorrectionStatus(
+        correctionId: record.correctionId,
+        status: record.status,
+        scope: 'global_suggestion',
+      );
+      setBanner('Promoted correction rule to global suggestion.');
+      await loadCorrections();
+    } catch (e) {
+      setBanner('Failed to promote correction: $e', isError: true);
     }
   }
 
