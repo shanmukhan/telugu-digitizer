@@ -194,3 +194,44 @@ All colours are CSS custom properties in `:root` of `frontend/src/styles/app.css
 4. **Live Pi Deployment & Verification (2026-11-24 on `lipi@192.168.1.13`):**
    - Deployed via `./deploy/raspberry-pi/remote-deploy.sh lipi@192.168.1.13 --mode native --with-paddle --port 8085` (Debian 13 `trixie` `aarch64`, Python `3.13.5`, PostgreSQL `17`, Alembic `0002_exports_table`).
    - Verified `telugu-digitizer.service` active and public HTTPS `200` responses across `https://lahari.org/`, `/lab/`, `/api/visits/stats`, `/monitor/health`, `/agentic-trader/workspace`, `/telugu/` (`302` from `/telugu`), bundled JS/CSS/PDF.js worker assets, `/telugu/api/v1/health`, `/telugu/api/v1/capabilities` (both `paddle_ppocrv5_te` and `tesseract_tel_best` available, `auth_enabled: false`), and `/telugu/api/v1/books` (`/portfolio-advisor/` `401` preserved).
+
+---
+
+## 11. Page Review Shows "No OCR text extracted" While Tesseract Succeeded, PaddleOCR ARM64 `SIGSEGV`/OOM, and Server Crash Observability
+
+### Symptom
+1. After running dual-engine OCR on Pages `6–20` of *Amuktamalyada Vo.1* (`4963×7017` px 300-DPI scans) on the Raspberry Pi (`192.168.1.13`), **Tesseract 5 Telugu** completed all 15 pages (`15/15`), yet the **Proofreading Editor** displayed **`No OCR text extracted for this page yet.`** on Page 7 with the top strip still showing **`Resume PaddleOCR PP-OCRv5 (0/15)`**.
+2. Clicking **Resume PaddleOCR PP-OCRv5 (0/15)** triggered another `0/15` failure.
+3. During standalone Raspberry Pi diagnostic testing on Page 7, unconstrained `PP-OCRv5_server_det` memory allocation exhausted system RAM and triggered a Pi reboot / temporary `503 Service Unavailable`.
+
+### Root Causes
+1. **Default primary-run selection picked an empty `0/15` partial run (`src/services/review_service.py`, `src/services/export_service.py`):**
+   - `get_page_review_payload()` and `_select_ocr_run()` preferred `engine == "paddleocr"` across all `status IN ("completed", "partial")` runs without checking whether a run processed any pages (`progress_current > 0`) or had `OCRBlock` rows for the current page. As a result, Page 7 defaulted to the `0/15` partial PaddleOCR run (`0` blocks) even though the completed `15/15` Tesseract run already had `24` extracted Telugu lines for Page 7.
+2. **PaddleOCR `SIGSEGV` (`status=11/SEGV`) on ARM64 Raspberry Pi (`src/ocr/paddle_provider.py`, `deploy/raspberry-pi/install.sh`):**
+   - PaddleX's `PaddlePredictorOption` defaults `"cpu_threads": int(os.getenv("PADDLE_PDX_CPU_NUM_THREADS", 10))` and `/etc/telugu-digitizer/env` previously set `OMP_NUM_THREADS=2`. Multi-threaded OpenBLAS execution inside `paddlepaddle==3.3.1` on `linux_aarch64` segfaulted (`exit 139`), even on a `200×400` test image, killing the worker and restarting `telugu-digitizer.service` before Page 6 could finish (`0/15`).
+3. **14.6 GB tensor `MemoryError` on `4963×7017` A2-sized PDF scans (`src/ocr/paddle_provider.py`):**
+   - PaddleOCR's default detection config (`text_det_limit_type="min"`, `max_side_limit=4000`) passed a huge `2829×4000` tensor to `PP-OCRv5_server_det`, triggering `ResourceExhaustedError: Fail to alloc memory of 14598144000 size` (~14.6 GB) on the 8 GB Raspberry Pi.
+4. **Post-mortem crash observability gaps (`scripts/run_api.py`, `src/common/logging_utils.py`, `src/api/app.py`, `src/services/ocr_service.py`):**
+   - `faulthandler` was not enabled to capture Python thread traces on native C++ `SIGSEGV` signals.
+   - `ocr_service.py` only logged after `provider.recognize()` finished or threw a Python exception, leaving no record of which `run_id`, `page_number`, or pixel dimensions caused a hard C++ crash or OOM `SIGKILL`.
+   - Structured logs went only to `stderr`/`journald` (not persisted to `workspace/logs/` across reboots), and startup recovery + provider initialization failures did not emit structured warning/error logs.
+
+### Fixes Implemented
+- **Page-aware primary-run & export-run selection (`src/services/review_service.py`, `src/services/export_service.py`):**
+  - `get_page_review_payload()` now queries `OCRBlock` counts on the target page per usable run and prioritizes runs that actually have extracted blocks on that page (`block_count > 0`) and non-zero progress before preferring `paddleocr` over `tesseract`.
+  - `_select_ocr_run()` in `export_service.py` similarly prioritizes `completed` / non-zero-progress runs over `0`-progress partial runs.
+- **ARM64 thread safety & bounded detection size (`src/ocr/paddle_provider.py`, `deploy/raspberry-pi/install.sh`, `deploy/raspberry-pi/telugu-digitizer.service`):**
+  - Set `cpu_threads=1` and `PADDLE_PDX_CPU_NUM_THREADS=1` by default on Linux `aarch64`/`arm64` (and `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1` in `install.sh`).
+  - Set `text_det_limit_type="max"` and `text_det_limit_side_len=1280` on Linux ARM64 (`1920` otherwise, configurable via env) so large `4963×7017` pages never trigger multi-GB `server_det` allocations.
+  - Added `MemoryHigh=3500M` and `MemoryMax=4500M` to `deploy/raspberry-pi/telugu-digitizer.service` so runaway allocations cannot starve `sshd` or lock up the Pi.
+- **UI engine-fallback ergonomics (`frontend/src/components/ReviewEditorPanel.tsx`, `frontend/src/App.tsx`):**
+  - Shows `(partial X/Y)` in the engine dropdown, surfaces partial-run `error_summary`, renders a one-click **Switch to `<Engine>`** button when an empty partial run is selected alongside a populated run, and reports `0`-progress partial runs as error banners rather than green success notices.
+- **Crash & server observability (`src/common/logging_utils.py`, `scripts/run_api.py`, `src/api/app.py`, `src/services/ocr_service.py`):**
+  - Enabled `faulthandler.enable(all_threads=True)` at API startup (`scripts/run_api.py`).
+  - Added rotating disk log persistence (`WORKSPACE_DIR/logs/telugu-digitizer.log`, 10 MB × 5 backups) in `configure_logging()` / `create_app()`.
+  - Added `"Starting OCR page in backend job"` logs with `run_id`, `page_number`, `width_px × height_px`, `render_dpi`, and `rss_mb` before `provider.recognize()`, plus `elapsed_ms` + `peak_rss_mb` on completion, provider-init `ERROR` logs, startup crash-recovery `WARNING` logs with interrupted `run_ids`, and a catch-all unhandled HTTP `500` exception logger.
+- **Regression Tests:**
+  - `tests/test_phase3_review_api.py` (`test_phase3_review_prefers_populated_run_over_empty_partial_paddle_run`)
+  - `tests/test_ocr_providers_and_integration.py` (`test_paddle_provider_rejects_non_telugu_or_wrong_version`)
+  - `tests/test_deployment_and_security.py` (rotating log file + crash recovery log verification)
+  - `frontend/src/components/ReviewEditorPanel.test.tsx` (engine switch CTA)

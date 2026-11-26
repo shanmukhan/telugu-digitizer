@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import socket
 import subprocess
 import sys
@@ -47,6 +48,7 @@ def _ensure_local_postgres(settings: AppSettings) -> None:
 
 
 def main() -> None:
+    faulthandler.enable(all_threads=True)
     settings = AppSettings.from_env()
     _ensure_local_postgres(settings)
     app = create_app(settings)

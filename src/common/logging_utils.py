@@ -6,6 +6,8 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 
@@ -27,18 +29,40 @@ class _StructuredFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging(level: str = "INFO") -> logging.Logger:
-    """Configure root logger for structured Phase 1 CLI output."""
+def configure_logging(
+    level: str = "INFO",
+    log_file: Path | None = None,
+) -> logging.Logger:
+    """Configure logger for structured stderr output and optional rotating disk log."""
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     root = logging.getLogger("telugu_digitizer")
     root.setLevel(numeric_level)
-    if not root.handlers:
+    formatter = _StructuredFormatter()
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler) for h in root.handlers):
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(_StructuredFormatter())
+        handler.setFormatter(formatter)
         root.addHandler(handler)
     else:
         for handler in root.handlers:
-            handler.setFormatter(_StructuredFormatter())
+            handler.setFormatter(formatter)
+
+    if log_file is not None:
+        resolved = log_file.resolve()
+        has_file_handler = any(
+            isinstance(h, RotatingFileHandler) and Path(h.baseFilename).resolve() == resolved
+            for h in root.handlers
+        )
+        if not has_file_handler:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                resolved,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(formatter)
+            root.addHandler(file_handler)
+
     root.propagate = False
     return root
 

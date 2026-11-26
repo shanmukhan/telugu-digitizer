@@ -17,7 +17,7 @@ Complete guide to running **Telugu Book Digitizer** natively on a **Raspberry Pi
 - **OS:** 64-bit **Raspberry Pi OS / Debian Bookworm or Trixie (`aarch64`)** or **Ubuntu Server 24.04 ARM64**. Verify `uname -m` returns `aarch64`. (`install.sh` automatically selects `libglib2.0-0t64` on Trixie or `libglib2.0-0` on Bookworm.)
 - **OCR Engines on `linux_aarch64`:**
   - **Tesseract 5 (`tel.traineddata` from `tessdata_best`)** runs natively and quickly.
-  - **PaddlePaddle `3.3.1`** provides official `linux_aarch64` CPU wheels including Python 3.13 (`cp313-linux_aarch64`) at `https://www.paddlepaddle.org.cn/packages/stable/cpu/`. On lower-RAM Pis (`<= 4 GB`), pass `--tesseract-only` to `install.sh` (sets `ENABLE_PADDLE_OCR=false`).
+  - **PaddlePaddle `3.3.1`** provides official `linux_aarch64` CPU wheels including Python 3.13 (`cp313-linux_aarch64`) at `https://www.paddlepaddle.org.cn/packages/stable/cpu/`. On Raspberry Pi (`linux_aarch64`), keep single-threaded CPU math env vars (`OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `PADDLE_PDX_CPU_NUM_THREADS=1`) because OpenBLAS multi-threading (`cpu_threads=10` default in PaddleX) segfaults on ARM64; `PaddleOCRProvider` also enforces `cpu_threads=1` and `text_det_limit_type="max"` (`text_det_limit_side_len=1280`) automatically on Linux ARM64 to prevent multi-GB allocations on oversized scans. On lower-RAM Pis (`<= 4 GB`), pass `--tesseract-only` to `install.sh` (sets `ENABLE_PADDLE_OCR=false`).
 
 ---
 
@@ -78,9 +78,10 @@ docker compose -f deploy/compose.lahari.yml --env-file deploy/.env.lahari up -d 
 ## 6. Operations & Backups
 
 ```sh
-# Check live service status and logs (native systemd install)
+# Check live service status, systemd journal, and persistent rotating disk logs
 sudo systemctl status telugu-digitizer
 sudo journalctl -u telugu-digitizer -f
+tail -f workspace/logs/telugu-digitizer.log
 
 # Back up PostgreSQL & workspace files
 pg_dump -U telugu_digitizer -h 127.0.0.1 telugu_digitizer > backup_$(date +%F).sql

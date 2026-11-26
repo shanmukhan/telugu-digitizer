@@ -7,13 +7,16 @@ import importlib.util
 import json
 import logging
 import platform
+import resource
 import shutil
+import sys
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
 import pymupdf
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +43,12 @@ ENGINE_ALIASES: dict[str, str] = {
 }
 
 ALLOWED_PREPROCESSING_PROFILES = {"none", "deskew", "contrast_clahe"}
+
+
+def _peak_rss_mb() -> float:
+    raw = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return round(raw / divisor, 1)
 
 
 def canonicalize_engine_name(raw_name: str) -> str:
@@ -446,6 +455,16 @@ class OCRJobExecutor:
                     job.completed_at = ocr_run.completed_at
                     job.error_details = {"init_error": ocr_run.error_summary}
                 db.commit()
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Failed to initialize OCR provider in backend job",
+                    run_id=str(ocr_run.id),
+                    book_id=str(book.id),
+                    engine=canonical_engine,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
                 return
 
             completed_pages = 0
@@ -498,6 +517,25 @@ class OCRJobExecutor:
                             page_number=page.page_number,
                             render_dpi=render_dpi,
                             profile=preprocessing_profile,
+                        )
+                        try:
+                            with Image.open(img_path) as im:
+                                img_w, img_h = im.size
+                        except Exception:
+                            img_w, img_h = (None, None)
+                        log_event(
+                            LOGGER,
+                            logging.INFO,
+                            "Starting OCR page in backend job",
+                            run_id=str(ocr_run.id),
+                            book_id=str(book.id),
+                            page_number=page.page_number,
+                            engine=canonical_engine,
+                            preprocessing_profile=preprocessing_profile,
+                            render_dpi=render_dpi,
+                            width_px=img_w,
+                            height_px=img_h,
+                            rss_mb=_peak_rss_mb(),
                         )
                         recognition = provider.recognize(img_path)
 
@@ -553,6 +591,8 @@ class OCRJobExecutor:
                             page_number=page.page_number,
                             engine=canonical_engine,
                             block_count=len(recognition["blocks"]),
+                            elapsed_ms=recognition.get("elapsed_ms"),
+                            rss_mb=_peak_rss_mb(),
                         )
                     except Exception as exc:
                         db.rollback()

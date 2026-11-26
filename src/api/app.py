@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,22 +15,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from src.api.errors import AppError
 from src.api.routes import router as v1_router
-from src.common.logging_utils import configure_logging
+from src.common.logging_utils import configure_logging, log_event
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
 from src.db.models import OCRRun, ProcessingJob
 from src.db.session import build_engine, build_session_factory
 from src.services.ocr_service import OCRJobExecutor
 
+LOGGER = logging.getLogger("telugu_digitizer.api")
+
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
     """Create and configure the FastAPI Phase 2 backend application."""
     cfg = settings or AppSettings.from_env()
-    configure_logging("INFO")
+    configure_logging("INFO", log_file=cfg.workspace_dir / "logs" / "telugu-digitizer.log")
     engine = build_engine(cfg.database_url)
     session_factory = build_session_factory(engine)
     storage = LocalFilesystemStorage(cfg.workspace_dir)
@@ -43,17 +46,31 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         # Recover any runs left in 'running' or 'queued' state by a previous unexpected shutdown.
         with session_factory() as db:
-            db.execute(
-                update(OCRRun)
-                .where(OCRRun.status.in_(["running", "queued"]))
-                .values(status="partial", error_summary="Interrupted before completion; ready to resume.")
-            )
-            db.execute(
-                update(ProcessingJob)
-                .where(ProcessingJob.status.in_(["running", "queued"]))
-                .values(status="partial")
-            )
-            db.commit()
+            interrupted_ids = [
+                str(rid)
+                for rid in db.scalars(
+                    select(OCRRun.id).where(OCRRun.status.in_(["running", "queued"]))
+                ).all()
+            ]
+            if interrupted_ids:
+                db.execute(
+                    update(OCRRun)
+                    .where(OCRRun.status.in_(["running", "queued"]))
+                    .values(status="partial", error_summary="Interrupted before completion; ready to resume.")
+                )
+                db.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.status.in_(["running", "queued"]))
+                    .values(status="partial")
+                )
+                db.commit()
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Recovered interrupted OCR runs after unexpected shutdown",
+                    count=len(interrupted_ids),
+                    run_ids=interrupted_ids,
+                )
         try:
             yield
         finally:
@@ -105,6 +122,20 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "error": {
                     "code": "HTTP_ERROR",
                     "message": str(exc.detail),
+                    "details": {},
+                }
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        LOGGER.exception("Unhandled server exception on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": f"Unexpected server error: {type(exc).__name__}",
                     "details": {},
                 }
             },

@@ -124,3 +124,33 @@ def test_basic_auth_cors_and_capabilities_for_hosted_deployment(hosted_client: T
     )
     assert disabled_run.status_code == 503
     assert disabled_run.json()["error"]["code"] == "OCR_MODEL_NOT_AVAILABLE"
+
+
+def test_persistent_rotating_log_file_created_on_startup(tmp_path: Path) -> None:
+    engine = build_engine(TEST_DB_URL)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        engine.dispose()
+        pytest.skip(f"PostgreSQL test DB unavailable: {exc}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    ws = (tmp_path / "workspace").resolve()
+    settings = AppSettings(
+        database_url=TEST_DB_URL,
+        workspace_dir=ws,
+        tessdata_dir=(repo_root / "models" / "tesseract" / "tessdata").resolve(),
+        tesseract_cmd=None,
+        api_host="127.0.0.1",
+        api_port=8000,
+        max_upload_mb=50,
+        max_pdf_pages=200,
+        default_render_dpi=300,
+        paddle_device="cpu",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+    assert (ws / "logs" / "telugu-digitizer.log").is_file()
+    engine.dispose()

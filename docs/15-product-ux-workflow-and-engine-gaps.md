@@ -203,3 +203,12 @@ Comprehensive audit of functional gaps, edge-case bugs, workflow limitations, an
    - Deduplicate `CorrectionMemory` entries on creation, strip punctuation during n-gram token matching, and allow promoting `book_only` entries to `global_suggestion`.
    - Implement `TrainingSample` line-image cropping on consented books (`training_consent == True`).
    - Add `deskew` and `contrast_clahe` preprocessing profiles in `src/services/ocr_service.py` and validate against a 20–30 page gold dataset in `data/gold/`.
+
+---
+
+## 6. Post-Audit Production Hardening (2026-11-25)
+
+All Milestones 1–3 code fixes (plus an additional Raspberry Pi field fix) have been implemented:
+- **Smart Page-Aware Engine Selection & Export Fallback (`review_service.py`, `export_service.py`, `ReviewEditorPanel.tsx`):** Fixed an edge case where an interrupted `0/N` `partial` PaddleOCR run masked a completed `N/N` Tesseract run and showed `"No OCR text extracted"` in the editor.
+- **ARM64 `SIGSEGV` & Memory Guards (`paddle_provider.py`, `deploy/raspberry-pi/`):** Forced single-threaded BLAS (`cpu_threads=1`, `PADDLE_PDX_CPU_NUM_THREADS=1`), bounded detection side limits (`text_det_limit_type="max"`, `1280` on ARM64), and bounded systemd service memory (`MemoryHigh=3500M`, `MemoryMax=4500M`).
+- **Crash & Post-Mortem Logging (`logging_utils.py`, `run_api.py`, `app.py`, `ocr_service.py`):** Enabled `faulthandler`, persistent rotating logs in `WORKSPACE_DIR/logs/telugu-digitizer.log`, pre-OCR pixel-size + RSS logs, startup crash-recovery warnings, and unhandled HTTP `500` logging.
