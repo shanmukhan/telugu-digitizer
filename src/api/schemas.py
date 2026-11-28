@@ -132,6 +132,67 @@ class BookStateUpdateRequest(BaseModel):
     processing_state: str = Field(..., max_length=32)
 
 
+class CalibrationReapplyResponse(BaseModel):
+    book_id: UUID
+    pages_scanned: int
+    pages_updated: int
+    blocks_updated: int
+    active_rules_count: int
+
+
+class LegacyCorrectionNormalizeResponse(BaseModel):
+    inspected_count: int
+    split_legacy_rows: int
+    cleaned_punct_rows: int
+    created_word_rules: int
+    merged_duplicates: int
+
+
+class BookTrainingConsentRequest(BaseModel):
+    training_consent: bool
+    harvest_existing: bool = True
+
+
+class BookTrainingConsentResponse(BaseModel):
+    book_id: UUID
+    training_consent: bool
+    harvested_crops_count: int
+    total_book_samples: int
+
+
+class TrainingBookSummaryItem(BaseModel):
+    book_id: UUID
+    title: str
+    training_consent: bool
+    verified_samples_count: int
+
+
+class TrainingDatasetSummaryResponse(BaseModel):
+    total_verified_samples: int
+    unique_crop_hashes: int
+    consented_books_count: int
+    selected_book_consent: bool | None = None
+    selected_book_samples: int = 0
+    books: list[TrainingBookSummaryItem] = Field(default_factory=list)
+
+
+class TrainingDatasetExportRequest(BaseModel):
+    book_id: UUID | None = None
+    val_ratio: float = Field(default=0.15, ge=0.05, le=0.4)
+
+
+class TrainingDatasetExportResponse(BaseModel):
+    export_id: UUID
+    filename: str
+    total_samples: int
+    train_count: int
+    val_count: int
+    deduplicated_skipped: int
+    archive_sha256: str
+    download_url: str
+    created_at: datetime
+
+
 class BookListResponse(BaseModel):
     items: list[BookSummaryResponse]
 

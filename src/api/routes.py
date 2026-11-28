@@ -31,8 +31,11 @@ from src.api.schemas import (
     BookPagesResponse,
     BookStateUpdateRequest,
     BookSummaryResponse,
+    BookTrainingConsentRequest,
+    BookTrainingConsentResponse,
     BookUploadResponse,
     CalibrationProcessRemainingRequest,
+    CalibrationReapplyResponse,
     CalibrationRunResponse,
     CalibrationStartRequest,
     CapabilitiesResponse,
@@ -57,6 +60,7 @@ from src.api.schemas import (
     ExportListResponse,
     ExportRecordResponse,
     HealthResponse,
+    LegacyCorrectionNormalizeResponse,
     ManualBlockCreateRequest,
     ManualBlockCreateResponse,
     OCRBlockResponse,
@@ -72,6 +76,9 @@ from src.api.schemas import (
     PageReviewStatusRequest,
     PageReviewStatusResponse,
     PageSummaryResponse,
+    TrainingDatasetExportRequest,
+    TrainingDatasetExportResponse,
+    TrainingDatasetSummaryResponse,
 )
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
@@ -86,6 +93,7 @@ from src.services.book_service import (
 from src.services.calibration_service import (
     complete_book_calibration,
     get_book_calibration_status,
+    reapply_calibration_rules_to_unreviewed_pages,
     start_book_calibration,
     start_remaining_pages_ocr,
     update_book_processing_state,
@@ -94,11 +102,18 @@ from src.services.correction_service import (
     approve_correction,
     delete_correction_entry,
     list_corrections_enriched,
+    normalize_legacy_phrase_rules,
     reject_correction,
     search_corrections,
     serialize_correction_record_dict,
     update_correction_entry,
     update_correction_status,
+)
+from src.services.training_service import (
+    export_visual_training_dataset,
+    get_training_dataset_summary,
+    resolve_training_export_archive,
+    set_book_training_consent,
 )
 from src.services.dictionary_service import (
     check_telugu_text,
@@ -417,6 +432,45 @@ def post_process_remaining_pages(
         apply_calibration_corrections=payload.apply_calibration_corrections,
     )
     return CalibrationRunResponse(**res)
+
+
+@router.post(
+    "/books/{book_id}/calibration/reapply-unreviewed",
+    response_model=CalibrationReapplyResponse,
+)
+def post_reapply_calibration_unreviewed(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> CalibrationReapplyResponse:
+    return CalibrationReapplyResponse(
+        **reapply_calibration_rules_to_unreviewed_pages(
+            db=db,
+            book_id=book_id,
+            lexicon_path=settings.lexicon_path,
+        )
+    )
+
+
+@router.post(
+    "/books/{book_id}/training-consent",
+    response_model=BookTrainingConsentResponse,
+)
+def post_book_training_consent(
+    book_id: uuid.UUID,
+    payload: BookTrainingConsentRequest,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> BookTrainingConsentResponse:
+    return BookTrainingConsentResponse(
+        **set_book_training_consent(
+            db=db,
+            storage=storage,
+            book_id=book_id,
+            training_consent=payload.training_consent,
+            harvest_existing=payload.harvest_existing,
+        )
+    )
 
 
 @router.delete("/books/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1032,6 +1086,62 @@ def delete_correction_memory_entry(
 ) -> Response:
     delete_correction_entry(db, correction_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/corrections/normalize-legacy",
+    response_model=LegacyCorrectionNormalizeResponse,
+)
+def post_normalize_legacy_corrections(
+    db: Annotated[Session, Depends(get_db)],
+    book_id: uuid.UUID | None = None,
+) -> LegacyCorrectionNormalizeResponse:
+    return LegacyCorrectionNormalizeResponse(
+        **normalize_legacy_phrase_rules(db=db, book_id=book_id)
+    )
+
+
+@router.get("/training/summary", response_model=TrainingDatasetSummaryResponse)
+def get_training_summary(
+    db: Annotated[Session, Depends(get_db)],
+    book_id: uuid.UUID | None = None,
+) -> TrainingDatasetSummaryResponse:
+    return TrainingDatasetSummaryResponse(
+        **get_training_dataset_summary(db=db, book_id=book_id)
+    )
+
+
+@router.post(
+    "/training/export",
+    response_model=TrainingDatasetExportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_export_training_dataset(
+    payload: TrainingDatasetExportRequest,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> TrainingDatasetExportResponse:
+    return TrainingDatasetExportResponse(
+        **export_visual_training_dataset(
+            db=db,
+            storage=storage,
+            book_id=payload.book_id,
+            val_ratio=payload.val_ratio,
+        )
+    )
+
+
+@router.get("/training/exports/{export_id}/download")
+def download_training_dataset(
+    export_id: uuid.UUID,
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> Response:
+    archive_path, filename = resolve_training_export_archive(storage, export_id)
+    return FileResponse(
+        path=archive_path,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _serialize_export_record(row: DocumentExport) -> ExportRecordResponse:

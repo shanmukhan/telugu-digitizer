@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import {
   deleteCorrectionEntry,
+  exportTrainingDataset,
+  getTrainingDatasetSummary,
   listCorrectionsWithMeta,
+  normalizeLegacyCorrections,
+  resolveAppUrl,
+  setBookTrainingConsent,
   updateCorrectionEntry,
   updateCorrectionStatus,
 } from "../api/client";
-import type { CorrectionMemoryRecord } from "../types/api";
+import type {
+  CorrectionMemoryRecord,
+  TrainingDatasetExportResult,
+  TrainingDatasetSummary,
+} from "../types/api";
 import { formatCorrectionScope, formatCorrectionType, formatUnitType } from "../utils/formatters";
 
 interface CorrectionMemoryPanelProps {
@@ -55,6 +64,14 @@ export function CorrectionMemoryPanel({
   const [editLeftCtx, setEditLeftCtx] = useState("");
   const [editRightCtx, setEditRightCtx] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // Legacy normalization & visual fine-tuning dataset state
+  const [normalizingLegacy, setNormalizingLegacy] = useState(false);
+  const [trainingSummary, setTrainingSummary] = useState<TrainingDatasetSummary | null>(null);
+  const [busyTraining, setBusyTraining] = useState(false);
+  const [lastTrainingExport, setLastTrainingExport] = useState<TrainingDatasetExportResult | null>(
+    null,
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -110,6 +127,85 @@ export function CorrectionMemoryPanel({
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadTrainingSummary = useCallback(async () => {
+    try {
+      const summary = await getTrainingDatasetSummary(selectedBookId);
+      setTrainingSummary(summary);
+    } catch {
+      // Optional summary endpoint; keep silent if mocked/unavailable.
+    }
+  }, [selectedBookId]);
+
+  useEffect(() => {
+    void loadTrainingSummary();
+  }, [loadTrainingSummary]);
+
+  async function handleNormalizeLegacy() {
+    setNormalizingLegacy(true);
+    try {
+      const res = await normalizeLegacyCorrections(bookOnlyFilter ? selectedBookId : null);
+      const totalChanges = res.split_legacy_rows + res.cleaned_punct_rows + res.merged_duplicates;
+      onStatusBanner(
+        totalChanges > 0 ? "success" : "info",
+        totalChanges > 0
+          ? `Normalized ${res.split_legacy_rows} legacy phrase rule(s) into ${res.created_word_rules} word-level rule(s) (${res.cleaned_punct_rows} punctuation cleaned, ${res.merged_duplicates} duplicates merged).`
+          : "All correction memory rules are already normalized at the word level.",
+      );
+      await load();
+    } catch (err) {
+      onStatusBanner(
+        "error",
+        err instanceof Error ? err.message : "Failed to normalize legacy rules.",
+      );
+    } finally {
+      setNormalizingLegacy(false);
+    }
+  }
+
+  async function handleToggleTrainingConsent() {
+    if (!selectedBookId || !trainingSummary) return;
+    setBusyTraining(true);
+    try {
+      const nextConsent = !trainingSummary.selected_book_consent;
+      const res = await setBookTrainingConsent(selectedBookId, nextConsent, true);
+      onStatusBanner(
+        "success",
+        nextConsent
+          ? `Enabled training crop collection for this book (+${res.harvested_crops_count} newly harvested; ${res.total_book_samples} verified crop(s) ready).`
+          : "Disabled training crop collection for this book.",
+      );
+      await loadTrainingSummary();
+    } catch (err) {
+      onStatusBanner(
+        "error",
+        err instanceof Error ? err.message : "Failed to update training consent.",
+      );
+    } finally {
+      setBusyTraining(false);
+    }
+  }
+
+  async function handleExportTrainingBundle() {
+    setBusyTraining(true);
+    try {
+      const res = await exportTrainingDataset({
+        bookId: bookOnlyFilter ? selectedBookId : null,
+      });
+      setLastTrainingExport(res);
+      onStatusBanner(
+        "success",
+        `Exported ${res.total_samples} verified line crops (train=${res.train_count}, val=${res.val_count}) for PaddleOCR & Tesseract fine-tuning.`,
+      );
+    } catch (err) {
+      onStatusBanner(
+        "error",
+        err instanceof Error ? err.message : "Failed to export training dataset.",
+      );
+    } finally {
+      setBusyTraining(false);
+    }
+  }
 
   function handleSearchSubmit(e: FormEvent) {
     e.preventDefault();
@@ -257,6 +353,15 @@ export function CorrectionMemoryPanel({
               ⚠ {conflictsCount} Conflict{conflictsCount === 1 ? "" : "s"}
             </button>
           )}
+          <button
+            type="button"
+            className="btn-compact"
+            disabled={normalizingLegacy || loading}
+            title="Split legacy multi-word phrase entries into reusable word-level rules and strip stray shared edge punctuation"
+            onClick={() => void handleNormalizeLegacy()}
+          >
+            {normalizingLegacy ? "Cleaning…" : "✨ Split Legacy Phrases"}
+          </button>
         </div>
       </div>
 
@@ -647,6 +752,64 @@ export function CorrectionMemoryPanel({
             </div>
           )}
         </>
+      )}
+
+      {trainingSummary && (
+        <section className="training-dataset-card" aria-label="Visual OCR fine-tuning dataset">
+          <div className="section-head-row" style={{ gap: "0.75rem" }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: "0.96rem" }}>
+                🎓 Visual OCR Fine-Tuning Dataset (PaddleOCR PP-OCRv5 &amp; Tesseract 5)
+              </h3>
+              <p className="hint-text" style={{ margin: "0.2rem 0 0" }}>
+                Export verified line image crops and ground-truth labels (deduplicated, page-split
+                train/val, with ready-to-run config) for offline visual OCR model fine-tuning.
+              </p>
+            </div>
+            <div className="badge-row">
+              <span className="badge ok">
+                {trainingSummary.unique_crop_hashes} unique crop
+                {trainingSummary.unique_crop_hashes === 1 ? "" : "s"}
+              </span>
+              <span className="badge">
+                {trainingSummary.consented_books_count} consented book
+                {trainingSummary.consented_books_count === 1 ? "" : "s"}
+              </span>
+            </div>
+          </div>
+
+          <div className="badge-row" style={{ marginTop: "0.55rem" }}>
+            {selectedBookId && (
+              <button
+                type="button"
+                className="btn-compact"
+                disabled={busyTraining}
+                onClick={() => void handleToggleTrainingConsent()}
+              >
+                {trainingSummary.selected_book_consent
+                  ? `✓ Collecting Crops for This Book (${trainingSummary.selected_book_samples})`
+                  : "＋ Enable & Harvest Verified Crops for This Book"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="primary btn-compact"
+              disabled={busyTraining || trainingSummary.total_verified_samples === 0}
+              onClick={() => void handleExportTrainingBundle()}
+            >
+              {busyTraining ? "Building ZIP…" : "⬇ Export Fine-Tuning Bundle (.zip)"}
+            </button>
+            {lastTrainingExport && (
+              <a
+                className="btn-compact primary"
+                href={resolveAppUrl(lastTrainingExport.download_url)}
+                download={lastTrainingExport.filename}
+              >
+                Download {lastTrainingExport.filename} ({lastTrainingExport.total_samples} crops)
+              </a>
+            )}
+          </div>
+        </section>
       )}
     </section>
   );

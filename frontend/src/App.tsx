@@ -14,6 +14,7 @@ import {
   listBookPages,
   listBooks,
   processRemainingPages,
+  reapplyCalibrationUnreviewed,
   rejectCorrection,
   resumeOcrRun,
   startBookCalibration,
@@ -858,6 +859,30 @@ export function App() {
     }
   }
 
+  async function handleReapplyCalibrationRules() {
+    if (!selectedBookId) return;
+    try {
+      const res = await reapplyCalibrationUnreviewed(selectedBookId);
+      await Promise.all([
+        refreshBookDetail(selectedBookId),
+        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+      ]);
+      handleStatusBanner(
+        res.blocks_updated > 0 ? "success" : "info",
+        res.blocks_updated > 0
+          ? `Applied learned rules to ${res.blocks_updated} block(s) across ${res.pages_updated} unreviewed page(s) (scanned ${res.pages_scanned} page(s); raw OCR & approved pages preserved).`
+          : `Scanned ${res.pages_scanned} unreviewed page(s) with ${res.active_rules_count} active rule(s); no new safe replacements needed.`,
+      );
+    } catch (err) {
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError
+          ? `${err.code}: ${err.message}`
+          : "Failed to re-apply calibration rules.",
+      );
+    }
+  }
+
   async function handleConfirmSwitchBook(options: {
     targetBookId: string | null;
     openImport: boolean;
@@ -1471,6 +1496,7 @@ export function App() {
             onQuickStartFull={() => handleStartOcr("full")}
             onStartCalibration={handleStartCalibration}
             onProcessRemainingWithCalibration={handleProcessRemainingWithCalibration}
+            onReapplyCalibrationRules={handleReapplyCalibrationRules}
             onContinueRemaining={(startPage, endPage, quickTesseract) =>
               handleStartOcr(quickTesseract ? "quick_tesseract" : "remaining", {
                 start: startPage,
@@ -1793,6 +1819,7 @@ export function App() {
           onStartOcr={handleStartOcr}
           onStartCalibration={handleStartCalibration}
           onProcessRemainingWithCalibration={handleProcessRemainingWithCalibration}
+          onReapplyCalibrationRules={handleReapplyCalibrationRules}
           onResumeRun={handleResumeRun}
           onCancelRun={handleCancelRun}
           onClose={() => setOcrDrawerOpen(false)}

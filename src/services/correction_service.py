@@ -878,6 +878,141 @@ def delete_correction_entry(db: Session, correction_id: uuid.UUID) -> None:
     bump_sentence_context_epoch()
 
 
+def normalize_legacy_phrase_rules(
+    db: Session,
+    *,
+    language_code: str = "te",
+    book_id: uuid.UUID | None = None,
+) -> dict[str, int]:
+    """Split legacy multi-word phrase rules into reusable word-level rules and strip shared edge punctuation.
+
+    Preserves genuine compact word-boundary merges/splits (e.g. 'పుస్త కం -> పుస్తకం') while
+    decomposing multi-word edits (e.g. 'పబ్లీషన్ హ్రౌదరాబాదు -> పబ్లికేషన్స్ హైదరాబాదు')
+    into independent word-level entries inheriting evidence, scope, and provenance.
+    """
+    stmt = select(CorrectionMemory).where(CorrectionMemory.language_code == language_code)
+    if book_id is not None:
+        stmt = stmt.where(CorrectionMemory.book_id == book_id)
+    rows = list(db.scalars(stmt.order_by(CorrectionMemory.created_at.asc(), CorrectionMemory.id.asc())).all())
+
+    inspected = 0
+    split_legacy_rows = 0
+    cleaned_punct_rows = 0
+    created_word_rules = 0
+    merged_duplicates = 0
+
+    for row in rows:
+        inspected += 1
+        inc = normalize_nfc(row.incorrect_text).strip()
+        cor = normalize_nfc(row.corrected_text).strip()
+        if not inc or not cor:
+            continue
+
+        inc_tokens = inc.split()
+        cor_tokens = cor.split()
+
+        # Case A: Single-token rule with shared edge punctuation (e.g. '(పగమబాగం- -> ప్రథమభాగం-').
+        if len(inc_tokens) == 1 and len(cor_tokens) == 1:
+            cleaned_inc, cleaned_cor = _strip_shared_edge_punct(inc, cor)
+            if cleaned_inc != inc or cleaned_cor != cor or row.unit_type != classify_unit_type(cleaned_inc, cleaned_cor):
+                # Check if an equivalent rule already exists to merge cleanly.
+                dup_stmt = select(CorrectionMemory).where(
+                    CorrectionMemory.id != row.id,
+                    CorrectionMemory.language_code == row.language_code,
+                    CorrectionMemory.incorrect_text == cleaned_inc,
+                    CorrectionMemory.corrected_text == cleaned_cor,
+                    CorrectionMemory.scope == row.scope,
+                )
+                if row.scope == "book_only":
+                    dup_stmt = dup_stmt.where(CorrectionMemory.book_id == row.book_id)
+                existing_dup = None
+                for cand in db.scalars(dup_stmt).all():
+                    if cand.left_context == row.left_context and cand.right_context == row.right_context:
+                        existing_dup = cand
+                        break
+                if existing_dup is not None:
+                    existing_dup.approved_count += row.approved_count
+                    existing_dup.rejected_count += row.rejected_count
+                    db.delete(row)
+                    merged_duplicates += 1
+                else:
+                    row.incorrect_text = cleaned_inc
+                    row.corrected_text = cleaned_cor
+                    row.normalized_incorrect = normalize_lookup_form(cleaned_inc)
+                    row.unit_type = classify_unit_type(cleaned_inc, cleaned_cor)
+                    cleaned_punct_rows += 1
+            continue
+
+        # Case B: Multi-word rule -> try splitting into independent word-level corrections.
+        extracted = extract_word_level_corrections(inc, cor)
+        if not extracted:
+            continue
+        # Only replace the legacy phrase row if it splits into >= 2 smaller units OR shrinks to a single clean word.
+        is_decomposed = len(extracted) > 1 or (
+            len(extracted) == 1
+            and len(extracted[0][0].split()) == 1
+            and len(extracted[0][1].split()) == 1
+            and (extracted[0][0] != inc or extracted[0][1] != cor)
+        )
+        if not is_decomposed:
+            continue
+
+        emitted_any = False
+        for idx, (sub_inc, sub_cor, sub_left, sub_right) in enumerate(extracted):
+            safe, _ = is_safe_auto_memory_rule(sub_inc, sub_cor)
+            if not safe:
+                continue
+            # Combine inherited outer context with local sub-token context when helpful.
+            eff_left = sub_left if sub_left else (row.left_context if idx == 0 else None)
+            eff_right = sub_right if sub_right else (row.right_context if idx == len(extracted) - 1 else None)
+            new_entry = create_correction_memory_entry(
+                db=db,
+                incorrect_text=sub_inc,
+                corrected_text=sub_cor,
+                left_context=eff_left,
+                right_context=eff_right,
+                correction_type=row.correction_type,
+                scope=row.scope,
+                book_id=row.book_id,
+                source_ocr_block_id=row.source_ocr_block_id,
+                source_page_number=row.source_page_number,
+                language_code=row.language_code,
+            )
+            # Preserve prior evidence counts beyond the initial +1 created above.
+            if row.approved_count > 1:
+                new_entry.approved_count += row.approved_count - 1
+            if row.rejected_count > 0:
+                new_entry.rejected_count += row.rejected_count
+            if row.status != "active":
+                new_entry.status = row.status
+            created_word_rules += 1
+            emitted_any = True
+
+        if emitted_any:
+            db.delete(row)
+            split_legacy_rows += 1
+
+    db.commit()
+    bump_sentence_context_epoch()
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Normalized legacy correction memory rules",
+        inspected=inspected,
+        split_legacy_rows=split_legacy_rows,
+        cleaned_punct_rows=cleaned_punct_rows,
+        created_word_rules=created_word_rules,
+        merged_duplicates=merged_duplicates,
+    )
+    return {
+        "inspected_count": inspected,
+        "split_legacy_rows": split_legacy_rows,
+        "cleaned_punct_rows": cleaned_punct_rows,
+        "created_word_rules": created_word_rules,
+        "merged_duplicates": merged_duplicates,
+    }
+
+
 def _compute_active_conflicts(
     db: Session,
     language_code: str = "te",

@@ -818,16 +818,25 @@ def apply_learned_corrections_to_page_blocks(
                 applied_rules=applied_rules,
             )
         )
-        db.add(
-            DocumentTextBlock(
-                version_id=version.id,
-                book_page_id=page.id,
-                ocr_block_id=blk.id,
-                final_text=updated_text,
-                reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
-                block_role="paragraph",
+        existing_doc_blk = db.scalars(
+            select(DocumentTextBlock).where(
+                DocumentTextBlock.version_id == version.id,
+                DocumentTextBlock.ocr_block_id == blk.id,
             )
-        )
+        ).first()
+        if existing_doc_blk is None:
+            db.add(
+                DocumentTextBlock(
+                    version_id=version.id,
+                    book_page_id=page.id,
+                    ocr_block_id=blk.id,
+                    final_text=updated_text,
+                    reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
+                    block_role="paragraph",
+                )
+            )
+        else:
+            existing_doc_blk.final_text = updated_text
         auto_applied_blocks += 1
 
     if used_entry_ids:
@@ -837,6 +846,157 @@ def apply_learned_corrections_to_page_blocks(
                 entry.last_used_at = now
 
     return auto_applied_blocks
+
+
+def reapply_calibration_rules_to_unreviewed_pages(
+    *,
+    db: Session,
+    book_id: uuid.UUID,
+    lexicon_path: Path | None = None,
+) -> dict[str, Any]:
+    """Safely re-apply all current learned word/pattern rules to already-OCR'd unreviewed pages.
+
+    Strict safety guarantees:
+    - Never touches pages whose ``review_status == 'approved'``.
+    - Never touches any block that already has a human edit (``corrected``, ``approved``, ``ignored``, ``reverted``).
+    - Never overwrites ``ocr_blocks.raw_text``; updates are append-only ``ReviewEdit(action='auto_applied')``.
+    - Skips no-op re-applications when a block's latest ``auto_applied`` text already matches.
+    """
+    from src.services.review_service import _resolve_primary_run_id_for_page
+
+    book = db.get(Book, book_id)
+    if book is None:
+        raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
+
+    # First harvest any newly saved calibration edits so rules are up to date.
+    harvest_calibration_corrections(db, book)
+
+    start_p = book.calibration_start_page or 1
+    end_p = book.calibration_end_page or book.page_count
+
+    unreviewed_pages = list(
+        db.scalars(
+            select(BookPage)
+            .where(
+                BookPage.book_id == book.id,
+                BookPage.page_number >= start_p,
+                BookPage.page_number <= end_p,
+                BookPage.review_status != "approved",
+                BookPage.page_kind != "digital_text",
+            )
+            .order_by(BookPage.page_number)
+        ).all()
+    )
+
+    pages_scanned = 0
+    pages_updated = 0
+    blocks_updated = 0
+
+    for page in unreviewed_pages:
+        run_id = _resolve_primary_run_id_for_page(db, book.id, page.id)
+        if run_id is None:
+            continue
+        page_blocks = list(
+            db.scalars(
+                select(OCRBlock)
+                .where(OCRBlock.ocr_run_id == run_id, OCRBlock.book_page_id == page.id)
+                .order_by(OCRBlock.reading_order, OCRBlock.block_index)
+            ).all()
+        )
+        if not page_blocks:
+            continue
+        pages_scanned += 1
+
+        block_ids = [b.id for b in page_blocks]
+        edits_by_block: dict[uuid.UUID, list[ReviewEdit]] = defaultdict(list)
+        for ed in db.scalars(
+            select(ReviewEdit)
+            .where(ReviewEdit.ocr_block_id.in_(block_ids))
+            .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+        ).all():
+            edits_by_block[ed.ocr_block_id].append(ed)
+
+        # Only consider blocks that have ZERO human edits (untouched or previously auto_applied only).
+        eligible_blocks: list[OCRBlock] = []
+        prior_auto_text: dict[uuid.UUID, str] = {}
+        for blk in page_blocks:
+            blk_edits = edits_by_block.get(blk.id, [])
+            has_human_action = any(
+                e.action in ("corrected", "approved", "ignored", "reverted") for e in blk_edits
+            )
+            if has_human_action:
+                continue
+            if blk_edits:
+                prior_auto_text[blk.id] = normalize_nfc(blk_edits[-1].edited_text).strip()
+            eligible_blocks.append(blk)
+
+        if not eligible_blocks:
+            continue
+
+        # Run safe auto-application on eligible blocks; deduplicate identical prior auto_applied edits.
+        eligible_ids = {b.id for b in eligible_blocks}
+        applied_cnt = apply_learned_corrections_to_page_blocks(
+            db=db,
+            book=book,
+            page=page,
+            blocks=eligible_blocks,
+            lexicon_path=lexicon_path,
+        )
+        if applied_cnt > 0:
+            # Remove no-op auto_applied edits for this page where proposed text equals existing auto_applied text.
+            actually_changed = 0
+            new_edits = [
+                obj
+                for obj in list(db.new)
+                if isinstance(obj, ReviewEdit)
+                and obj.action == "auto_applied"
+                and obj.ocr_block_id in eligible_ids
+            ]
+            for new_ed in new_edits:
+                prev_auto = prior_auto_text.get(new_ed.ocr_block_id)
+                if prev_auto is not None and normalize_nfc(new_ed.edited_text).strip() == prev_auto:
+                    db.expunge(new_ed)
+                else:
+                    actually_changed += 1
+            if actually_changed > 0:
+                pages_updated += 1
+                blocks_updated += actually_changed
+
+    db.commit()
+    bump_sentence_context_epoch()
+
+    active_rules_count = int(
+        db.scalar(
+            select(func.count(CorrectionMemory.id)).where(
+                CorrectionMemory.language_code == book.language_code,
+                CorrectionMemory.status == "active",
+                CorrectionMemory.approved_count > CorrectionMemory.rejected_count,
+                or_(
+                    CorrectionMemory.scope == "global_suggestion",
+                    CorrectionMemory.book_id == book.id,
+                ),
+            )
+        )
+        or 0
+    )
+
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Re-applied learned calibration rules to unreviewed pages",
+        book_id=str(book.id),
+        pages_scanned=pages_scanned,
+        pages_updated=pages_updated,
+        blocks_updated=blocks_updated,
+        active_rules_count=active_rules_count,
+    )
+    return {
+        "book_id": book.id,
+        "pages_scanned": pages_scanned,
+        "pages_updated": pages_updated,
+        "blocks_updated": blocks_updated,
+        "active_rules_count": active_rules_count,
+    }
 
 
 def start_book_calibration(

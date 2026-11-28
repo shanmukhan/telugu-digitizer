@@ -157,6 +157,7 @@ interface OcrProgressStripProps {
     endPage: number;
   }) => Promise<void>;
   onProcessRemainingWithCalibration?: (quickTesseract?: boolean) => Promise<void>;
+  onReapplyCalibrationRules?: () => Promise<void>;
   onContinueRemaining?: (
     startPage: number,
     endPage: number,
@@ -181,6 +182,7 @@ export function OcrProgressStrip({
   onQuickStartFull,
   onStartCalibration,
   onProcessRemainingWithCalibration,
+  onReapplyCalibrationRules,
   onContinueRemaining,
   onPreviewPageJump,
   onOpenOcrDrawer,
@@ -452,6 +454,16 @@ export function OcrProgressStrip({
                 </button>
               )
             )}
+            {onReapplyCalibrationRules && (
+              <button
+                type="button"
+                className="btn-compact"
+                title="Safely apply all learned word & pattern rules to already-OCR'd unreviewed pages without touching approved pages"
+                onClick={() => void onReapplyCalibrationRules()}
+              >
+                ✨ Re-apply Rules to Unreviewed
+              </button>
+            )}
             {onOpenOcrDrawer && (
               <button type="button" className="btn-compact" onClick={onOpenOcrDrawer}>
                 OCR Options…
@@ -518,6 +530,16 @@ export function OcrProgressStrip({
             ) : (
               <button type="button" className="primary btn-compact" onClick={() => void onQuickStartFull()}>
                 Run Full Book OCR
+              </button>
+            )}
+            {onReapplyCalibrationRules && (
+              <button
+                type="button"
+                className="btn-compact"
+                title="Safely apply all learned word & pattern rules to already-OCR'd unreviewed pages without touching approved pages"
+                onClick={() => void onReapplyCalibrationRules()}
+              >
+                ✨ Re-apply Rules to Unreviewed
               </button>
             )}
             {onOpenOcrDrawer && (

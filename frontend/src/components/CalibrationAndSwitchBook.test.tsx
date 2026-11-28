@@ -15,6 +15,10 @@ vi.mock("../api/client", async () => {
     updateCorrectionStatus: vi.fn(),
     updateCorrectionEntry: vi.fn(),
     deleteCorrectionEntry: vi.fn(),
+    normalizeLegacyCorrections: vi.fn(),
+    getTrainingDatasetSummary: vi.fn(),
+    setBookTrainingConsent: vi.fn(),
+    exportTrainingDataset: vi.fn(),
   };
 });
 
@@ -194,6 +198,32 @@ describe("Improved Correction Memory UI", () => {
       ...mockRecords[0],
       corrected_text: "పబ్లికేషన్",
     });
+    vi.mocked(apiClient.normalizeLegacyCorrections).mockResolvedValue({
+      inspected_count: 6,
+      split_legacy_rows: 2,
+      cleaned_punct_rows: 1,
+      created_word_rules: 4,
+      merged_duplicates: 0,
+    });
+    vi.mocked(apiClient.getTrainingDatasetSummary).mockResolvedValue({
+      total_verified_samples: 12,
+      unique_crop_hashes: 12,
+      consented_books_count: 1,
+      selected_book_consent: true,
+      selected_book_samples: 12,
+      books: [],
+    });
+    vi.mocked(apiClient.exportTrainingDataset).mockResolvedValue({
+      export_id: "exp-1",
+      filename: "telugu-ocr-finetune-exp1.zip",
+      total_samples: 12,
+      train_count: 10,
+      val_count: 2,
+      deduplicated_skipped: 0,
+      archive_sha256: "abc",
+      download_url: "/api/v1/training/exports/exp-1/download",
+      created_at: "2026-11-28T10:00:00Z",
+    });
 
     const onStatusBanner = vi.fn();
     render(<CorrectionMemoryPanel selectedBookId="book-1" onStatusBanner={onStatusBanner} />);
@@ -207,6 +237,19 @@ describe("Improved Correction Memory UI", () => {
     expect(screen.getByText(/⚠ Conflict \(2\)/i)).toBeInTheDocument();
     expect(screen.getByText(/86%/)).toBeInTheDocument();
     expect(screen.getByText(/p\.12/i)).toBeInTheDocument();
+
+    // Test legacy phrase split button
+    fireEvent.click(screen.getByRole("button", { name: /Split Legacy Phrases/i }));
+    await waitFor(() => {
+      expect(apiClient.normalizeLegacyCorrections).toHaveBeenCalledTimes(1);
+    });
+
+    // Test visual fine-tuning dataset export button
+    fireEvent.click(screen.getByRole("button", { name: /Export Fine-Tuning Bundle/i }));
+    await waitFor(() => {
+      expect(apiClient.exportTrainingDataset).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByText(/Download telugu-ocr-finetune-exp1\.zip/i)).toBeInTheDocument();
 
     // Open inline editor and save updated text
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));

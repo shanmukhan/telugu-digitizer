@@ -92,3 +92,17 @@ A visible **⇄ Switch Book** button in the top navigation bar (and the book swi
   - Clearly states that **nothing will be deleted** — the current book is paused (`processing_state = "paused"`) with all OCR results, calibration settings, and saved corrections preserved.
   - Offers **Save Drafts & Switch Book** when unsaved page edits exist so zero edits are lost.
   - Safely pauses any active OCR job (saving completed pages as `partial`) so the user can return and resume anytime.
+
+---
+
+## 5. Legacy Phrase Cleanup, Batch Re-Apply, and Visual Fine-Tuning Export
+
+1. **Legacy Multi-Word Cleanup (`POST /api/v1/corrections/normalize-legacy`)**:
+   - Available via **✨ Split Legacy Phrases** in the Correction Memory panel.
+   - Splits legacy multi-word edits into individual reusable word-level rules, strips shared edge punctuation, merges duplicates, and preserves compact word-boundary merges/splits (`unit_type="phrase"`).
+2. **Batch Re-Apply on Unreviewed Pages (`POST /api/v1/books/{book_id}/calibration/reapply-unreviewed`)**:
+   - Available in the OCR status bar and OCR drawer (**✨ Re-apply Rules to Unreviewed**).
+   - Safely applies newly learned rules across already-OCR'd pages whose `review_status != "approved"`, skipping any block with human edits (`corrected`, `approved`, `ignored`, `reverted`) and never modifying `raw_text`.
+3. **Visual OCR Fine-Tuning Dataset Bundle (`POST /api/v1/books/{book_id}/training-consent`, `GET /api/v1/training/summary`, `POST /api/v1/training/export`)**:
+   - Retroactively harvests verified line image crops from human-corrected/approved blocks when training consent is enabled on a book.
+   - Exports a deduplicated, page-split ZIP bundle ready for both **PaddleOCR PP-OCRv5** (`paddleocr/images/`, `train_list.txt`, `val_list.txt`, `rec_te_ppocrv5_finetune.yml`) and **Tesseract 5 `tesstrain`** (`tesseract/ground-truth/*.png` + `*.gt.txt`), plus CLI script `scripts/export_training_dataset.py`.

@@ -38,6 +38,7 @@ interface OcrRunnerDrawerProps {
     endPage: number;
   }) => Promise<void>;
   onProcessRemainingWithCalibration?: (quickTesseract?: boolean) => Promise<void>;
+  onReapplyCalibrationRules?: () => Promise<void>;
   onResumeRun: (runId: string) => Promise<void>;
   onCancelRun: (runId: string) => Promise<void>;
   onClose: () => void;
@@ -69,6 +70,7 @@ export function OcrRunnerDrawer({
   onStartOcr,
   onStartCalibration,
   onProcessRemainingWithCalibration,
+  onReapplyCalibrationRules,
   onResumeRun,
   onCancelRun,
   onClose,
@@ -252,6 +254,25 @@ export function OcrRunnerDrawer({
                   </span>
                 </button>
               )}
+
+            {onReapplyCalibrationRules && completedRuns.length > 0 && (
+              <button
+                type="button"
+                className="preset-card"
+                disabled={isOcrRunning}
+                onClick={async () => {
+                  await onReapplyCalibrationRules();
+                  onClose();
+                }}
+              >
+                <strong>✨ Re-apply Learned Rules to Unreviewed Pages</strong>
+                <span className="hint-text">
+                  Apply newly discovered word-level rules ({calibration?.learned_word_rules_count ?? 0}{" "}
+                  book rules + global memory) across already-OCR&apos;d unreviewed pages. Approved
+                  pages, manual edits, and raw OCR are never overwritten.
+                </span>
+              </button>
+            )}
 
             {coverage.isPartialCoverage && !calibration?.calibration_start_page && (
               <button

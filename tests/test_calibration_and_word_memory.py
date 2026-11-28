@@ -511,3 +511,170 @@ def test_auto_apply_safety_guards_valid_words_and_contextual_conflicts(cal_clien
         assert b0.raw_text == "తెలుగు పదం బాగుంది"
         assert edits_b1 == []
         assert edits_b2 == []
+
+
+def test_normalize_legacy_phrases_batch_reapply_and_visual_training_export(cal_client) -> None:
+    """Verify legacy multi-word cleanup, batch re-apply on unreviewed pages, and visual fine-tuning ZIP export."""
+    import zipfile
+
+    client, app, settings = cal_client
+    if not (settings.tessdata_dir / "tel.traineddata").is_file():
+        pytest.skip("tel.traineddata missing.")
+
+    # 1. Seed legacy multi-word and trailing-punctuation rules and normalize them.
+    with app.state.session_factory() as db:
+        db.add_all(
+            [
+                CorrectionMemory(
+                    language_code="te",
+                    incorrect_text="పబ్లీషన్ హ్రౌదరాబాదు",
+                    normalized_incorrect="పబ్లీషన్ హ్రౌదరాబాదు",
+                    corrected_text="పబ్లికేషన్స్ హైదరాబాదు",
+                    unit_type="phrase",
+                    scope="global_suggestion",
+                    status="active",
+                    approved_count=2,
+                    rejected_count=0,
+                ),
+                CorrectionMemory(
+                    language_code="te",
+                    incorrect_text="(పగమబాగం-",
+                    normalized_incorrect="పగమబాగం",
+                    corrected_text="ప్రథమభాగం-",
+                    unit_type="word",
+                    scope="global_suggestion",
+                    status="active",
+                    approved_count=1,
+                    rejected_count=0,
+                ),
+                CorrectionMemory(
+                    language_code="te",
+                    incorrect_text="పుస్త కం",
+                    normalized_incorrect="పుస్త కం",
+                    corrected_text="పుస్తకం",
+                    unit_type="phrase",
+                    scope="global_suggestion",
+                    status="active",
+                    approved_count=1,
+                    rejected_count=0,
+                ),
+            ]
+        )
+        db.commit()
+
+    norm_res = client.post("/api/v1/corrections/normalize-legacy")
+    assert norm_res.status_code == 200
+    norm_body = norm_res.json()
+    assert norm_body["split_legacy_rows"] == 1
+    assert norm_body["created_word_rules"] == 2
+    assert norm_body["cleaned_punct_rows"] == 1
+
+    all_cm = client.get("/api/v1/corrections").json()["items"]
+    pairs = {(c["incorrect_text"], c["corrected_text"]): c["unit_type"] for c in all_cm}
+    assert pairs[("పబ్లీషన్", "పబ్లికేషన్స్")] == "word"
+    assert pairs[("హ్రౌదరాబాదు", "హైదరాబాదు")] == "word"
+    assert pairs[("(పగమబాగం", "ప్రథమభాగం")] == "word"
+    assert pairs[("పుస్త కం", "పుస్తకం")] == "phrase"
+    assert ("పబ్లీషన్ హ్రౌదరాబాదు", "పబ్లికేషన్స్ హైదరాబాదు") not in pairs
+
+    # 2. Upload 3-page scanned book, OCR all 3 pages, approve page 1, keep pages 2-3 unreviewed.
+    pdf_bytes = _build_multipage_scanned_pdf(
+        [
+            "పాఠశాల పరీక్ష",
+            "పాఠశాల పరీక్ష",
+            "పాఠశాల పరీక్ష",
+        ]
+    )
+    book_id = client.post(
+        "/api/v1/books",
+        files={"file": ("reapply_train.pdf", pdf_bytes, "application/pdf")},
+        data={"title": "Reapply And Train Book"},
+    ).json()["book_id"]
+
+    run_res = client.post(
+        f"/api/v1/books/{book_id}/ocr-runs",
+        json={"engines": ["tesseract_tel_best"]},
+    ).json()
+    _wait_for_run(client, run_res["ocr_run_id"])
+
+    # Edit & approve page 1 (creates a book_only word rule + marks page 1 approved).
+    rev1 = client.get(f"/api/v1/books/{book_id}/pages/1/review").json()
+    blk1 = rev1["blocks"][0]
+    first_word = blk1["raw_text"].strip().split()[0]
+    replacement_word = "కళాశాల"
+    edited1 = blk1["raw_text"].replace(first_word, replacement_word, 1)
+
+    client.post(
+        f"/api/v1/ocr-blocks/{blk1['block_id']}/edits",
+        json={
+            "edited_text": edited1,
+            "action": "corrected",
+            "add_to_correction_memory": True,
+            "memory_scope": "book_only",
+        },
+    )
+    # Reinforce evidence to approved_count=2 so valid-word guard also allows safe auto-apply.
+    client.post(
+        f"/api/v1/ocr-blocks/{blk1['block_id']}/edits",
+        json={
+            "edited_text": edited1,
+            "action": "approved",
+        },
+    )
+    with app.state.session_factory() as db:
+        for cm in db.scalars(select(CorrectionMemory).where(CorrectionMemory.book_id == uuid.UUID(book_id))).all():
+            cm.approved_count = 2
+        db.commit()
+
+    client.patch(
+        f"/api/v1/books/{book_id}/pages/1/review-status",
+        json={"review_status": "approved"},
+    )
+
+    # Batch re-apply learned rules to unreviewed pages (pages 2 & 3 only; page 1 untouched).
+    reapply = client.post(f"/api/v1/books/{book_id}/calibration/reapply-unreviewed")
+    assert reapply.status_code == 200
+    reapply_body = reapply.json()
+    assert reapply_body["pages_scanned"] == 2
+    assert reapply_body["pages_updated"] == 2
+    assert reapply_body["blocks_updated"] == 2
+
+    rev2 = client.get(f"/api/v1/books/{book_id}/pages/2/review").json()
+    assert replacement_word in rev2["blocks"][0]["current_text"]
+    assert rev2["blocks"][0]["latest_action"] == "auto_applied"
+    assert first_word in rev2["blocks"][0]["raw_text"]
+
+    # Idempotent: running re-apply again with no new rules makes 0 redundant updates.
+    reapply_again = client.post(f"/api/v1/books/{book_id}/calibration/reapply-unreviewed").json()
+    assert reapply_again["blocks_updated"] == 0
+
+    # 3. Enable training consent retroactively -> harvests verified crops from page 1 -> export ZIP bundle!
+    consent_res = client.post(
+        f"/api/v1/books/{book_id}/training-consent",
+        json={"training_consent": True, "harvest_existing": True},
+    )
+    assert consent_res.status_code == 200
+    assert consent_res.json()["training_consent"] is True
+    assert consent_res.json()["harvested_crops_count"] >= 1
+    assert consent_res.json()["total_book_samples"] >= 1
+
+    summary = client.get(f"/api/v1/training/summary?book_id={book_id}").json()
+    assert summary["total_verified_samples"] >= 1
+    assert summary["selected_book_consent"] is True
+
+    exp = client.post("/api/v1/training/export", json={"book_id": book_id})
+    assert exp.status_code == 201
+    exp_body = exp.json()
+    assert exp_body["total_samples"] >= 1
+    assert exp_body["download_url"].startswith("/api/v1/training/exports/")
+
+    dl = client.get(exp_body["download_url"])
+    assert dl.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+        names = set(zf.namelist())
+        assert "paddleocr/train_list.txt" in names
+        assert "paddleocr/val_list.txt" in names
+        assert "paddleocr/rec_te_ppocrv5_finetune.yml" in names
+        assert "manifest.json" in names
+        assert any(n.startswith("tesseract/ground-truth/") and n.endswith(".gt.txt") for n in names)
+

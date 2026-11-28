@@ -7,7 +7,9 @@ import type {
   BookOCRRunSummary,
   BookProcessingState,
   BookSummary,
+  BookTrainingConsentResult,
   BookUploadResult,
+  CalibrationReapplyResult,
   CalibrationRunResult,
   CorrectionListResult,
   CorrectionMemoryRecord,
@@ -19,6 +21,7 @@ import type {
   ExportCreatePayload,
   ExportRecord,
   HostCapabilities,
+  LegacyCorrectionNormalizeResult,
   ManualBlockCreateResult,
   OCRRunCreateResult,
   OCRRunStatus,
@@ -26,6 +29,8 @@ import type {
   PageBatchSaveResponse,
   PageReviewPayload,
   PageSummary,
+  TrainingDatasetExportResult,
+  TrainingDatasetSummary,
 } from "../types/api";
 
 export class ApiClientError extends Error {
@@ -171,6 +176,60 @@ export async function updateBookState(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ processing_state: processingState }),
+  });
+}
+
+export async function reapplyCalibrationUnreviewed(
+  bookId: string,
+): Promise<CalibrationReapplyResult> {
+  return requestJson<CalibrationReapplyResult>(
+    `/api/v1/books/${bookId}/calibration/reapply-unreviewed`,
+    { method: "POST" },
+  );
+}
+
+export async function setBookTrainingConsent(
+  bookId: string,
+  trainingConsent: boolean,
+  harvestExisting = true,
+): Promise<BookTrainingConsentResult> {
+  return requestJson<BookTrainingConsentResult>(`/api/v1/books/${bookId}/training-consent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      training_consent: trainingConsent,
+      harvest_existing: harvestExisting,
+    }),
+  });
+}
+
+export async function normalizeLegacyCorrections(
+  bookId?: string | null,
+): Promise<LegacyCorrectionNormalizeResult> {
+  const qs = bookId ? `?book_id=${encodeURIComponent(bookId)}` : "";
+  return requestJson<LegacyCorrectionNormalizeResult>(`/api/v1/corrections/normalize-legacy${qs}`, {
+    method: "POST",
+  });
+}
+
+export async function getTrainingDatasetSummary(
+  bookId?: string | null,
+): Promise<TrainingDatasetSummary> {
+  const qs = bookId ? `?book_id=${encodeURIComponent(bookId)}` : "";
+  return requestJson<TrainingDatasetSummary>(`/api/v1/training/summary${qs}`);
+}
+
+export async function exportTrainingDataset(options?: {
+  bookId?: string | null;
+  valRatio?: number;
+}): Promise<TrainingDatasetExportResult> {
+  return requestJson<TrainingDatasetExportResult>("/api/v1/training/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      book_id: options?.bookId ?? null,
+      val_ratio: options?.valRatio ?? 0.15,
+    }),
   });
 }
 

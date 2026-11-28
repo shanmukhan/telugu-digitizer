@@ -3224,6 +3224,14 @@
     background: color-mix(in srgb, var(--primary-soft) 50%, var(--surface));
   }
 
+  .training-dataset-card {
+    margin-block-start: 1rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.65rem;
+    background: var(--surface-muted);
+  }
+
   /* Container-query responsive table for narrow viewports (modern-web-guidance: responsive-table) */
   .table-wrapper {
     container-type: inline-size;

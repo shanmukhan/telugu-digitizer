@@ -91,6 +91,57 @@ export interface CalibrationRunResult extends OCRRunCreateResult {
   calibration: BookCalibrationStatus;
 }
 
+export interface CalibrationReapplyResult {
+  book_id: string;
+  pages_scanned: number;
+  pages_updated: number;
+  blocks_updated: number;
+  active_rules_count: number;
+}
+
+export interface LegacyCorrectionNormalizeResult {
+  inspected_count: number;
+  split_legacy_rows: number;
+  cleaned_punct_rows: number;
+  created_word_rules: number;
+  merged_duplicates: number;
+}
+
+export interface BookTrainingConsentResult {
+  book_id: string;
+  training_consent: boolean;
+  harvested_crops_count: number;
+  total_book_samples: number;
+}
+
+export interface TrainingBookSummaryItem {
+  book_id: string;
+  title: string;
+  training_consent: boolean;
+  verified_samples_count: number;
+}
+
+export interface TrainingDatasetSummary {
+  total_verified_samples: number;
+  unique_crop_hashes: number;
+  consented_books_count: number;
+  selected_book_consent: boolean | null;
+  selected_book_samples: number;
+  books: TrainingBookSummaryItem[];
+}
+
+export interface TrainingDatasetExportResult {
+  export_id: string;
+  filename: string;
+  total_samples: number;
+  train_count: number;
+  val_count: number;
+  deduplicated_skipped: number;
+  archive_sha256: string;
+  download_url: string;
+  created_at: string;
+}
+
 export interface BookUploadResult {
   book_id: string;
   title: string;
