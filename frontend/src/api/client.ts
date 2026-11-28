@@ -3,9 +3,13 @@ import type {
   BatchBlockEditPayload,
   BlockEditResult,
   BlockRole,
+  BookCalibrationStatus,
   BookOCRRunSummary,
+  BookProcessingState,
   BookSummary,
   BookUploadResult,
+  CalibrationRunResult,
+  CorrectionListResult,
   CorrectionMemoryRecord,
   CustomDictionaryWordRecord,
   DictionarySearchResponse,
@@ -86,6 +90,88 @@ export async function uploadBook(formData: FormData): Promise<BookUploadResult> 
 
 export async function deleteBook(bookId: string): Promise<void> {
   await requestJson<void>(`/api/v1/books/${bookId}`, { method: "DELETE" });
+}
+
+export async function getBookCalibration(bookId: string): Promise<BookCalibrationStatus> {
+  return requestJson<BookCalibrationStatus>(`/api/v1/books/${bookId}/calibration`);
+}
+
+export async function startBookCalibration(
+  bookId: string,
+  payload: {
+    startPage: number;
+    calibrationPageCount: number;
+    endPage?: number | null;
+    engines: string[];
+    renderDpi?: number;
+    preprocessingProfile?: "none" | "deskew" | "contrast_clahe" | "textured_bold";
+    tesseractPsm?: number;
+    includeDigitalTextPages?: boolean;
+    forceRerun?: boolean;
+  },
+): Promise<CalibrationRunResult> {
+  return requestJson<CalibrationRunResult>(`/api/v1/books/${bookId}/calibration/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start_page: payload.startPage,
+      calibration_page_count: payload.calibrationPageCount,
+      end_page: payload.endPage ?? null,
+      engines: payload.engines,
+      render_dpi: payload.renderDpi ?? 300,
+      preprocessing_profile: payload.preprocessingProfile ?? "none",
+      tesseract_psm: payload.tesseractPsm ?? 6,
+      include_digital_text_pages: payload.includeDigitalTextPages ?? false,
+      force_rerun: payload.forceRerun ?? false,
+    }),
+  });
+}
+
+export async function completeBookCalibration(bookId: string): Promise<BookCalibrationStatus> {
+  return requestJson<BookCalibrationStatus>(`/api/v1/books/${bookId}/calibration/complete`, {
+    method: "POST",
+  });
+}
+
+export async function processRemainingPages(
+  bookId: string,
+  payload: {
+    engines: string[];
+    renderDpi?: number;
+    preprocessingProfile?: "none" | "deskew" | "contrast_clahe" | "textured_bold";
+    tesseractPsm?: number;
+    includeDigitalTextPages?: boolean;
+    forceRerun?: boolean;
+    applyCalibrationCorrections?: boolean;
+  },
+): Promise<CalibrationRunResult> {
+  return requestJson<CalibrationRunResult>(
+    `/api/v1/books/${bookId}/calibration/process-remaining`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        engines: payload.engines,
+        render_dpi: payload.renderDpi ?? 300,
+        preprocessing_profile: payload.preprocessingProfile ?? "none",
+        tesseract_psm: payload.tesseractPsm ?? 6,
+        include_digital_text_pages: payload.includeDigitalTextPages ?? false,
+        force_rerun: payload.forceRerun ?? false,
+        apply_calibration_corrections: payload.applyCalibrationCorrections ?? true,
+      }),
+    },
+  );
+}
+
+export async function updateBookState(
+  bookId: string,
+  processingState: BookProcessingState,
+): Promise<BookCalibrationStatus> {
+  return requestJson<BookCalibrationStatus>(`/api/v1/books/${bookId}/state`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ processing_state: processingState }),
+  });
 }
 
 export async function listBookPages(bookId: string): Promise<PageSummary[]> {
@@ -169,6 +255,7 @@ export async function submitBlockEdit(
     memory_scope?: "book_only" | "global_suggestion";
     correction_type?: string;
     auto_filter_noise?: boolean;
+    reject_auto_applied_rules?: boolean;
   },
 ): Promise<BlockEditResult> {
   return requestJson<BlockEditResult>(`/api/v1/ocr-blocks/${blockId}/edits`, {
@@ -232,26 +319,80 @@ export async function batchSavePage(
   );
 }
 
-export async function listCorrections(params?: {
+export async function listCorrectionsWithMeta(params?: {
   bookId?: string | null;
   statusFilter?: string;
+  scopeFilter?: string;
+  unitType?: string;
+  conflictOnly?: boolean;
   query?: string;
   limit?: number;
   offset?: number;
-}): Promise<CorrectionMemoryRecord[]> {
+}): Promise<CorrectionListResult> {
   const qs = new URLSearchParams();
   if (params?.bookId) qs.set("book_id", params.bookId);
   if (params?.statusFilter && params.statusFilter !== "all") {
     qs.set("status_filter", params.statusFilter);
   }
+  if (params?.scopeFilter && params.scopeFilter !== "all") {
+    qs.set("scope_filter", params.scopeFilter);
+  }
+  if (params?.unitType && params.unitType !== "all") {
+    qs.set("unit_type", params.unitType);
+  }
+  if (params?.conflictOnly) {
+    qs.set("conflict_only", "true");
+  }
   if (params?.query) qs.set("q", params.query);
   if (params?.limit !== undefined) qs.set("limit", String(params.limit));
   if (params?.offset !== undefined) qs.set("offset", String(params.offset));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
-  const data = await requestJson<{ items: CorrectionMemoryRecord[] }>(
-    `/api/v1/corrections${suffix}`,
-  );
-  return data.items;
+  const data = await requestJson<CorrectionListResult>(`/api/v1/corrections${suffix}`);
+  return {
+    items: data.items ?? [],
+    total_count: data.total_count ?? (data.items?.length ?? 0),
+    global_count: data.global_count ?? 0,
+    book_specific_count: data.book_specific_count ?? 0,
+    conflicts_count: data.conflicts_count ?? 0,
+  };
+}
+
+export async function listCorrections(params?: {
+  bookId?: string | null;
+  statusFilter?: string;
+  scopeFilter?: string;
+  unitType?: string;
+  conflictOnly?: boolean;
+  query?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<CorrectionMemoryRecord[]> {
+  const res = await listCorrectionsWithMeta(params);
+  return res.items;
+}
+
+export async function updateCorrectionEntry(
+  correctionId: string,
+  payload: {
+    corrected_text?: string;
+    left_context?: string | null;
+    right_context?: string | null;
+    correction_type?: string | null;
+    unit_type?: "word" | "char_pattern" | "phrase";
+    scope?: "book_only" | "global_suggestion";
+    status?: "active" | "disabled" | "superseded" | "rejected";
+    clear_context?: boolean;
+  },
+): Promise<CorrectionMemoryRecord> {
+  return requestJson<CorrectionMemoryRecord>(`/api/v1/corrections/${correctionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCorrectionEntry(correctionId: string): Promise<void> {
+  await requestJson<void>(`/api/v1/corrections/${correctionId}`, { method: "DELETE" });
 }
 
 export async function approveCorrection(correctionId: string): Promise<CorrectionMemoryRecord> {

@@ -186,3 +186,15 @@ Allowed formats: `docx`, `txt`, and optional later `searchable_pdf`.
 - Do not start a background job without a durable status record once the UI supports long-running OCR.
 - Enforce PDF size/page limits and validate MIME type and file signature.
 - Keep file paths internal; expose download endpoints rather than raw absolute paths.
+
+## 11. OCR Calibration, Book State, and Word-Level Correction Memory Endpoints
+
+- `GET /api/v1/books/{book_id}/calibration`: Returns book `processing_state`, calibration range (`calibration_start_page`, `calibration_page_count`, `calibration_range_end`, `book_end_page`, `skipped_front_pages_count`), remaining range, learned word rule count, recurring character confusion patterns, and auto-applied block counts.
+- `POST /api/v1/books/{book_id}/calibration/start`: Validates `start_page` (1-based PDF index), `calibration_page_count`, and optional `end_page`; persists calibration config on the book and queues OCR strictly on `[start_page, start_page + calibration_page_count - 1]`.
+- `POST /api/v1/books/{book_id}/calibration/complete`: Harvests approved word-level edits from the calibration batch into `book_only` correction memory and marks calibration completed.
+- `POST /api/v1/books/{book_id}/calibration/process-remaining`: Harvests any pending calibration edits and starts OCR on `[calibration_range_end + 1, book_end_page]` with safe auto-application of learned corrections (`apply_calibration_corrections=true`).
+- `PATCH /api/v1/books/{book_id}/state`: Updates book `processing_state` (e.g., `paused` when switching books safely).
+- `GET /api/v1/corrections`: Supports `book_id`, `status_filter`, `scope_filter` (`global_suggestion` | `book_only`), `unit_type` (`word` | `char_pattern` | `phrase`), `conflict_only`, `q`, `limit`, `offset`, returning enriched items (`reliability_score`, `has_conflict`, `conflict_count`, `source_book_title`, `source_page_number`, `last_used_at`) plus `total_count`, `global_count`, `book_specific_count`, and `conflicts_count`.
+- `PATCH /api/v1/corrections/{correction_id}`: Edits `corrected_text`, `left_context`, `right_context`, `correction_type`, `unit_type`, `scope`, or `status`.
+- `DELETE /api/v1/corrections/{correction_id}`: Removes a correction memory record.
+- `POST /api/v1/ocr-blocks/{block_id}/edits`: Accepts `reject_auto_applied_rules: true` when reverting an `auto_applied` block to restore raw OCR and increment negative evidence (`rejected_count`) on the triggering memory rule(s).

@@ -6,16 +6,20 @@ import {
   batchSavePage,
   cancelOcrRun,
   createManualPageBlock,
+  getBookCalibration,
   getHostCapabilities,
   getOcrRunStatus,
   getPageReview,
   listBookOcrRuns,
   listBookPages,
   listBooks,
+  processRemainingPages,
   rejectCorrection,
   resumeOcrRun,
+  startBookCalibration,
   startOcrRun,
   submitBlockEdit,
+  updateBookState,
   updatePageDigitalText,
   updatePageReviewStatus,
   uploadBook,
@@ -36,12 +40,14 @@ import { ReviewEditorPanel, type SaveEditOptions } from "./components/ReviewEdit
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { SourcePageViewer } from "./components/SourcePageViewer";
 import { WelcomeHero } from "./components/StudioChrome";
+import { SwitchBookDialog } from "./components/SwitchBookDialog";
 import { TeluguKeyboard } from "./components/TeluguKeyboard";
 import { ToastRegion, type ToastItem } from "./components/ToastRegion";
 import { TopNavBar, type WorkspaceView } from "./components/TopNavBar";
 import type {
   BatchBlockEditPayload,
   BlockRole,
+  BookCalibrationStatus,
   BookOCRRunSummary,
   BookSummary,
   CorrectionSuggestionItem,
@@ -96,11 +102,20 @@ export function App() {
   const [selectedPageNumber, setSelectedPageNumber] = useState<number>(initialUrl.page);
   const [pageJumpInput, setPageJumpInput] = useState<string>(String(initialUrl.page));
   const [runs, setRuns] = useState<BookOCRRunSummary[]>([]);
+  const [calibration, setCalibration] = useState<BookCalibrationStatus | null>(null);
   const [liveStatuses, setLiveStatuses] = useState<Record<string, OCRRunStatus>>({});
   const [selectedPrimaryRunId, setSelectedPrimaryRunId] = useState<string | null>(null);
   const [review, setReview] = useState<PageReviewPayload | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [dirtyBlockCount, setDirtyBlockCount] = useState<number>(0);
+  const saveDirtyDraftsRef = useRef<(() => Promise<void>) | null>(null);
+
+  // Switch-book confirmation modal state
+  const [switchDialogState, setSwitchDialogState] = useState<{
+    open: boolean;
+    targetBookId: string | null;
+    openImport: boolean;
+  }>({ open: false, targetBookId: null, openImport: false });
 
   // Proofreading UX preferences
   const [autoSyncBlocks, setAutoSyncBlocks] = useState(true);
@@ -303,20 +318,69 @@ export function App() {
     [confirmDiscardIfDirty, selectedBook],
   );
 
-  const navigateToBook = useCallback(
+  const performDirectBookSwitch = useCallback(
     (bookId: string) => {
-      if (bookId === selectedBookId) return;
-      if (!confirmDiscardIfDirty("switch books")) return;
+      const target = books.find((b) => b.book_id === bookId);
+      const resumePage =
+        target?.calibration_start_page && target.calibration_start_page >= 1
+          ? Math.min(target.page_count, target.calibration_start_page)
+          : 1;
       setSelectedBookId(bookId);
-      setSelectedPageNumber(1);
+      setSelectedPageNumber(resumePage);
       setSelectedPrimaryRunId(null);
       setSelectedBlockId(null);
       setSyncRequest(null);
       setDirtyBlockCount(0);
       setActiveView("review");
     },
-    [confirmDiscardIfDirty, selectedBookId],
+    [books],
   );
+
+  const navigateToBook = useCallback(
+    (bookId: string) => {
+      if (bookId === selectedBookId) return;
+      const activeRunsExist = mergedRuns.some(
+        (r) => r.status === "running" || r.status === "queued",
+      );
+      const approvedCount = pages.filter((p) => p.review_status === "approved").length;
+      const hasUnfinished =
+        Boolean(selectedBook) &&
+        (dirtyBlockCountRef.current > 0 ||
+          activeRunsExist ||
+          (selectedBook!.page_count > 0 &&
+            approvedCount < selectedBook!.page_count &&
+            selectedBook!.processing_state !== "completed"));
+      if (hasUnfinished) {
+        setSwitchDialogState({ open: true, targetBookId: bookId, openImport: false });
+        return;
+      }
+      performDirectBookSwitch(bookId);
+    },
+    [mergedRuns, pages, performDirectBookSwitch, selectedBook, selectedBookId],
+  );
+
+  const requestOpenImport = useCallback(() => {
+    const activeRunsExist = mergedRuns.some(
+      (r) => r.status === "running" || r.status === "queued",
+    );
+    const approvedCount = pages.filter((p) => p.review_status === "approved").length;
+    const hasUnfinished =
+      Boolean(selectedBook) &&
+      (dirtyBlockCountRef.current > 0 ||
+        activeRunsExist ||
+        (selectedBook!.page_count > 0 &&
+          approvedCount < selectedBook!.page_count &&
+          selectedBook!.processing_state !== "completed"));
+    if (hasUnfinished) {
+      setSwitchDialogState({ open: true, targetBookId: null, openImport: true });
+      return;
+    }
+    setImportDialogOpen(true);
+  }, [mergedRuns, pages, selectedBook]);
+
+  const handleOpenSwitchBookDialog = useCallback(() => {
+    setSwitchDialogState({ open: true, targetBookId: null, openImport: false });
+  }, []);
 
   // Global keyboard shortcuts ([ toggles PageRail, ? opens shortcuts, Alt+←/→ flips pages)
   useEffect(() => {
@@ -380,12 +444,14 @@ export function App() {
   }, []);
 
   const refreshBookDetail = useCallback(async (bookId: string) => {
-    const [pageList, runList] = await Promise.all([
+    const [pageList, runList, calStatus] = await Promise.all([
       listBookPages(bookId),
       listBookOcrRuns(bookId),
+      getBookCalibration(bookId).catch(() => null),
     ]);
     setPages(pageList);
     setRuns(runList);
+    setCalibration(calStatus);
   }, []);
 
   const refreshReview = useCallback(
@@ -687,6 +753,157 @@ export function App() {
     }
   }
 
+  async function handleStartCalibration(config: {
+    startPage: number;
+    calibrationPageCount: number;
+    endPage: number;
+  }) {
+    if (!selectedBookId) return;
+    const engines: string[] = [];
+    if (usePaddle) engines.push("paddle_ppocrv5_te");
+    if (useTesseract) engines.push("tesseract_tel_best");
+    if (engines.length === 0) {
+      handleStatusBanner("error", "Select at least one OCR engine.");
+      return;
+    }
+    try {
+      const created = await startBookCalibration(selectedBookId, {
+        startPage: config.startPage,
+        calibrationPageCount: config.calibrationPageCount,
+        endPage: config.endPage,
+        engines,
+        renderDpi: ocrRenderDpi,
+        preprocessingProfile: ocrPreprocessing,
+        includeDigitalTextPages: ocrIncludeDigital,
+        forceRerun: ocrForceRerun,
+      });
+      setSelectedPrimaryRunId(null);
+      setCalibration(created.calibration);
+      const runIdsToFetch =
+        created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
+      const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
+      setLiveStatuses((prev) => {
+        const nextMap = { ...prev };
+        for (const st of fetchedStatuses) {
+          nextMap[st.ocr_run_id] = st;
+        }
+        return nextMap;
+      });
+      await Promise.all([refreshBooks(), refreshBookDetail(selectedBookId)]);
+      // Jump directly to the selected PDF starting page so calibration review begins on the right page.
+      setSelectedPageNumber(config.startPage);
+      setSelectedBlockId(null);
+      setSyncRequest(null);
+      const calEnd = config.startPage + config.calibrationPageCount - 1;
+      handleStatusBanner(
+        "info",
+        `Started OCR calibration on PDF pages ${config.startPage}–${calEnd} (${config.calibrationPageCount} page(s)).`,
+      );
+    } catch (err) {
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError
+          ? `${err.code}: ${err.message}`
+          : "Failed to start OCR calibration.",
+      );
+    }
+  }
+
+  async function handleProcessRemainingWithCalibration(quickTesseract = false) {
+    if (!selectedBookId) return;
+    const engines: string[] = [];
+    if (quickTesseract) {
+      engines.push("tesseract_tel_best");
+    } else {
+      if (usePaddle) engines.push("paddle_ppocrv5_te");
+      if (useTesseract) engines.push("tesseract_tel_best");
+    }
+    if (engines.length === 0) {
+      handleStatusBanner("error", "Select at least one OCR engine.");
+      return;
+    }
+    try {
+      const created = await processRemainingPages(selectedBookId, {
+        engines,
+        renderDpi: ocrRenderDpi,
+        preprocessingProfile: ocrPreprocessing,
+        includeDigitalTextPages: ocrIncludeDigital,
+        forceRerun: ocrForceRerun,
+        applyCalibrationCorrections: true,
+      });
+      setSelectedPrimaryRunId(null);
+      setCalibration(created.calibration);
+      const runIdsToFetch =
+        created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
+      const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
+      setLiveStatuses((prev) => {
+        const nextMap = { ...prev };
+        for (const st of fetchedStatuses) {
+          nextMap[st.ocr_run_id] = st;
+        }
+        return nextMap;
+      });
+      await Promise.all([refreshBooks(), refreshBookDetail(selectedBookId)]);
+      handleStatusBanner(
+        "success",
+        `Started remaining pages OCR (${created.pages_total} pages) using ${created.calibration.learned_word_rules_count} learned word rule(s).`,
+      );
+    } catch (err) {
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError
+          ? `${err.code}: ${err.message}`
+          : "Failed to process remaining pages.",
+      );
+    }
+  }
+
+  async function handleConfirmSwitchBook(options: {
+    targetBookId: string | null;
+    openImport: boolean;
+    saveCurrentPageDrafts: boolean;
+  }) {
+    const leavingBookId = selectedBookId;
+    const leavingTitle = selectedBook?.title ?? "Current book";
+    try {
+      if (options.saveCurrentPageDrafts && saveDirtyDraftsRef.current) {
+        await saveDirtyDraftsRef.current();
+      }
+      if (leavingBookId) {
+        // Safely pause any running/queued OCR runs without discarding completed pages.
+        const runningForBook = mergedRuns.filter(
+          (r) => r.status === "running" || r.status === "queued",
+        );
+        for (const run of runningForBook) {
+          await cancelOcrRun(run.ocr_run_id).catch(() => null);
+        }
+        if (selectedBook?.processing_state !== "completed") {
+          await updateBookState(leavingBookId, "paused").catch(() => null);
+        }
+      }
+      setSwitchDialogState({ open: false, targetBookId: null, openImport: false });
+      await refreshBooks();
+      if (options.openImport) {
+        setImportDialogOpen(true);
+        handleStatusBanner(
+          "info",
+          `Paused "${leavingTitle}" safely (all OCR results and corrections preserved).`,
+        );
+      } else if (options.targetBookId) {
+        performDirectBookSwitch(options.targetBookId);
+        handleStatusBanner(
+          "info",
+          `Paused "${leavingTitle}" safely and switched books. You can return anytime.`,
+        );
+      }
+    } catch (err) {
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to switch books.",
+      );
+    }
+  }
+
   async function handleResumeRun(runId: string) {
     try {
       const resumed = await resumeOcrRun(runId);
@@ -744,6 +961,7 @@ export function App() {
         memory_scope: options?.memoryScope ?? "global_suggestion",
         correction_type: options?.correctionType,
         auto_filter_noise: true,
+        reject_auto_applied_rules: options?.rejectAutoAppliedRules ?? false,
       });
 
       // Optimistically patch current page review & page summary status so line saves are instant
@@ -785,9 +1003,12 @@ export function App() {
         ),
       );
 
-      // Refresh full review only if a new memory rule was recorded so fresh suggestions surface
-      if (res.correction_memory_id) {
+      // Refresh full review & calibration summary when a new memory rule was recorded or an auto-applied rule reverted
+      if (res.correction_memory_id || options?.rejectAutoAppliedRules) {
         void refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
+        void getBookCalibration(selectedBookId)
+          .then(setCalibration)
+          .catch(() => null);
       }
 
       handleStatusBanner(
@@ -1216,7 +1437,8 @@ export function App() {
         keyboardOpen={keyboardOpen}
         onSelectBook={navigateToBook}
         onSelectView={handleSelectView}
-        onOpenImport={() => setImportDialogOpen(true)}
+        onOpenImport={requestOpenImport}
+        onOpenSwitchBook={handleOpenSwitchBookDialog}
         onOpenOcrDrawer={() => setOcrDrawerOpen(true)}
         onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
         onOpenShortcuts={() => setShortcutsOpen(true)}
@@ -1242,16 +1464,20 @@ export function App() {
             book={selectedBook}
             runs={mergedRuns}
             pages={pages}
+            calibration={calibration}
             activeView={activeView}
             hideWhenReady
             onQuickStartSample={() => handleStartOcr("sample_5")}
             onQuickStartFull={() => handleStartOcr("full")}
+            onStartCalibration={handleStartCalibration}
+            onProcessRemainingWithCalibration={handleProcessRemainingWithCalibration}
             onContinueRemaining={(startPage, endPage, quickTesseract) =>
               handleStartOcr(quickTesseract ? "quick_tesseract" : "remaining", {
                 start: startPage,
                 end: endPage,
               })
             }
+            onPreviewPageJump={(p) => navigateToPage(p, true)}
             onOpenOcrDrawer={() => setOcrDrawerOpen(true)}
             onResumeRun={handleResumeRun}
             onCancelRun={handleCancelRun}
@@ -1471,6 +1697,9 @@ export function App() {
                   }
                   onOpenFullScanMobile={() => setMobilePane("scan")}
                   onDirtyCountChange={setDirtyBlockCount}
+                  onRegisterSaveDrafts={(fn) => {
+                    saveDirtyDraftsRef.current = fn;
+                  }}
                   onSelectBlock={handleSelectFromEditor}
                   onLocateBlockOnScan={(blockId) => {
                     setSelectedBlockId(blockId);
@@ -1522,11 +1751,27 @@ export function App() {
         onUpload={handleUpload}
       />
 
+      <SwitchBookDialog
+        open={switchDialogState.open}
+        currentBook={selectedBook}
+        books={books}
+        pendingTargetBookId={switchDialogState.targetBookId}
+        pendingOpenImport={switchDialogState.openImport}
+        dirtyBlockCount={dirtyBlockCount}
+        isOcrRunning={isOcrRunning}
+        approvedPagesCount={approvedPagesCount}
+        onKeepWorking={() =>
+          setSwitchDialogState({ open: false, targetBookId: null, openImport: false })
+        }
+        onConfirmSwitch={handleConfirmSwitchBook}
+      />
+
       {selectedBook && (
         <OcrRunnerDrawer
           open={ocrDrawerOpen}
           book={selectedBook}
           runs={mergedRuns}
+          calibration={calibration}
           capabilities={capabilities}
           isOcrRunning={isOcrRunning}
           usePaddle={usePaddle}
@@ -1546,6 +1791,8 @@ export function App() {
           onForceRerunChange={setOcrForceRerun}
           onIncludeDigitalChange={setOcrIncludeDigital}
           onStartOcr={handleStartOcr}
+          onStartCalibration={handleStartCalibration}
+          onProcessRemainingWithCalibration={handleProcessRemainingWithCalibration}
           onResumeRun={handleResumeRun}
           onCancelRun={handleCancelRun}
           onClose={() => setOcrDrawerOpen(false)}

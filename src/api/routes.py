@@ -24,12 +24,17 @@ from src.api.errors import AppError
 from src.api.schemas import (
     BlockEditRequest,
     BlockEditResponse,
+    BookCalibrationStatusResponse,
     BookListResponse,
     BookOCRRunsResponse,
     BookOCRRunSummary,
     BookPagesResponse,
+    BookStateUpdateRequest,
     BookSummaryResponse,
     BookUploadResponse,
+    CalibrationProcessRemainingRequest,
+    CalibrationRunResponse,
+    CalibrationStartRequest,
     CapabilitiesResponse,
     CorrectionListResponse,
     CorrectionMemoryRecord,
@@ -37,6 +42,7 @@ from src.api.schemas import (
     CorrectionSearchResponse,
     CorrectionStatusRequest,
     CorrectionSuggestionItem,
+    CorrectionUpdateRequest,
     CustomDictionaryWordCreateRequest,
     CustomDictionaryWordListResponse,
     CustomDictionaryWordRecord,
@@ -77,11 +83,21 @@ from src.services.book_service import (
     import_pdf_book,
     list_books_with_counts,
 )
+from src.services.calibration_service import (
+    complete_book_calibration,
+    get_book_calibration_status,
+    start_book_calibration,
+    start_remaining_pages_ocr,
+    update_book_processing_state,
+)
 from src.services.correction_service import (
     approve_correction,
-    list_corrections,
+    delete_correction_entry,
+    list_corrections_enriched,
     reject_correction,
     search_corrections,
+    serialize_correction_record_dict,
+    update_correction_entry,
     update_correction_status,
 )
 from src.services.dictionary_service import (
@@ -313,6 +329,94 @@ def list_books(db: Annotated[Session, Depends(get_db)]) -> BookListResponse:
 @router.get("/books/{book_id}", response_model=BookSummaryResponse)
 def get_book(book_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]) -> BookSummaryResponse:
     return BookSummaryResponse(**get_book_with_counts(db, book_id))
+
+
+@router.patch("/books/{book_id}/state", response_model=BookCalibrationStatusResponse)
+def patch_book_state(
+    book_id: uuid.UUID,
+    payload: BookStateUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BookCalibrationStatusResponse:
+    return BookCalibrationStatusResponse(
+        **update_book_processing_state(db, book_id, payload.processing_state)
+    )
+
+
+@router.get("/books/{book_id}/calibration", response_model=BookCalibrationStatusResponse)
+def get_book_calibration(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> BookCalibrationStatusResponse:
+    return BookCalibrationStatusResponse(**get_book_calibration_status(db, book_id))
+
+
+@router.post(
+    "/books/{book_id}/calibration/start",
+    response_model=CalibrationRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_start_book_calibration(
+    book_id: uuid.UUID,
+    payload: CalibrationStartRequest,
+    db: Annotated[Session, Depends(get_db)],
+    executor: Annotated[OCRJobExecutor, Depends(get_executor)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> CalibrationRunResponse:
+    res = start_book_calibration(
+        db=db,
+        executor=executor,
+        settings=settings,
+        book_id=book_id,
+        start_page=payload.start_page,
+        calibration_page_count=payload.calibration_page_count,
+        end_page=payload.end_page,
+        engines=payload.engines,
+        render_dpi=payload.render_dpi,
+        preprocessing_profile=payload.preprocessing_profile,
+        tesseract_psm=payload.tesseract_psm,
+        include_digital_text_pages=payload.include_digital_text_pages,
+        force_rerun=payload.force_rerun,
+    )
+    return CalibrationRunResponse(**res)
+
+
+@router.post(
+    "/books/{book_id}/calibration/complete",
+    response_model=BookCalibrationStatusResponse,
+)
+def post_complete_book_calibration(
+    book_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> BookCalibrationStatusResponse:
+    return BookCalibrationStatusResponse(**complete_book_calibration(db, book_id))
+
+
+@router.post(
+    "/books/{book_id}/calibration/process-remaining",
+    response_model=CalibrationRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_process_remaining_pages(
+    book_id: uuid.UUID,
+    payload: CalibrationProcessRemainingRequest,
+    db: Annotated[Session, Depends(get_db)],
+    executor: Annotated[OCRJobExecutor, Depends(get_executor)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> CalibrationRunResponse:
+    res = start_remaining_pages_ocr(
+        db=db,
+        executor=executor,
+        settings=settings,
+        book_id=book_id,
+        engines=payload.engines,
+        render_dpi=payload.render_dpi,
+        preprocessing_profile=payload.preprocessing_profile,
+        tesseract_psm=payload.tesseract_psm,
+        include_digital_text_pages=payload.include_digital_text_pages,
+        force_rerun=payload.force_rerun,
+        apply_calibration_corrections=payload.apply_calibration_corrections,
+    )
+    return CalibrationRunResponse(**res)
 
 
 @router.delete("/books/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -681,6 +785,7 @@ def post_block_edit(
         incorrect_span=payload.incorrect_span,
         corrected_span=payload.corrected_span,
         auto_filter_noise=payload.auto_filter_noise,
+        reject_auto_applied_rules=payload.reject_auto_applied_rules,
         storage=storage,
     )
     return BlockEditResponse(**result)
@@ -795,23 +900,18 @@ def patch_page_review_status(
     return PageReviewStatusResponse(**result)
 
 
-def _serialize_correction_record(row) -> CorrectionMemoryRecord:
+def _serialize_correction_record(
+    row,
+    *,
+    targets_by_norm: dict[str, set[str]] | None = None,
+    book_titles: dict[uuid.UUID, str] | None = None,
+) -> CorrectionMemoryRecord:
     return CorrectionMemoryRecord(
-        correction_id=row.id,
-        language_code=row.language_code,
-        incorrect_text=row.incorrect_text,
-        corrected_text=row.corrected_text,
-        left_context=row.left_context,
-        right_context=row.right_context,
-        correction_type=row.correction_type,
-        scope=row.scope,
-        book_id=row.book_id,
-        source_ocr_block_id=row.source_ocr_block_id,
-        status=row.status,
-        approved_count=row.approved_count,
-        rejected_count=row.rejected_count,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+        **serialize_correction_record_dict(
+            row,
+            targets_by_norm=targets_by_norm,
+            book_titles=book_titles,
+        )
     )
 
 
@@ -841,19 +941,38 @@ def get_correction_memory_list(
     db: Annotated[Session, Depends(get_db)],
     book_id: uuid.UUID | None = None,
     status_filter: str | None = None,
+    scope_filter: str | None = None,
+    unit_type: str | None = None,
+    conflict_only: bool = False,
     q: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> CorrectionListResponse:
-    rows = list_corrections(
+    rows, total_count, meta = list_corrections_enriched(
         db=db,
         book_id=book_id,
         status=status_filter,
+        scope=scope_filter,
+        unit_type=unit_type,
+        conflict_only=conflict_only,
         query=q,
         limit=limit,
         offset=offset,
     )
-    return CorrectionListResponse(items=[_serialize_correction_record(r) for r in rows])
+    return CorrectionListResponse(
+        items=[
+            _serialize_correction_record(
+                r,
+                targets_by_norm=meta["targets_by_norm"],
+                book_titles=meta["book_titles"],
+            )
+            for r in rows
+        ],
+        total_count=total_count,
+        global_count=meta["global_count"],
+        book_specific_count=meta["book_specific_count"],
+        conflicts_count=meta["conflicts_count"],
+    )
 
 
 @router.post("/corrections/{correction_id}/approve", response_model=CorrectionMemoryRecord)
@@ -883,6 +1002,36 @@ def patch_correction_status(
     return _serialize_correction_record(
         update_correction_status(db, correction_id, payload.status, scope=payload.scope)
     )
+
+
+@router.patch("/corrections/{correction_id}", response_model=CorrectionMemoryRecord)
+def patch_correction_entry(
+    correction_id: uuid.UUID,
+    payload: CorrectionUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> CorrectionMemoryRecord:
+    updated = update_correction_entry(
+        db,
+        correction_id,
+        corrected_text=payload.corrected_text,
+        left_context=payload.left_context,
+        right_context=payload.right_context,
+        correction_type=payload.correction_type,
+        unit_type=payload.unit_type,
+        scope=payload.scope,
+        status=payload.status,
+        clear_context=payload.clear_context,
+    )
+    return _serialize_correction_record(updated)
+
+
+@router.delete("/corrections/{correction_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_correction_memory_entry(
+    correction_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    delete_correction_entry(db, correction_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _serialize_export_record(row: DocumentExport) -> ExportRecordResponse:

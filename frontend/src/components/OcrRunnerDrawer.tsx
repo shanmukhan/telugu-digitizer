@@ -1,11 +1,18 @@
 import { useEffect, useId, useRef } from "react";
-import type { BookOCRRunSummary, BookSummary, HostCapabilities } from "../types/api";
+import type {
+  BookCalibrationStatus,
+  BookOCRRunSummary,
+  BookSummary,
+  HostCapabilities,
+} from "../types/api";
 import { computeBookOcrCoverage, formatEngineLabel } from "../utils/formatters";
+import { CalibrationSetupPanel } from "./CalibrationSetupPanel";
 
 interface OcrRunnerDrawerProps {
   open: boolean;
   book: BookSummary;
   runs: BookOCRRunSummary[];
+  calibration?: BookCalibrationStatus | null;
   capabilities: HostCapabilities | null;
   isOcrRunning: boolean;
   usePaddle: boolean;
@@ -25,6 +32,12 @@ interface OcrRunnerDrawerProps {
   onForceRerunChange: (v: boolean) => void;
   onIncludeDigitalChange: (v: boolean) => void;
   onStartOcr: (preset?: "sample_5" | "full" | "quick_tesseract" | "remaining") => Promise<void>;
+  onStartCalibration?: (config: {
+    startPage: number;
+    calibrationPageCount: number;
+    endPage: number;
+  }) => Promise<void>;
+  onProcessRemainingWithCalibration?: (quickTesseract?: boolean) => Promise<void>;
   onResumeRun: (runId: string) => Promise<void>;
   onCancelRun: (runId: string) => Promise<void>;
   onClose: () => void;
@@ -34,6 +47,7 @@ export function OcrRunnerDrawer({
   open,
   book,
   runs,
+  calibration,
   capabilities,
   isOcrRunning,
   usePaddle,
@@ -53,6 +67,8 @@ export function OcrRunnerDrawer({
   onForceRerunChange,
   onIncludeDigitalChange,
   onStartOcr,
+  onStartCalibration,
+  onProcessRemainingWithCalibration,
   onResumeRun,
   onCancelRun,
   onClose,
@@ -188,10 +204,56 @@ export function OcrRunnerDrawer({
           </section>
         )}
 
+        {onStartCalibration && (
+          <section className="drawer-section" aria-label="Calibration batch setup">
+            <CalibrationSetupPanel
+              book={book}
+              compact
+              disabled={isOcrRunning || (!usePaddle && !useTesseract)}
+              initialStartPage={calibration?.calibration_start_page ?? book.calibration_start_page ?? 1}
+              initialCalibrationPages={
+                calibration?.calibration_page_count ??
+                book.calibration_page_count ??
+                Math.min(5, book.page_count)
+              }
+              initialEndPage={calibration?.book_end_page ?? book.calibration_end_page ?? book.page_count}
+              onStartCalibration={async (cfg) => {
+                await onStartCalibration(cfg);
+                onClose();
+              }}
+            />
+          </section>
+        )}
+
         <section className="drawer-section" aria-label="Quick OCR presets">
           <h2 className="drawer-section-title">Quick Presets</h2>
           <div className="preset-grid">
-            {coverage.isPartialCoverage && (
+            {calibration &&
+              calibration.calibration_start_page !== null &&
+              calibration.remaining_pages_count > 0 &&
+              onProcessRemainingWithCalibration && (
+                <button
+                  type="button"
+                  className="preset-card preset-card-highlight"
+                  disabled={isOcrRunning || (!usePaddle && !useTesseract)}
+                  onClick={async () => {
+                    await onProcessRemainingWithCalibration(false);
+                    onClose();
+                  }}
+                >
+                  <strong>
+                    ✨ Apply Calibration &amp; Process Remaining (PDF{" "}
+                    {calibration.remaining_start_page}–{calibration.remaining_end_page})
+                  </strong>
+                  <span className="hint-text">
+                    Process {calibration.remaining_pages_count} remaining page(s) using{" "}
+                    {calibration.learned_word_rules_count} learned word correction(s) while
+                    preserving raw OCR and calibration edits.
+                  </span>
+                </button>
+              )}
+
+            {coverage.isPartialCoverage && !calibration?.calibration_start_page && (
               <button
                 type="button"
                 className="preset-card preset-card-highlight"

@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import type { BookOCRRunSummary, BookSummary, OCRRunStatus, PageSummary } from "../types/api";
+import type {
+  BookCalibrationStatus,
+  BookOCRRunSummary,
+  BookSummary,
+  OCRRunStatus,
+  PageSummary,
+} from "../types/api";
 import {
   buildRunTelemetry,
   computeBookOcrCoverage,
   formatDuration,
   formatEngineLabel,
 } from "../utils/formatters";
+import { CalibrationSetupPanel } from "./CalibrationSetupPanel";
 
 export function mergeBookRunsWithLiveStatuses(
   runs: BookOCRRunSummary[],
@@ -138,16 +145,24 @@ interface OcrProgressStripProps {
   book: BookSummary;
   runs: BookOCRRunSummary[];
   pages: PageSummary[];
+  calibration?: BookCalibrationStatus | null;
   activeView: "review" | "memory" | "export";
   /** When true, hide the static green Ready banner once the entire book is OCR'd to maximize workspace height. */
   hideWhenReady?: boolean;
   onQuickStartSample: () => Promise<void>;
   onQuickStartFull: () => Promise<void>;
+  onStartCalibration?: (config: {
+    startPage: number;
+    calibrationPageCount: number;
+    endPage: number;
+  }) => Promise<void>;
+  onProcessRemainingWithCalibration?: (quickTesseract?: boolean) => Promise<void>;
   onContinueRemaining?: (
     startPage: number,
     endPage: number,
     quickTesseract?: boolean,
   ) => Promise<void>;
+  onPreviewPageJump?: (pageNumber: number) => void;
   onOpenOcrDrawer?: () => void;
   onResumeRun: (runId: string) => Promise<void>;
   onCancelRun?: (runId: string) => Promise<void>;
@@ -159,11 +174,15 @@ export function OcrProgressStrip({
   book,
   runs,
   pages,
+  calibration,
   activeView,
   hideWhenReady = false,
   onQuickStartSample,
   onQuickStartFull,
+  onStartCalibration,
+  onProcessRemainingWithCalibration,
   onContinueRemaining,
+  onPreviewPageJump,
   onOpenOcrDrawer,
   onResumeRun,
   onCancelRun,
@@ -306,6 +325,21 @@ export function OcrProgressStrip({
   }
 
   if (completedRuns.length === 0 && needsScanOcr) {
+    if (onStartCalibration && activeView === "review") {
+      return (
+        <CalibrationSetupPanel
+          book={book}
+          initialStartPage={calibration?.calibration_start_page ?? book.calibration_start_page ?? 1}
+          initialCalibrationPages={
+            calibration?.calibration_page_count ?? book.calibration_page_count ?? Math.min(5, book.page_count)
+          }
+          initialEndPage={calibration?.book_end_page ?? book.calibration_end_page ?? book.page_count}
+          onStartCalibration={onStartCalibration}
+          onSkipCalibrationFullBook={onQuickStartFull}
+          onPreviewPageJump={onPreviewPageJump}
+        />
+      );
+    }
     return (
       <section className="ocr-strip warn" aria-label="Book requires OCR">
         <div className="ocr-strip-top">
@@ -318,7 +352,7 @@ export function OcrProgressStrip({
               </span>
             </div>
             <p className="hint-text" style={{ margin: 0 }}>
-              Run a quick 5-page test first or process with selected engines. Note: cover/Page 1 scans may be blank; use <strong>Next →</strong> or page jump to inspect body pages.
+              Run a quick calibration batch (5–10 pages) first or process with selected engines.
             </p>
           </div>
           <div className="badge-row">
@@ -328,6 +362,101 @@ export function OcrProgressStrip({
             <button type="button" onClick={() => void onQuickStartFull()}>
               Run Full Book OCR
             </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // Calibration review / completed banner before processing remaining pages
+  const isCalibrationStage =
+    calibration &&
+    calibration.calibration_start_page !== null &&
+    calibration.calibration_range_end !== null &&
+    calibration.remaining_pages_count > 0 &&
+    (calibration.processing_state === "calibration_review" ||
+      calibration.processing_state === "calibration_completed");
+
+  if (isCalibrationStage && calibration && needsScanOcr) {
+    const calRange = `${calibration.calibration_start_page}–${calibration.calibration_range_end}`;
+    const remRange = `${calibration.remaining_start_page}–${calibration.remaining_end_page}`;
+    const calTotal = calibration.calibration_page_count ?? 0;
+    const calApproved = calibration.calibration_pages_approved;
+    const learnedRules = calibration.learned_word_rules_count;
+    const calReady = calTotal > 0 && calApproved >= calTotal;
+    return (
+      <section className="ocr-strip warn" aria-label="Calibration review and remaining OCR">
+        <div className="ocr-strip-top">
+          <div>
+            <div className="badge-row" style={{ marginBottom: "0.18rem" }}>
+              <span className="pill-tag info">
+                🎯 Calibration PDF {calRange} ({calApproved}/{calTotal} approved)
+              </span>
+              <span className="metric-chip">
+                <strong>{learnedRules}</strong> word rule{learnedRules === 1 ? "" : "s"} learned
+              </span>
+              {calibration.learned_char_patterns.length > 0 && (
+                <span className="metric-chip">
+                  <strong>{calibration.learned_char_patterns.length}</strong> char pattern
+                  {calibration.learned_char_patterns.length === 1 ? "" : "s"}
+                </span>
+              )}
+              <span className="metric-chip">
+                <strong>{calibration.remaining_pages_count}</strong> remaining (PDF {remRange})
+              </span>
+            </div>
+            <p className="hint-text" style={{ margin: 0 }}>
+              {calReady
+                ? `Calibration complete! Process remaining PDF pages ${remRange} — your ${learnedRules} learned word correction(s) will be applied safely without overwriting raw OCR.`
+                : `Review & approve calibration PDF pages ${calRange} so the system learns recurring Telugu OCR mistakes before processing PDF pages ${remRange}.`}
+              {calibration.skipped_front_pages_count > 0
+                ? ` (Front-matter PDF pages 1–${calibration.skipped_front_pages_count} remain untouched.)`
+                : ""}
+            </p>
+          </div>
+          <div className="badge-row">
+            {onProcessRemainingWithCalibration ? (
+              <>
+                <button
+                  type="button"
+                  className="primary btn-compact"
+                  onClick={() => void onProcessRemainingWithCalibration(false)}
+                >
+                  ✨ Apply Calibration &amp; Process Remaining (PDF {remRange})
+                </button>
+                <button
+                  type="button"
+                  className="btn-compact"
+                  title="Run fast Tesseract 5 Telugu draft with learned calibration corrections"
+                  onClick={() => void onProcessRemainingWithCalibration(true)}
+                >
+                  ⚡ Fast Draft ({remRange})
+                </button>
+              </>
+            ) : (
+              onContinueRemaining &&
+              calibration.remaining_start_page &&
+              calibration.remaining_end_page && (
+                <button
+                  type="button"
+                  className="primary btn-compact"
+                  onClick={() =>
+                    void onContinueRemaining(
+                      calibration.remaining_start_page!,
+                      calibration.remaining_end_page!,
+                      false,
+                    )
+                  }
+                >
+                  ▶ Continue Remaining (PDF {remRange})
+                </button>
+              )
+            )}
+            {onOpenOcrDrawer && (
+              <button type="button" className="btn-compact" onClick={onOpenOcrDrawer}>
+                OCR Options…
+              </button>
+            )}
           </div>
         </div>
       </section>

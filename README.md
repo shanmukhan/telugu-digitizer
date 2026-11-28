@@ -185,13 +185,20 @@ cd frontend && npm test
 
 ---
 
-## 6. Phase 4 — Correction Memory & Contextual Suggestions
+## 6. Phase 4 — OCR Calibration, Word-Level Correction Memory & Safe Book Switching
 
-Phase 4 endpoints under `/api/v1`:
-- `POST /api/v1/ocr-blocks/{block_id}/edits` (`add_to_correction_memory`, `memory_scope`: `global_suggestion` by default or `book_only`, `correction_type`)
+Detailed guide: [docs/19-ocr-calibration-and-word-learning.md](docs/19-ocr-calibration-and-word-learning.md).
+
+Key calibration, book-state, and correction memory endpoints under `/api/v1`:
+- `GET /api/v1/books/{book_id}/calibration` (book processing state, calibration range, learned word rules, recurring character patterns, remaining pages)
+- `POST /api/v1/books/{book_id}/calibration/start` (select **PDF Starting Page** with thumbnail preview + `5–10` or custom calibration pages; skips front-matter pages untouched)
+- `POST /api/v1/books/{book_id}/calibration/complete` / `/process-remaining` (harvests word-level fixes and safely auto-applies them to remaining pages as auditable, revertible `ReviewEdit(action="auto_applied")` rows without modifying `raw_text`)
+- `PATCH /api/v1/books/{book_id}/state` (non-destructive pause when using **Switch Book**)
+- `POST /api/v1/ocr-blocks/{block_id}/edits` (word-level extraction, `memory_scope`: `global_suggestion` or `book_only`, `reject_auto_applied_rules` on revert)
 - `POST /api/v1/books/{book_id}/pages/{page_number}/autocorrect` (non-destructive opt-in suggestions combining active correction memory, 186k-word Telugu lexicon with *vattu*-stripped skeleton & visual-confusion matching, and book bigram context)
-- `GET /api/v1/corrections/search` (context-aware suggestion lookup with conflict detection)
-- `GET /api/v1/corrections` (browse and filter active/disabled/rejected records)
+- `GET /api/v1/corrections/search` (context-aware suggestion lookup with conflict detection & reliability scoring)
+- `GET /api/v1/corrections` (browse & filter by scope, status, unit type, conflicts, and search query)
+- `PATCH /api/v1/corrections/{correction_id}` / `DELETE /api/v1/corrections/{correction_id}` (edit or remove memory entries)
 - `POST /api/v1/corrections/{correction_id}/approve` / `/reject`
 - `PATCH /api/v1/corrections/{correction_id}/status` (`active`, `disabled`, `superseded`, `rejected`)
 

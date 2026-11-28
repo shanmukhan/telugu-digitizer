@@ -1,0 +1,468 @@
+# Implement OCR Calibration, Intelligent Correction Memory, and Book Switching UX
+
+I have an idea to significantly reduce manual correction effort in my Telugu Book Digitizer project.
+
+Currently, approximately 70% of OCR review items require manual corrections. I want to improve the OCR workflow by introducing a calibration phase, improving correction memory from sentence-level to word-level learning, and making it easier for users to abandon the current book and start processing another book.
+
+Before implementing anything, inspect the existing codebase, understand the current OCR processing workflow, correction memory implementation, review UI, book management workflow, and database schema.
+
+Do not blindly introduce a new architecture or duplicate existing functionality. Extend and improve the existing implementation wherever appropriate.
+
+## 1. Introduce an OCR Calibration Phase
+
+### Current problem
+
+When a user uploads a book, the application processes the entire book using OCR immediately.
+
+Since the book uses a consistent font, typography, printing quality, and language style, processing the entire book before learning from manual corrections is inefficient.
+
+The user currently spends significant time correcting OCR errors during review.
+
+### Proposed workflow
+
+Introduce a configurable OCR calibration phase before processing the remaining pages.
+
+The workflow should be:
+
+1. User uploads a book PDF.
+2. Application extracts the total number of pages and displays the book processing configuration.
+3. User chooses the number of calibration pages, preferably between 5 and 10 pages.
+4. Application processes only the selected calibration pages.
+5. User reviews the OCR output and manually corrects errors.
+6. Approved corrections are used to improve OCR processing for the remaining pages.
+7. Application processes the remaining pages using the learned corrections and applicable OCR improvements.
+8. User reviews the remaining pages with fewer correction requirements.
+
+### Calibration configuration
+
+Provide a simple, intuitive configuration option:
+
+- Calibration pages: 5, 6, 7, 8, 9, or 10.
+- Allow users to choose a different number if the existing architecture supports it.
+- Clearly display which pages are included in calibration.
+- Clearly display how many pages remain to be processed.
+
+Do not force every user to use the same calibration page count.
+
+### Learning from calibration
+
+After the user completes calibration review:
+
+- Extract approved OCR corrections.
+- Identify recurring word-level OCR mistakes.
+- Identify recurring character, character-combination, and spelling errors where appropriate.
+- Apply approved correction patterns to subsequent pages of the same book.
+- Use the existing correction memory mechanism where applicable.
+- Consider book-specific typography and recurring OCR confusion patterns.
+
+For example:
+
+If the OCR repeatedly recognizes a Telugu word incorrectly during calibration and the user corrects it to the same intended word, the system should learn this correction and apply it to subsequent occurrences in the remaining pages.
+
+The system should not require the user to manually correct the same word repeatedly.
+
+### Important safety requirements
+
+Do not blindly replace every matching word throughout the book.
+
+Before applying a learned correction:
+
+- Check whether the correction is applicable to the current word and its context.
+- Avoid changing valid Telugu words that happen to resemble an incorrect OCR form.
+- Do not apply corrections when multiple approved alternatives exist and the context is insufficient.
+- Preserve the original OCR output so that corrections can be reviewed, reverted, or reapplied.
+- Track whether a correction was automatically applied or manually approved.
+- Allow users to review automatically corrected content.
+
+The calibration process should improve OCR accuracy without introducing widespread incorrect replacements.
+
+## 2. Improve Correction Memory: Word-Level Learning
+
+### Current problem
+
+The existing Correction Memory appears to maintain corrections using word or phrase pairs, but I want to ensure that the underlying learning mechanism is not based on sentence-to-sentence replacement.
+
+Sentence-to-sentence correction memory is inefficient and does not generalize well.
+
+For example, storing an entire sentence as a correction is not useful when only one Telugu word in that sentence was recognized incorrectly.
+
+### Proposed correction memory model
+
+The primary correction memory should be based on:
+
+**Incorrect OCR word → Corrected word**
+
+For example:
+
+- Incorrect OCR: `తెలుగరస్న`
+- Corrected: `తెలుగరస్వ`
+
+The above is only an illustrative example. Do not add this particular correction unless it is supported by actual user-approved corrections.
+
+Store corrections at the smallest useful linguistic unit.
+
+The correction memory should support:
+
+1. Word-to-word corrections.
+2. Character or character-sequence corrections when useful.
+3. Phrase-level corrections only when necessary.
+4. Sentence context as supporting evidence, not as the default correction unit.
+
+### Context-aware correction
+
+A word may have different valid meanings or spellings depending on the sentence.
+
+Therefore, the correction system must support contextual disambiguation.
+
+For example:
+
+The same OCR-recognized word may require different corrections in two different sentences.
+
+In such cases:
+
+- Store the candidate corrections at the word level.
+- Associate relevant context with each correction.
+- Use the surrounding words or sentence to determine which correction is appropriate.
+- Do not store entire sentences as independent correction pairs unless there is a genuine phrase-level or sentence-level OCR issue.
+
+The sentence should help determine the correct word, not become the correction itself.
+
+### Correction memory data model
+
+Inspect the existing database schema and improve it as necessary.
+
+The correction memory should support the following information:
+
+- Original OCR word or phrase.
+- Approved corrected word or phrase.
+- Normalized OCR form, if required.
+- Relevant context or contextual fingerprint.
+- Correction scope: global or book-specific.
+- Evidence count.
+- Positive and negative evidence, if supported by the current design.
+- Confidence or reliability score.
+- Active or disabled status.
+- Source book and page references where applicable.
+- Creation and last-used timestamps.
+
+Do not introduce redundant fields if equivalent information already exists.
+
+### Global and book-specific corrections
+
+Maintain two correction scopes:
+
+**Global correction memory**
+- Contains corrections that are generally applicable across books.
+- Should be learned from sufficiently reliable user-approved evidence.
+- Should not contain book-specific typography assumptions that could damage OCR results in other books.
+
+**Book-specific correction memory**
+- Contains corrections or OCR patterns that are valid for the current book.
+- Should take precedence when the correction is clearly specific to that book.
+- Should not automatically become global without sufficient evidence.
+
+### Correction evidence and conflict handling
+
+Improve the existing evidence tracking mechanism.
+
+The application should:
+
+- Increase evidence when a correction is repeatedly approved.
+- Track negative evidence when a correction is rejected or reverted.
+- Detect conflicting corrections for the same OCR form.
+- Avoid automatically activating uncertain or conflicting corrections.
+- Allow users to disable or correct an existing memory entry.
+
+Do not assume that a correction is universally valid merely because it was approved once.
+
+## 3. Improve the Existing Correction Memory UI
+
+Refer to the attached screenshot of the current Correction Memory interface.
+
+The current UI displays:
+
+- Correction Memory count.
+- Search field.
+- Status filter.
+- Selected-book filter.
+- OCR form and corrected form.
+- Context.
+- Scope and state.
+- Evidence.
+- Actions.
+
+Preserve useful existing functionality, but improve the interface where necessary.
+
+### Required improvements
+
+- Clearly distinguish global corrections from book-specific corrections.
+- Display the incorrect OCR word and corrected word prominently.
+- Display contextual information only when it helps explain the correction.
+- Make conflicting or low-confidence corrections easy to identify.
+- Allow users to inspect the evidence behind a correction.
+- Provide intuitive actions to disable, enable, edit, or remove a correction, depending on the existing supported operations.
+- Ensure the correction memory remains understandable when hundreds or thousands of corrections exist.
+
+Do not redesign the entire application unnecessarily. Focus on making correction memory useful, understandable, and efficient.
+
+## 4. Improve Book Switching and Abandoning the Current Book
+
+### Current problem
+
+When a user wants to stop processing the current book and move to another book, the application should provide a clear and intuitive way to do so.
+
+If this functionality already exists, inspect it carefully.
+
+If it exists but is difficult to discover, improve its placement, wording, and interaction.
+
+If it does not exist, implement it.
+
+### Required UX
+
+Provide a clearly visible action such as:
+
+**"Switch Book"** or **"Start Another Book"**
+
+The action should be available from an appropriate location in the book processing workflow.
+
+When the user selects it:
+
+1. Check whether the current book has unfinished OCR processing or review work.
+2. If there is unsaved work, ensure it is saved or clearly explain what will happen.
+3. If the current book contains unfinished work, display a confirmation dialog.
+4. Clearly explain whether the current book will be paused, abandoned, or retained for later continuation.
+5. Allow the user to continue working on the current book or proceed to another book.
+6. Navigate to the book upload or book selection screen.
+
+Do not silently discard user corrections, OCR results, or review progress.
+
+### Important distinction
+
+Switching books should not automatically delete the current book or its data.
+
+The user should be able to return to the previous book and continue processing it later, unless they explicitly choose to delete it.
+
+## 5. Technical Implementation Requirements
+
+Before making changes:
+
+- Inspect the current project structure.
+- Identify the OCR processing pipeline.
+- Identify where OCR results are stored.
+- Identify the correction memory implementation.
+- Identify how corrections are applied during review.
+- Identify how books and processing sessions are managed.
+- Identify existing UI components and APIs that can be reused.
+
+Then implement the improvements in the appropriate layers.
+
+Consider whether calibration requires changes to:
+
+- OCR orchestration.
+- Correction memory service.
+- Database schema.
+- API endpoints.
+- Review workflow.
+- Book processing state.
+- Frontend navigation and dialogs.
+
+Avoid unnecessary dependencies and avoid introducing a second correction memory system.
+
+### Processing state
+
+Ensure that the book processing workflow supports clear states such as:
+
+- Uploaded.
+- Calibration pending.
+- Calibration processing.
+- Calibration review.
+- Calibration completed.
+- Remaining pages processing.
+- Review in progress.
+- Completed.
+- Paused or abandoned, if supported by the existing architecture.
+
+Use the existing state model if it already supports equivalent states.
+
+Ensure processing can resume safely after interruption.
+
+## 6. Testing Requirements
+
+Add or update tests covering:
+
+### Calibration
+- User selects 5 calibration pages.
+- User selects 10 calibration pages.
+- Only calibration pages are processed initially.
+- Remaining pages are processed after calibration review.
+- Approved corrections are applied to subsequent pages.
+- Calibration corrections can be reverted.
+
+### Correction memory
+- Word-level correction is stored correctly.
+- Repeated corrections increase evidence.
+- Context distinguishes conflicting corrections.
+- Global and book-specific corrections are handled correctly.
+- Incorrect automatic corrections can be rejected.
+- Sentence-level replacement is not used unnecessarily.
+
+### Book switching
+- User can switch books when no work is pending.
+- User receives a warning when unfinished work exists.
+- Switching books preserves the current book's data.
+- User can return to the previous book.
+- No OCR results or manual corrections are silently lost.
+
+### Regression testing
+Ensure that existing OCR functionality, book processing, review, export, and correction memory features continue to work.
+
+## 7. Acceptance Criteria
+
+The implementation is complete only when:
+
+1. Users can configure and process an initial calibration batch.
+2. Users can manually review and approve calibration corrections.
+3. Approved corrections improve OCR processing for the remaining pages.
+4. The system learns primarily from word-level corrections rather than sentence-to-sentence replacements.
+5. Context is used to resolve ambiguous word corrections.
+6. Global and book-specific corrections are handled appropriately.
+7. The existing Correction Memory UI is improved without losing its useful functionality.
+8. Users can intuitively switch to another book without losing unfinished work.
+9. The implementation includes appropriate automated tests.
+10. The project documentation is updated to explain the new workflow.
+
+## 8. Deliverables
+
+After implementation:
+
+- Provide a summary of the changes.
+- List the files modified.
+- Explain any database migration required.
+- Explain how calibration and correction learning work.
+- Document any limitations or unresolved issues.
+- Provide test results.
+- Identify any additional improvements that should be considered later.
+
+## 9. Allow Users to Select the Starting Page for OCR Calibration and Review
+
+### Current problem
+
+The initial pages of a book PDF may contain:
+
+- Book cover
+- Title page
+- Publisher information
+- Dedication
+- Foreword
+- Photographs or illustrations
+- Blank pages
+- Other non-text content
+
+Therefore, assuming that calibration should always begin from PDF page 1 is incorrect.
+
+The user should be able to select the actual starting page from which OCR calibration and proofreading should begin.
+
+### Required functionality
+
+During book upload or OCR calibration configuration, provide the following options:
+
+- Starting PDF page
+- Number of calibration pages
+- Optional ending page, if supported by the existing workflow
+
+For example, a user uploads a 250-page book and selects:
+
+- Starting page: 12
+- Calibration pages: 8
+
+The application should process PDF pages 12–19 for calibration.
+
+After the user reviews and approves the calibration corrections, the remaining pages should be processed according to the configured workflow.
+
+### User interface
+
+Add a clearly labeled configuration section:
+
+**OCR Calibration Settings**
+
+- Starting page: [12]
+- Calibration pages: [8]
+- Pages selected for calibration: 12–19
+
+Display the total number of PDF pages in the uploaded book.
+
+Validate the configuration:
+
+- Starting page must be at least 1.
+- Starting page must not exceed the total PDF page count.
+- Calibration page count must be valid.
+- The selected calibration range must not exceed the total number of PDF pages.
+
+Provide a visual indication of the selected page range.
+
+### Important distinction: PDF page number vs printed page number
+
+The starting page must refer to the actual PDF page index, not the page number printed inside the book.
+
+For example:
+
+- PDF page 1 may be the cover.
+- PDF page 12 may contain the first actual Telugu text.
+- The printed page number on PDF page 12 may be 1.
+
+Clearly explain this distinction in the UI to avoid confusion.
+
+Use terminology such as:
+
+"PDF Starting Page"
+
+and provide a short helper description:
+
+"Select the PDF page where the actual book text begins. This may differ from the printed page number."
+
+### Calibration page selection
+
+The user should be able to choose the number of calibration pages independently of the starting page.
+
+For example:
+
+- Starting PDF page: 12
+- Calibration pages: 5
+- Calibration range: PDF pages 12–16
+
+Do not assume that the first five pages of the PDF are suitable for OCR calibration.
+
+### Processing remaining pages
+
+After calibration is completed:
+
+- Apply approved corrections to subsequent pages.
+- Process the remaining pages within the configured book range.
+- Do not reprocess calibration pages unnecessarily.
+- Preserve the original PDF page references.
+- Ensure review navigation displays the correct PDF page number.
+
+If the user configures a starting page greater than 1, pages before that starting page should remain untouched unless the user explicitly chooses to process them later.
+
+### Additional UX improvement
+
+If feasible, display a small PDF page preview or thumbnail near the starting page selector.
+
+This will help users identify where the actual text begins without manually guessing page numbers.
+
+If preview functionality already exists, reuse it rather than implementing a separate PDF viewer.
+
+### Acceptance criteria
+
+1. Users can select the actual PDF starting page.
+2. Users can select the calibration page count independently.
+3. Calibration begins at the selected PDF page.
+4. Pages before the selected starting page are not automatically processed.
+5. PDF page numbers and printed page numbers are not confused.
+6. The selected page range is clearly displayed.
+7. Calibration and remaining-page processing preserve correct PDF page references.
+8. Existing book processing and review functionality continues to work.
+
+Prioritize correctness, reduced manual correction effort, safe correction learning, and a user-friendly workflow.
+
+Do not make superficial UI changes while leaving the underlying OCR learning behavior unchanged.

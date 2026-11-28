@@ -64,11 +64,72 @@ class BookSummaryResponse(BaseModel):
     page_count: int
     rights_status: str
     training_consent: bool
+    processing_state: str = "uploaded"
+    calibration_start_page: int | None = None
+    calibration_page_count: int | None = None
+    calibration_end_page: int | None = None
+    calibration_completed_at: datetime | None = None
+    approved_pages_count: int = 0
     created_at: datetime
     updated_at: datetime
     scanned_pages_count: int
     digital_text_pages_count: int
     mixed_pages_count: int
+
+
+class LearnedCharPatternItem(BaseModel):
+    from_seq: str
+    to_seq: str
+    occurrences: int
+    examples: list[str] = Field(default_factory=list)
+
+
+class BookCalibrationStatusResponse(BaseModel):
+    book_id: UUID
+    page_count: int
+    processing_state: str
+    calibration_start_page: int | None = None
+    calibration_page_count: int | None = None
+    calibration_range_end: int | None = None
+    book_end_page: int
+    skipped_front_pages_count: int = 0
+    remaining_start_page: int | None = None
+    remaining_end_page: int | None = None
+    remaining_pages_count: int = 0
+    calibration_pages_ocred: int = 0
+    calibration_pages_approved: int = 0
+    calibration_completed_at: datetime | None = None
+    learned_word_rules_count: int = 0
+    learned_char_patterns: list[LearnedCharPatternItem] = Field(default_factory=list)
+    conflicting_rules_count: int = 0
+    auto_applied_blocks_count: int = 0
+    newly_harvested_rules_count: int = 0
+
+
+class CalibrationStartRequest(BaseModel):
+    start_page: int = Field(default=1, ge=1)
+    calibration_page_count: int = Field(default=5, ge=1)
+    end_page: int | None = Field(default=None, ge=1)
+    engines: list[str] = Field(default_factory=lambda: ["paddle_ppocrv5_te", "tesseract_tel_best"], min_length=1)
+    render_dpi: int = Field(default=300, ge=72, le=600)
+    preprocessing_profile: str = Field(default="none")
+    tesseract_psm: int = Field(default=6, ge=0, le=13)
+    include_digital_text_pages: bool = False
+    force_rerun: bool = False
+
+
+class CalibrationProcessRemainingRequest(BaseModel):
+    engines: list[str] = Field(default_factory=lambda: ["paddle_ppocrv5_te", "tesseract_tel_best"], min_length=1)
+    render_dpi: int = Field(default=300, ge=72, le=600)
+    preprocessing_profile: str = Field(default="none")
+    tesseract_psm: int = Field(default=6, ge=0, le=13)
+    include_digital_text_pages: bool = False
+    force_rerun: bool = False
+    apply_calibration_corrections: bool = True
+
+
+class BookStateUpdateRequest(BaseModel):
+    processing_state: str = Field(..., max_length=32)
 
 
 class BookListResponse(BaseModel):
@@ -126,6 +187,10 @@ class OCRRunCreateResponse(BaseModel):
     status: str
     pages_total: int
     reused_existing: bool = False
+
+
+class CalibrationRunResponse(OCRRunCreateResponse):
+    calibration: BookCalibrationStatusResponse
 
 
 class OCRRunStatusResponse(BaseModel):
@@ -192,7 +257,19 @@ class ReviewEditHistoryItem(BaseModel):
     action: str
     reviewer_id: str | None
     review_note: str | None
+    applied_rules: list[dict[str, Any]] | None = None
     created_at: datetime
+
+
+class AutoAppliedRuleItem(BaseModel):
+    correction_id: str | None = None
+    original: str
+    replacement: str
+    scope: str = "book_only"
+    unit_type: str = "word"
+    context_match: str = "medium"
+    confidence: float = 0.9
+    reason: str = ""
 
 
 class CorrectionSuggestionItem(BaseModel):
@@ -202,10 +279,12 @@ class CorrectionSuggestionItem(BaseModel):
     left_context: str | None
     right_context: str | None
     correction_type: str | None
+    unit_type: str = "word"
     scope: str
     status: str
     approved_count: int
     rejected_count: int
+    reliability_score: float = 0.75
     context_match: str
     source_book_count: int
     has_conflict: bool = False
@@ -223,6 +302,8 @@ class ReviewBlockResponse(BaseModel):
     current_text: str
     is_edited: bool
     latest_action: str | None
+    auto_applied_flag: bool = False
+    auto_applied_rules: list[AutoAppliedRuleItem] = Field(default_factory=list)
     confidence: float | None
     low_confidence_flag: bool
     disagreement_flag: bool
@@ -267,6 +348,7 @@ class BlockEditRequest(BaseModel):
     incorrect_span: str | None = Field(default=None, max_length=500)
     corrected_span: str | None = Field(default=None, max_length=500)
     auto_filter_noise: bool = False
+    reject_auto_applied_rules: bool = False
 
 
 class PageAutocorrectRequest(BaseModel):
@@ -390,16 +472,24 @@ class CorrectionMemoryRecord(BaseModel):
     correction_id: UUID
     language_code: str
     incorrect_text: str
+    normalized_incorrect: str | None = None
     corrected_text: str
     left_context: str | None
     right_context: str | None
     correction_type: str | None
+    unit_type: str = "word"
     scope: str
     book_id: UUID | None
+    source_book_title: str | None = None
     source_ocr_block_id: UUID | None
+    source_page_number: int | None = None
     status: str
     approved_count: int
     rejected_count: int
+    reliability_score: float = 0.75
+    has_conflict: bool = False
+    conflict_count: int = 0
+    last_used_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -410,6 +500,10 @@ class CorrectionSearchResponse(BaseModel):
 
 class CorrectionListResponse(BaseModel):
     items: list[CorrectionMemoryRecord]
+    total_count: int = 0
+    global_count: int = 0
+    book_specific_count: int = 0
+    conflicts_count: int = 0
 
 
 class CorrectionRejectRequest(BaseModel):
@@ -419,6 +513,17 @@ class CorrectionRejectRequest(BaseModel):
 class CorrectionStatusRequest(BaseModel):
     status: str
     scope: str | None = None
+
+
+class CorrectionUpdateRequest(BaseModel):
+    corrected_text: str | None = Field(default=None, max_length=500)
+    left_context: str | None = Field(default=None, max_length=500)
+    right_context: str | None = Field(default=None, max_length=500)
+    correction_type: str | None = Field(default=None, max_length=50)
+    unit_type: str | None = Field(default=None, max_length=20)
+    scope: str | None = Field(default=None, max_length=20)
+    status: str | None = Field(default=None, max_length=20)
+    clear_context: bool = False
 
 
 class ExportCreateRequest(BaseModel):

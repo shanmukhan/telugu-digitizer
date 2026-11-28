@@ -56,6 +56,44 @@ export function formatLayoutMode(mode: string): string {
   }
 }
 
+export function formatProcessingState(state: string | null | undefined): string {
+  switch (state) {
+    case "uploaded":
+      return "Uploaded";
+    case "calibration_pending":
+      return "Calibration Pending";
+    case "calibration_processing":
+      return "Calibrating OCR";
+    case "calibration_review":
+      return "Calibration Review";
+    case "calibration_completed":
+      return "Calibration Complete";
+    case "remaining_processing":
+      return "Processing Remaining";
+    case "review_in_progress":
+      return "In Review";
+    case "completed":
+      return "Completed";
+    case "paused":
+      return "Paused";
+    default:
+      return state ? state.replace(/_/g, " ") : "Uploaded";
+  }
+}
+
+export function formatUnitType(unitType: string | null | undefined): string {
+  switch (unitType) {
+    case "word":
+      return "Word";
+    case "char_pattern":
+      return "Char Pattern";
+    case "phrase":
+      return "Phrase";
+    default:
+      return "Word";
+  }
+}
+
 export function formatCorrectionScope(scope: string): string {
   switch (scope) {
     case "book_only":
@@ -203,6 +241,12 @@ export function computeBookOcrCoverage(
 ): BookOcrCoverage {
   const totalPages = Math.max(0, book.page_count);
   const totalScanned = Math.max(0, book.scanned_pages_count + book.mixed_pages_count);
+  const effectiveStart = Math.max(1, Math.min(totalPages || 1, book.calibration_start_page ?? 1));
+  const effectiveEnd = Math.max(
+    effectiveStart,
+    Math.min(totalPages || 1, book.calibration_end_page ?? totalPages),
+  );
+  const targetSpanCount = totalPages > 0 ? Math.max(1, effectiveEnd - effectiveStart + 1) : 0;
 
   if (totalPages === 0 || totalScanned === 0) {
     return {
@@ -264,8 +308,8 @@ export function computeBookOcrCoverage(
       isFullyCovered: false,
       isPartialCoverage: false,
       coveredRangeLabel: null,
-      nextStartPage: 1,
-      nextEndPage: totalPages,
+      nextStartPage: effectiveStart,
+      nextEndPage: effectiveEnd,
       isPageCovered: () => false,
     };
   }
@@ -282,14 +326,21 @@ export function computeBookOcrCoverage(
   }
 
   let coveredPagesCount = 0;
+  let coveredWithinTarget = 0;
   for (const [s, e] of merged) {
     coveredPagesCount += e - s + 1;
+    const ovStart = Math.max(s, effectiveStart);
+    const ovEnd = Math.min(e, effectiveEnd);
+    if (ovEnd >= ovStart) {
+      coveredWithinTarget += ovEnd - ovStart + 1;
+    }
   }
   coveredPagesCount = Math.min(totalPages, coveredPagesCount);
 
-  // Locate first uncovered page (e.g., 6 after Pages 1–5)
-  let nextStartPage = 1;
+  // Locate first uncovered page within [effectiveStart, effectiveEnd] (skipping unconfigured front matter).
+  let nextStartPage = effectiveStart;
   for (const [s, e] of merged) {
+    if (e < effectiveStart) continue;
     if (nextStartPage < s) {
       break;
     }
@@ -298,9 +349,11 @@ export function computeBookOcrCoverage(
     }
   }
 
-  const isFullyCovered = nextStartPage > totalPages || coveredPagesCount >= totalPages;
-  const remainingPagesCount = isFullyCovered ? 0 : Math.max(1, totalPages - coveredPagesCount);
-  const clampedStart = isFullyCovered ? 1 : Math.min(totalPages, nextStartPage);
+  const isFullyCovered = nextStartPage > effectiveEnd || coveredWithinTarget >= targetSpanCount;
+  const remainingPagesCount = isFullyCovered
+    ? 0
+    : Math.max(1, targetSpanCount - coveredWithinTarget);
+  const clampedStart = isFullyCovered ? effectiveStart : Math.min(effectiveEnd, nextStartPage);
   const coveredRangeLabel = merged
     .map(([s, e]) => (s === e ? `${s}` : `${s}–${e}`))
     .join(", ");
@@ -315,7 +368,7 @@ export function computeBookOcrCoverage(
     isPartialCoverage: !isFullyCovered,
     coveredRangeLabel,
     nextStartPage: clampedStart,
-    nextEndPage: totalPages,
+    nextEndPage: effectiveEnd,
     isPageCovered: (pageNumber: number) =>
       merged.some(([s, e]) => pageNumber >= s && pageNumber <= e),
   };

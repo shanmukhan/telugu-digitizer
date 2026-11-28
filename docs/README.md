@@ -23,6 +23,7 @@
 | `10-ai-coding-agent-instructions.md` | Master instructions for Codex/Claude/Gemini coding agents |
 | `11-architecture-decisions.md` | Explicit architectural decisions and trade-offs |
 | `12-acceptance-criteria.md` | Definition of done and release gates |
+| `19-ocr-calibration-and-word-learning.md` | OCR Calibration with PDF starting page, word-level learning, and safe Book Switching |
 
 ## Locked decisions
 

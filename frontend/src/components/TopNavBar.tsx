@@ -1,6 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { BookOCRRunSummary, BookSummary } from "../types/api";
-import { buildRunTelemetry, computeBookOcrCoverage, formatEngineLabel } from "../utils/formatters";
+import {
+  buildRunTelemetry,
+  computeBookOcrCoverage,
+  formatEngineLabel,
+  formatProcessingState,
+} from "../utils/formatters";
 
 export type WorkspaceView = "review" | "dictionary" | "memory" | "export";
 
@@ -13,6 +18,7 @@ interface TopNavBarProps {
   onSelectBook: (bookId: string) => void;
   onSelectView: (view: WorkspaceView) => void;
   onOpenImport: () => void;
+  onOpenSwitchBook?: () => void;
   onOpenOcrDrawer: () => void;
   onToggleKeyboard: () => void;
   onOpenShortcuts: () => void;
@@ -34,6 +40,7 @@ export function TopNavBar({
   onSelectBook,
   onSelectView,
   onOpenImport,
+  onOpenSwitchBook,
   onOpenOcrDrawer,
   onToggleKeyboard,
   onOpenShortcuts,
@@ -213,7 +220,10 @@ export function TopNavBar({
                               {book.title}
                             </span>
                             <span className="hint-text">
-                              {book.page_count}p · {book.scanned_pages_count} scan · {book.digital_text_pages_count} dig
+                              {book.page_count}p · {formatProcessingState(book.processing_state)}
+                              {typeof book.approved_pages_count === "number" && book.approved_pages_count > 0
+                                ? ` · ${book.approved_pages_count}/${book.page_count} approved`
+                                : ""}
                             </span>
                           </button>
                         </li>
@@ -238,6 +248,18 @@ export function TopNavBar({
             </button>
           )}
         </div>
+
+        {selectedBook && onOpenSwitchBook && (
+          <button
+            type="button"
+            className="btn-compact switch-book-nav-btn"
+            title="Pause this book safely and switch to another book or upload a new PDF"
+            onClick={onOpenSwitchBook}
+          >
+            <span aria-hidden="true">⇄</span>
+            <span className="hide-sm">Switch Book</span>
+          </button>
+        )}
       </div>
 
       <div

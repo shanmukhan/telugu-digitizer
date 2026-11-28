@@ -51,6 +51,13 @@ class Book(Base):
     page_count: Mapped[int] = mapped_column(Integer, nullable=False)
     rights_status: Mapped[str] = mapped_column(String(30), nullable=False, default="unknown")
     training_consent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    processing_state: Mapped[str] = mapped_column(String(32), nullable=False, default="uploaded")
+    calibration_start_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calibration_page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calibration_end_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calibration_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )
@@ -227,6 +234,7 @@ class ReviewEdit(Base):
     action: Mapped[str] = mapped_column(String(20), nullable=False)
     reviewer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applied_rules: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )
@@ -238,16 +246,19 @@ class CorrectionMemory(Base):
         CheckConstraint("approved_count >= 0", name="ck_correction_memory_approved_nonneg"),
         CheckConstraint("rejected_count >= 0", name="ck_correction_memory_rejected_nonneg"),
         Index("ix_correction_memory_incorrect", "language_code", "incorrect_text", "status"),
+        Index("ix_correction_memory_norm_incorrect", "language_code", "normalized_incorrect", "status"),
         Index("ix_correction_memory_book_id", "book_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     language_code: Mapped[str] = mapped_column(String(8), nullable=False, default="te")
     incorrect_text: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_incorrect: Mapped[str | None] = mapped_column(Text, nullable=True)
     corrected_text: Mapped[str] = mapped_column(Text, nullable=False)
     left_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     right_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     correction_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    unit_type: Mapped[str] = mapped_column(String(20), nullable=False, default="word")
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="global_suggestion")
     book_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("books.id", ondelete="SET NULL"), nullable=True
@@ -255,9 +266,11 @@ class CorrectionMemory(Base):
     source_ocr_block_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ocr_blocks.id", ondelete="SET NULL"), nullable=True
     )
+    source_page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     approved_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     rejected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )

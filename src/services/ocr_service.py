@@ -224,6 +224,7 @@ def compute_run_idempotency_key(
     preprocessing_profile: str,
     tesseract_psm: int,
     include_digital_text_pages: bool,
+    apply_calibration_corrections: bool = False,
 ) -> str:
     """Compute a deterministic SHA-256 key for idempotent OCR run lookup."""
     payload = {
@@ -235,6 +236,7 @@ def compute_run_idempotency_key(
         "preprocessing_profile": preprocessing_profile,
         "tesseract_psm": tesseract_psm if canonical_engine == "tesseract_tel_best" else None,
         "include_digital_text_pages": include_digital_text_pages,
+        "apply_calibration_corrections": bool(apply_calibration_corrections),
     }
     return sha256_bytes(json.dumps(payload, sort_keys=True).encode("utf-8"))
 
@@ -542,6 +544,8 @@ class OCRJobExecutor:
             preprocessing_profile = str(cfg.get("preprocessing_profile") or "none")
             tesseract_psm = int(cfg.get("tesseract_psm") if cfg.get("tesseract_psm") is not None else 6)
             include_digital = bool(cfg.get("include_digital_text_pages", False))
+            run_phase = str(cfg.get("run_phase") or "")
+            apply_calibration = bool(cfg.get("apply_calibration_corrections", False))
 
             if run_id in self._cancelled_runs:
                 ocr_run.status = "partial"
@@ -708,21 +712,37 @@ class OCRJobExecutor:
                         )
                         self.storage.write_json(page_json_key, structured)
 
+                        created_blocks: list[OCRBlock] = []
                         for blk in recognition["blocks"]:
                             raw_text = str(blk["text"])
-                            db.add(
-                                OCRBlock(
-                                    ocr_run_id=ocr_run.id,
-                                    book_page_id=page.id,
-                                    block_index=int(blk["block_index"]),
-                                    block_type=str(blk.get("block_type", "text_line")),
-                                    raw_text=raw_text,
-                                    normalized_text=normalize_nfc(raw_text),
-                                    confidence=blk.get("confidence"),
-                                    polygon=blk.get("polygon"),
-                                    reading_order=blk.get("reading_order"),
-                                    raw_engine_payload=blk,
-                                )
+                            blk_row = OCRBlock(
+                                ocr_run_id=ocr_run.id,
+                                book_page_id=page.id,
+                                block_index=int(blk["block_index"]),
+                                block_type=str(blk.get("block_type", "text_line")),
+                                raw_text=raw_text,
+                                normalized_text=normalize_nfc(raw_text),
+                                confidence=blk.get("confidence"),
+                                polygon=blk.get("polygon"),
+                                reading_order=blk.get("reading_order"),
+                                raw_engine_payload=blk,
+                            )
+                            db.add(blk_row)
+                            created_blocks.append(blk_row)
+
+                        auto_applied_count = 0
+                        if apply_calibration and created_blocks:
+                            db.flush()
+                            from src.services.calibration_service import (
+                                apply_learned_corrections_to_page_blocks,
+                            )
+
+                            auto_applied_count = apply_learned_corrections_to_page_blocks(
+                                db=db,
+                                book=book,
+                                page=page,
+                                blocks=created_blocks,
+                                lexicon_path=self.settings.lexicon_path,
                             )
 
                         completed_pages += 1
@@ -738,6 +758,7 @@ class OCRJobExecutor:
                             page_number=page.page_number,
                             engine=canonical_engine,
                             block_count=len(recognition["blocks"]),
+                            auto_applied_blocks=auto_applied_count,
                             elapsed_ms=recognition.get("elapsed_ms"),
                             rss_mb=_peak_rss_mb(),
                         )
@@ -789,6 +810,16 @@ class OCRJobExecutor:
                 job.progress_current = completed_pages
                 job.completed_at = finished_at
                 job.error_details = {"failed_pages": failed_errors}
+
+            # Advance book processing_state cleanly when a calibration or remaining-pages run finishes.
+            book_row = db.get(Book, ocr_run.book_id) if ocr_run is not None else None
+            if book_row is not None and final_status in ("completed", "partial"):
+                if run_phase == "calibration":
+                    book_row.processing_state = "calibration_review"
+                elif run_phase == "remaining":
+                    book_row.processing_state = "review_in_progress"
+                elif book_row.processing_state in ("uploaded", "calibration_pending"):
+                    book_row.processing_state = "review_in_progress"
             db.commit()
 
 
@@ -806,6 +837,8 @@ def create_or_reuse_ocr_runs(
     tesseract_psm: int,
     include_digital_text_pages: bool,
     force_rerun: bool,
+    run_phase: str | None = None,
+    apply_calibration_corrections: bool = False,
 ) -> dict[str, Any]:
     """Create durable ProcessingJob + OCRRun rows or reuse matching completed runs."""
     if preprocessing_profile not in ALLOWED_PREPROCESSING_PROFILES:
@@ -869,6 +902,7 @@ def create_or_reuse_ocr_runs(
             preprocessing_profile=preprocessing_profile,
             tesseract_psm=tesseract_psm,
             include_digital_text_pages=include_digital_text_pages,
+            apply_calibration_corrections=apply_calibration_corrections,
         )
         active_existing = db.scalars(
             select(OCRRun)
@@ -940,6 +974,8 @@ def create_or_reuse_ocr_runs(
                 "preprocessing_profile": preprocessing_profile,
                 "tesseract_psm": tesseract_psm if canon == "tesseract_tel_best" else None,
                 "include_digital_text_pages": include_digital_text_pages,
+                "run_phase": run_phase,
+                "apply_calibration_corrections": bool(apply_calibration_corrections),
             },
         )
         db.add(ocr_run)

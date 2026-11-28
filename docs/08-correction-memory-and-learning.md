@@ -82,17 +82,13 @@ When context conflicts, present the correction for review. A word without contex
 
 ## 5. Rule for auto-application
 
-Phase 1 and early MVP: no automatic text changes based on correction memory. Show suggestions only.
+Phase 1 and early MVP showed suggestions only. With the **OCR Calibration Phase** (see `19-ocr-calibration-and-word-learning.md`), the system supports safe, auditable auto-application on remaining pages after calibration review, strictly subject to evidence and safety gates:
 
-A future version may auto-apply only in an explicitly opted-in mode and only after an evidence policy is met, for example:
-
-- same incorrect/correct pair accepted multiple times by a reviewer;
-- examples come from more than one independent document;
-- surrounding context matches strongly;
-- no relevant rejection or conflicting mapping exists;
-- the user can see an audit trail and undo it.
-
-Even then, retain original OCR text and mark the corrected text as machine-applied, not human-approved.
+- **Word-level units first**: Adjacent word edits are split into individual word-to-word rules (`unit_type='word'`) instead of sentence-to-sentence replacements; phrase rules are reserved for compact word-boundary splits/merges.
+- **Book-specific scope precedence**: `book_only` rules learned during calibration apply within the same book (when `approved_count >= 1`, `rejected_count == 0`); cross-book `global_suggestion` rules require repeated confirmation (`approved_count >= 2`, `rejected_count == 0`).
+- **Valid Telugu word guard**: Valid known dictionary words are not overwritten unless supported by strong surrounding-word context or repeated book-specific evidence.
+- **Conflict guard**: Conflicting targets for the same OCR word are never auto-applied unless surrounding sentence context uniquely and strongly resolves one candidate.
+- **Immutable raw OCR & provenance**: `ocr_blocks.raw_text` is never modified; auto-applied text is persisted as an append-only `ReviewEdit(action='auto_applied', applied_rules=[...])` so reviewers can inspect, approve, revert, or reject any rule.
 
 ## 6. LLM correction policy
 

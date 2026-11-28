@@ -339,25 +339,70 @@ def _fetch_page_kind_counts(
     return counts_by_book
 
 
+def _fetch_approved_page_counts(
+    db: Session,
+    book_ids: list[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, int]:
+    stmt = (
+        select(BookPage.book_id, func.count(BookPage.id))
+        .where(BookPage.review_status == "approved")
+        .group_by(BookPage.book_id)
+    )
+    if book_ids is not None:
+        if not book_ids:
+            return {}
+        stmt = stmt.where(BookPage.book_id.in_(book_ids))
+    return {b_id: int(cnt) for b_id, cnt in db.execute(stmt).all()}
+
+
 def list_books_with_counts(db: Session) -> list[dict[str, Any]]:
-    """Return all books along with page classification counts in 2 queries (no N+1)."""
+    """Return all books along with page classification, approval counts, and live processing states."""
+    from src.services.calibration_service import derive_book_processing_state
+
     books = list(db.scalars(select(Book).order_by(Book.created_at.desc())).all())
     if not books:
         return []
-    counts_by_book = _fetch_page_kind_counts(db, [b.id for b in books])
-    return [_serialize_book_summary_from_counts(book, counts_by_book.get(book.id, {})) for book in books]
+    book_ids = [b.id for b in books]
+    counts_by_book = _fetch_page_kind_counts(db, book_ids)
+    approved_by_book = _fetch_approved_page_counts(db, book_ids)
+    runs_by_book: dict[uuid.UUID, list[OCRRun]] = {}
+    for run in db.scalars(select(OCRRun).where(OCRRun.book_id.in_(book_ids)).order_by(OCRRun.created_at.desc())).all():
+        runs_by_book.setdefault(run.book_id, []).append(run)
+    return [
+        _serialize_book_summary_from_counts(
+            book,
+            counts_by_book.get(book.id, {}),
+            approved_pages_count=approved_by_book.get(book.id, 0),
+            effective_state=derive_book_processing_state(db, book, runs=runs_by_book.get(book.id, [])),
+        )
+        for book in books
+    ]
 
 
 def get_book_with_counts(db: Session, book_id: uuid.UUID) -> dict[str, Any]:
     """Fetch a single book summary or raise 404 without loading full BookPage rows."""
+    from src.services.calibration_service import derive_book_processing_state
+
     book = db.get(Book, book_id)
     if book is None:
         raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
     counts_by_book = _fetch_page_kind_counts(db, [book.id])
-    return _serialize_book_summary_from_counts(book, counts_by_book.get(book.id, {}))
+    approved_by_book = _fetch_approved_page_counts(db, [book.id])
+    return _serialize_book_summary_from_counts(
+        book,
+        counts_by_book.get(book.id, {}),
+        approved_pages_count=approved_by_book.get(book.id, 0),
+        effective_state=derive_book_processing_state(db, book),
+    )
 
 
-def _serialize_book_summary_from_counts(book: Book, kind_counts: dict[str, int]) -> dict[str, Any]:
+def _serialize_book_summary_from_counts(
+    book: Book,
+    kind_counts: dict[str, int],
+    *,
+    approved_pages_count: int = 0,
+    effective_state: str | None = None,
+) -> dict[str, Any]:
     return {
         "book_id": book.id,
         "title": book.title,
@@ -371,6 +416,12 @@ def _serialize_book_summary_from_counts(book: Book, kind_counts: dict[str, int])
         "page_count": book.page_count,
         "rights_status": book.rights_status,
         "training_consent": book.training_consent,
+        "processing_state": effective_state or book.processing_state,
+        "calibration_start_page": book.calibration_start_page,
+        "calibration_page_count": book.calibration_page_count,
+        "calibration_end_page": book.calibration_end_page,
+        "calibration_completed_at": book.calibration_completed_at,
+        "approved_pages_count": approved_pages_count,
         "created_at": book.created_at,
         "updated_at": book.updated_at,
         "scanned_pages_count": int(kind_counts.get("scanned_image", 0)),

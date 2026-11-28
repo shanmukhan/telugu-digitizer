@@ -207,3 +207,9 @@ This is preferable to a single mutable `final_text` column because users need to
 - Provide deletion for source PDF, page images, OCR artifacts and associated records.
 - Keep audit metadata only where legally and operationally appropriate.
 - Back up database and local storage together so references do not become orphaned.
+
+## 9. Calibration & Word-Level Memory Extensions (Migration `0005_calibration_word_memory`)
+
+- **`books`**: added `processing_state` (`uploaded`, `calibration_pending`, `calibration_processing`, `calibration_review`, `calibration_completed`, `remaining_processing`, `review_in_progress`, `completed`, `paused`), `calibration_start_page`, `calibration_page_count`, `calibration_end_page`, and `calibration_completed_at`.
+- **`correction_memory`**: added `normalized_incorrect` (indexed `(language_code, normalized_incorrect, status)`), `unit_type` (`word` | `char_pattern` | `phrase`), `source_page_number`, and `last_used_at`.
+- **`review_edits`**: added `applied_rules` (`JSONB`, nullable) to record structured provenance when calibration/memory corrections are auto-applied (`action='auto_applied'`) without overwriting `ocr_blocks.raw_text`.

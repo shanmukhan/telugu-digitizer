@@ -21,6 +21,17 @@ export interface HostCapabilities {
   engines: Record<string, EngineCapability>;
 }
 
+export type BookProcessingState =
+  | "uploaded"
+  | "calibration_pending"
+  | "calibration_processing"
+  | "calibration_review"
+  | "calibration_completed"
+  | "remaining_processing"
+  | "review_in_progress"
+  | "completed"
+  | "paused";
+
 export interface BookSummary {
   book_id: string;
   title: string;
@@ -34,11 +45,50 @@ export interface BookSummary {
   page_count: number;
   rights_status: string;
   training_consent: boolean;
+  processing_state?: BookProcessingState;
+  calibration_start_page?: number | null;
+  calibration_page_count?: number | null;
+  calibration_end_page?: number | null;
+  calibration_completed_at?: string | null;
+  approved_pages_count?: number;
   created_at: string;
   updated_at: string;
   scanned_pages_count: number;
   digital_text_pages_count: number;
   mixed_pages_count: number;
+}
+
+export interface LearnedCharPattern {
+  from_seq: string;
+  to_seq: string;
+  occurrences: number;
+  examples: string[];
+}
+
+export interface BookCalibrationStatus {
+  book_id: string;
+  page_count: number;
+  processing_state: BookProcessingState;
+  calibration_start_page: number | null;
+  calibration_page_count: number | null;
+  calibration_range_end: number | null;
+  book_end_page: number;
+  skipped_front_pages_count: number;
+  remaining_start_page: number | null;
+  remaining_end_page: number | null;
+  remaining_pages_count: number;
+  calibration_pages_ocred: number;
+  calibration_pages_approved: number;
+  calibration_completed_at: string | null;
+  learned_word_rules_count: number;
+  learned_char_patterns: LearnedCharPattern[];
+  conflicting_rules_count: number;
+  auto_applied_blocks_count: number;
+  newly_harvested_rules_count?: number;
+}
+
+export interface CalibrationRunResult extends OCRRunCreateResult {
+  calibration: BookCalibrationStatus;
 }
 
 export interface BookUploadResult {
@@ -105,13 +155,25 @@ export interface OCRRunStatus {
 
 export type BlockRole = "paragraph" | "heading_1" | "heading_2" | "verse" | "ignore";
 
+export interface AutoAppliedRuleItem {
+  correction_id: string | null;
+  original: string;
+  replacement: string;
+  scope: "book_only" | "global_suggestion" | string;
+  unit_type: "word" | "char_pattern" | "phrase" | string;
+  context_match: string;
+  confidence: number;
+  reason: string;
+}
+
 export interface ReviewEditHistoryItem {
   edit_id: string;
   previous_text: string;
   edited_text: string;
-  action: "corrected" | "approved" | "reverted" | "ignored";
+  action: "corrected" | "approved" | "reverted" | "ignored" | "auto_applied";
   reviewer_id: string | null;
   review_note: string | null;
+  applied_rules?: AutoAppliedRuleItem[] | null;
   created_at: string;
 }
 
@@ -122,10 +184,12 @@ export interface CorrectionSuggestionItem {
   left_context: string | null;
   right_context: string | null;
   correction_type: string | null;
+  unit_type?: "word" | "char_pattern" | "phrase";
   scope: "book_only" | "global_suggestion";
   status: string;
   approved_count: number;
   rejected_count: number;
+  reliability_score?: number;
   context_match: "strong" | "medium" | "weak";
   source_book_count: number;
   has_conflict: boolean;
@@ -136,18 +200,34 @@ export interface CorrectionMemoryRecord {
   correction_id: string;
   language_code: string;
   incorrect_text: string;
+  normalized_incorrect?: string | null;
   corrected_text: string;
   left_context: string | null;
   right_context: string | null;
   correction_type: string | null;
+  unit_type?: "word" | "char_pattern" | "phrase";
   scope: "book_only" | "global_suggestion";
   book_id: string | null;
+  source_book_title?: string | null;
   source_ocr_block_id: string | null;
+  source_page_number?: number | null;
   status: "active" | "disabled" | "superseded" | "rejected";
   approved_count: number;
   rejected_count: number;
+  reliability_score?: number;
+  has_conflict?: boolean;
+  conflict_count?: number;
+  last_used_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CorrectionListResult {
+  items: CorrectionMemoryRecord[];
+  total_count: number;
+  global_count: number;
+  book_specific_count: number;
+  conflicts_count: number;
 }
 
 export interface ReviewBlock {
@@ -160,7 +240,9 @@ export interface ReviewBlock {
   normalized_text: string | null;
   current_text: string;
   is_edited: boolean;
-  latest_action: "corrected" | "approved" | "reverted" | "ignored" | null;
+  latest_action: "corrected" | "approved" | "reverted" | "ignored" | "auto_applied" | null;
+  auto_applied_flag?: boolean;
+  auto_applied_rules?: AutoAppliedRuleItem[];
   confidence: number | null;
   low_confidence_flag: boolean;
   disagreement_flag: boolean;

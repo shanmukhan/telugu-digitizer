@@ -43,7 +43,7 @@ from src.services.correction_service import (
 
 LOGGER = logging.getLogger("telugu_digitizer.services.review")
 
-ALLOWED_EDIT_ACTIONS = {"corrected", "approved", "reverted", "ignored"}
+ALLOWED_EDIT_ACTIONS = {"corrected", "approved", "reverted", "ignored", "auto_applied"}
 ALLOWED_BLOCK_ROLES = {"paragraph", "heading_1", "heading_2", "verse", "ignore"}
 ALLOWED_REVIEW_STATUSES = {"not_started", "in_review", "approved", "needs_attention"}
 
@@ -379,6 +379,13 @@ def get_page_review_payload(
             book_id=book.id,
         )
 
+        auto_applied_flag = latest_action == "auto_applied"
+        auto_applied_rules = (
+            list(latest_edit.applied_rules)
+            if (latest_edit and auto_applied_flag and isinstance(latest_edit.applied_rules, list))
+            else []
+        )
+
         review_blocks.append(
             {
                 "block_id": blk.id,
@@ -391,6 +398,8 @@ def get_page_review_payload(
                 "current_text": current_text,
                 "is_edited": bool(latest_edit and current_text != blk.raw_text),
                 "latest_action": latest_action,
+                "auto_applied_flag": auto_applied_flag,
+                "auto_applied_rules": auto_applied_rules,
                 "confidence": blk.confidence,
                 "low_confidence_flag": low_conf,
                 "disagreement_flag": disagreement,
@@ -407,6 +416,7 @@ def get_page_review_payload(
                         "action": e.action,
                         "reviewer_id": e.reviewer_id,
                         "review_note": e.review_note,
+                        "applied_rules": e.applied_rules,
                         "created_at": e.created_at,
                     }
                     for e in edits[-10:]
@@ -524,6 +534,7 @@ def submit_block_edit(
     incorrect_span: str | None = None,
     corrected_span: str | None = None,
     auto_filter_noise: bool = False,
+    reject_auto_applied_rules: bool = False,
     storage: LocalFilesystemStorage | None = None,
 ) -> dict[str, Any]:
     """Persist an append-only review edit without ever overwriting ocr_blocks.raw_text."""
@@ -611,6 +622,24 @@ def submit_block_edit(
             reviewer_id=reviewer_id,
         )
 
+    # Track positive/negative evidence when approving or reverting an auto-applied calibration correction.
+    if latest_edit is not None and latest_edit.action == "auto_applied" and isinstance(latest_edit.applied_rules, list):
+        rule_uuids: list[uuid.UUID] = []
+        for rule_item in latest_edit.applied_rules:
+            cid_raw = rule_item.get("correction_id") if isinstance(rule_item, dict) else None
+            if cid_raw:
+                try:
+                    rule_uuids.append(uuid.UUID(str(cid_raw)))
+                except (ValueError, TypeError):
+                    pass
+        if rule_uuids:
+            if action == "reverted" and reject_auto_applied_rules:
+                for cm in db.scalars(select(CorrectionMemory).where(CorrectionMemory.id.in_(rule_uuids))).all():
+                    cm.rejected_count += 1
+            elif action == "approved" and edited_text.strip() == latest_edit.edited_text.strip():
+                for cm in db.scalars(select(CorrectionMemory).where(CorrectionMemory.id.in_(rule_uuids))).all():
+                    cm.approved_count += 1
+
     correction_entry_id: uuid.UUID | None = None
     if add_to_correction_memory and action == "corrected" and previous_text.strip() != edited_text.strip():
         if incorrect_span and corrected_span:
@@ -625,13 +654,16 @@ def submit_block_edit(
                 scope=memory_scope,
                 book_id=page.book_id,
                 source_ocr_block_id=blk.id,
+                source_page_number=page.page_number,
             )
             correction_entry_id = mem.id
-        elif auto_filter_noise:
+        else:
+            # Always learn at the word level rather than storing unnecessary sentence-to-sentence replacements.
             for inc, cor, left_ctx, right_ctx in extract_word_level_corrections(previous_text, edited_text):
-                is_safe, _ = is_safe_auto_memory_rule(inc, cor)
-                if not is_safe:
-                    continue
+                if auto_filter_noise:
+                    is_safe, _ = is_safe_auto_memory_rule(inc, cor)
+                    if not is_safe:
+                        continue
                 mem = create_correction_memory_entry(
                     db=db,
                     incorrect_text=inc,
@@ -642,23 +674,10 @@ def submit_block_edit(
                     scope=memory_scope,
                     book_id=page.book_id,
                     source_ocr_block_id=blk.id,
+                    source_page_number=page.page_number,
                 )
                 if correction_entry_id is None:
                     correction_entry_id = mem.id
-        else:
-            inc, cor, left_ctx, right_ctx = extract_span_and_context(previous_text, edited_text)
-            mem = create_correction_memory_entry(
-                db=db,
-                incorrect_text=inc,
-                corrected_text=cor,
-                left_context=left_ctx,
-                right_context=right_ctx,
-                correction_type=correction_type,
-                scope=memory_scope,
-                book_id=page.book_id,
-                source_ocr_block_id=blk.id,
-            )
-            correction_entry_id = mem.id
 
     db.commit()
     bump_sentence_context_epoch()
@@ -1101,6 +1120,7 @@ def batch_save_and_approve_page(
                     scope=memory_scope,
                     book_id=book.id,
                     source_ocr_block_id=blk.id,
+                    source_page_number=page.page_number,
                 )
                 memory_created_count += 1
 

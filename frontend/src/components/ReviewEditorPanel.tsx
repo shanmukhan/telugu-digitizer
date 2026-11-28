@@ -29,6 +29,7 @@ export interface SaveEditOptions {
   memoryScope?: "book_only" | "global_suggestion";
   correctionType?: string;
   blockRole?: BlockRole;
+  rejectAutoAppliedRules?: boolean;
 }
 
 function formatAutocorrectSource(source: string): string {
@@ -84,6 +85,7 @@ interface ReviewBlockCardProps {
     action: "corrected" | "approved" | "reverted" | "ignored",
     pushHistory?: boolean,
     overrideRole?: BlockRole,
+    rejectAutoAppliedRules?: boolean,
   ) => Promise<void>;
   onAcceptSuggestion: (
     block: ReviewBlock,
@@ -119,8 +121,12 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   onRejectSuggestion,
 }: ReviewBlockCardProps) {
   const isDirty = draftText !== block.current_text || role !== (block.block_role ?? "paragraph");
+  const isAutoApplied = Boolean(block.auto_applied_flag || block.latest_action === "auto_applied");
   const isFlagged =
-    block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
+    block.low_confidence_flag ||
+    block.disagreement_flag ||
+    block.short_or_empty_flag ||
+    isAutoApplied;
   const isIgnored = block.latest_action === "ignored" || role === "ignore";
   const hasAutoChanges = Boolean(autoCorrectChanges && autoCorrectChanges.length > 0);
   // Two-density pattern: only expand full inspector when selected, edited/dirty, or previewing auto-correct.
@@ -151,6 +157,10 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
     statusSymbol = "✓";
     statusTone = "ok";
     statusTitle = "Approved";
+  } else if (isAutoApplied) {
+    statusSymbol = "⚡";
+    statusTone = "info";
+    statusTitle = "Auto-applied calibration correction — review or revert";
   } else if (block.disagreement_flag) {
     statusSymbol = "⇄";
     statusTone = "warn";
@@ -305,12 +315,17 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
           <span className="badge warn">⇄ Engine Disagreement ({comparatorEngine})</span>
         )}
         {block.short_or_empty_flag && <span className="badge warn">! Short / Empty</span>}
+        {isAutoApplied && (
+          <span className="badge autocorr-badge">
+            ⚡ Auto-Applied (Calibration)
+          </span>
+        )}
         {hasAutoChanges && (
           <span className="badge autocorr-badge">
             ✨ {autoCorrectChanges?.length} Auto-Fix(es)
           </span>
         )}
-        {block.is_edited && <span className="badge ok">✓ Edited</span>}
+        {block.is_edited && !isAutoApplied && <span className="badge ok">✓ Edited</span>}
         {block.latest_action === "approved" && (
           <span className="badge ok">✓ Block Approved</span>
         )}
@@ -480,6 +495,65 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {isAutoApplied && block.auto_applied_rules && block.auto_applied_rules.length > 0 && (
+        <div className="autocorrect-preview-box auto-applied-box" aria-label="Auto-applied calibration corrections">
+          <div className="badge-row" style={{ justifyContent: "space-between", marginBottom: "0.3rem" }}>
+            <strong style={{ fontSize: "0.8rem" }}>
+              ⚡ Auto-Applied from Calibration (raw OCR preserved)
+            </strong>
+            <div className="badge-row">
+              <button
+                type="button"
+                className="primary btn-compact"
+                disabled={isBusy}
+                onClick={() => void onCommitEdit(block, draftText, "approved", false)}
+              >
+                ✓ Approve Fix
+              </button>
+              <button
+                type="button"
+                className="btn-compact"
+                disabled={isBusy}
+                onClick={() => {
+                  onDraftChange(block.block_id, block.raw_text);
+                  void onCommitEdit(block, block.raw_text, "reverted", true, undefined, false);
+                }}
+              >
+                ↩ Revert
+              </button>
+              <button
+                type="button"
+                className="btn-compact danger"
+                disabled={isBusy}
+                title="Revert to raw OCR and record negative evidence against the applied rule"
+                onClick={() => {
+                  onDraftChange(block.block_id, block.raw_text);
+                  void onCommitEdit(block, block.raw_text, "reverted", true, undefined, true);
+                }}
+              >
+                ✕ Revert &amp; Reject Rule
+              </button>
+            </div>
+          </div>
+          <div className="badge-row">
+            {block.auto_applied_rules.map((rule, idx) => (
+              <span
+                key={`${rule.original}-${rule.replacement}-${idx}`}
+                className="autocorrect-chip"
+                title={rule.reason}
+              >
+                <span className="telugu-text" lang="te">
+                  {rule.original} → <strong>{rule.replacement}</strong>
+                </span>
+                <span className="autocorrect-meta">
+                  {formatCorrectionScope(rule.scope)} · {Math.round(rule.confidence * 100)}%
+                </span>
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
@@ -690,6 +764,7 @@ interface ReviewEditorPanelProps {
   onRunCurrentPageOcr?: (pageNumber: number) => Promise<void>;
   onOpenFullScanMobile?: () => void;
   onDirtyCountChange?: (count: number) => void;
+  onRegisterSaveDrafts?: (fn: (() => Promise<void>) | null) => void;
   onSaveEdit: (
     blockId: string,
     editedText: string,
@@ -740,6 +815,7 @@ export function ReviewEditorPanel({
   onRunCurrentPageOcr,
   onOpenFullScanMobile,
   onDirtyCountChange,
+  onRegisterSaveDrafts,
   onSaveEdit,
   onAddManualBlock,
   onSaveDigitalText,
@@ -865,6 +941,7 @@ export function ReviewEditorPanel({
       action: "corrected" | "approved" | "reverted" | "ignored",
       pushHistory = true,
       overrideRole?: BlockRole,
+      rejectAutoAppliedRules = false,
     ) => {
       const prevText = block.current_text;
       const addMem = action === "corrected" && (rememberByBlock[block.block_id] ?? true);
@@ -875,6 +952,7 @@ export function ReviewEditorPanel({
         addToMemory: addMem,
         memoryScope: scope,
         correctionType: cType,
+        rejectAutoAppliedRules: rejectAutoAppliedRules || undefined,
       };
       if (
         (effectiveRole && effectiveRole !== "paragraph") ||
@@ -898,7 +976,7 @@ export function ReviewEditorPanel({
     [onSaveEdit, rememberByBlock, roleByBlock, scopeByBlock, typeByBlock],
   );
 
-  function buildDirtyEditPayloads(): BatchBlockEditPayload[] {
+  const buildDirtyEditPayloads = useCallback((): BatchBlockEditPayload[] => {
     return dirtyBlocks.map((b) => {
       const draftVal = drafts[b.block_id] ?? b.current_text;
       const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
@@ -915,7 +993,20 @@ export function ReviewEditorPanel({
         review_note: hasAutoChanges ? "Auto-correct reviewed & batch-approved" : undefined,
       };
     });
-  }
+  }, [dirtyBlocks, drafts, roleByBlock, autoCorrectByBlock, rememberByBlock, scopeByBlock, typeByBlock]);
+
+  useEffect(() => {
+    if (!onRegisterSaveDrafts) return;
+    onRegisterSaveDrafts(async () => {
+      const edits = buildDirtyEditPayloads();
+      if (edits.length === 0 || !onBatchSaveAndApprovePage) return;
+      await onBatchSaveAndApprovePage(edits, {
+        approveRemainingBlocks: false,
+        markPageApproved: false,
+      });
+    });
+    return () => onRegisterSaveDrafts(null);
+  }, [buildDirtyEditPayloads, onBatchSaveAndApprovePage, onRegisterSaveDrafts]);
 
   async function handleRunAutocorrect() {
     if (!onAutocorrectPage || review.blocks.length === 0) return;
@@ -1018,6 +1109,8 @@ export function ReviewEditorPanel({
       b.low_confidence_flag ||
       b.disagreement_flag ||
       b.short_or_empty_flag ||
+      b.auto_applied_flag ||
+      b.latest_action === "auto_applied" ||
       b.suggestions.length > 0,
   );
   const flaggedCount = flaggedBlocks.length;
@@ -1030,6 +1123,8 @@ export function ReviewEditorPanel({
         b.low_confidence_flag ||
         b.disagreement_flag ||
         b.short_or_empty_flag ||
+        b.auto_applied_flag ||
+        b.latest_action === "auto_applied" ||
         b.suggestions.length > 0
       )
     ) {
