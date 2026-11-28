@@ -464,12 +464,14 @@ interface ReviewEditorPanelProps {
   ocrRunning?: boolean;
   syncTarget?: { blockId: string; seq: number } | null;
   autoSync?: boolean;
+  autoAdvance?: boolean;
   keyboardOpen?: boolean;
   onSelectBlock: (blockId: string) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
   onLookupWord?: (word: string) => void;
   onSyncToScan?: () => void;
   onToggleAutoSync?: () => void;
+  onToggleAutoAdvance?: () => void;
   onToggleKeyboard?: () => void;
   onSelectPrimaryRun: (runId: string) => void;
   onQuickStartOcr?: () => Promise<void>;
@@ -504,12 +506,14 @@ export function ReviewEditorPanel({
   ocrRunning = false,
   syncTarget = null,
   autoSync = false,
+  autoAdvance = true,
   keyboardOpen = false,
   onSelectBlock,
   onLocateBlockOnScan,
   onLookupWord,
   onSyncToScan,
   onToggleAutoSync,
+  onToggleAutoAdvance,
   onToggleKeyboard,
   onSelectPrimaryRun,
   onQuickStartOcr,
@@ -1061,6 +1065,17 @@ export function ReviewEditorPanel({
             <option value="needs_attention">Needs Attention</option>
             <option value="approved">Approved</option>
           </select>
+          {onToggleAutoAdvance && (
+            <button
+              type="button"
+              className="btn-compact"
+              aria-pressed={autoAdvance}
+              title="Automatically advance to the next pending page after approving this page"
+              onClick={onToggleAutoAdvance}
+            >
+              Auto-Next
+            </button>
+          )}
           <button
             type="button"
             className="primary btn-compact"

@@ -309,14 +309,19 @@ describe("ReviewEditorPanel", () => {
       ],
     });
     const onBatchSaveAndApprovePage = vi.fn().mockResolvedValue(undefined);
+    const onLookupWord = vi.fn();
+    const onToggleAutoAdvance = vi.fn();
 
     render(
       <ReviewEditorPanel
         review={SAMPLE_REVIEW}
         selectedBlockId="blk-1"
         busyBlockId={null}
+        autoAdvance={true}
         onSelectBlock={vi.fn()}
         onSelectPrimaryRun={vi.fn()}
+        onLookupWord={onLookupWord}
+        onToggleAutoAdvance={onToggleAutoAdvance}
         onSaveEdit={vi.fn().mockResolvedValue(undefined)}
         onAutocorrectPage={onAutocorrectPage}
         onBatchSaveAndApprovePage={onBatchSaveAndApprovePage}
@@ -325,6 +330,14 @@ describe("ReviewEditorPanel", () => {
         onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
       />,
     );
+
+    const autoNextBtn = screen.getByRole("button", { name: "Auto-Next" });
+    expect(autoNextBtn).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(autoNextBtn);
+    expect(onToggleAutoAdvance).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "📚 Dictionary" }));
+    expect(onLookupWord).toHaveBeenCalledWith("తెలుగు");
 
     fireEvent.click(screen.getByRole("button", { name: "✨ Auto-Correct Page" }));
     await waitFor(() => {

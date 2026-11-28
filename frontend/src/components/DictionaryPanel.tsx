@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiClientError,
   checkTeluguText,
@@ -72,6 +72,7 @@ export function DictionaryPanel({
   const [newNotes, setNewNotes] = useState("");
   const [savingCustom, setSavingCustom] = useState(false);
   const [liveStatus, setLiveStatus] = useState("");
+  const lastSearchedRef = useRef<string>("");
 
   const refreshStats = useCallback(async () => {
     try {
@@ -158,9 +159,24 @@ export function DictionaryPanel({
     if (initialQuery && initialQuery.trim()) {
       setSubTab("search");
       setQuery(initialQuery.trim());
+      lastSearchedRef.current = `${searchMode}:${initialQuery.trim()}`;
       void runSearch(initialQuery.trim(), "auto");
     }
-  }, [initialQuery, runSearch]);
+  }, [initialQuery, runSearch, searchMode]);
+
+  // Live debounced search-as-you-type when query has 2+ characters.
+  useEffect(() => {
+    if (subTab !== "search") return;
+    const trimmed = query.trim();
+    if (trimmed.length < 2) return;
+    const key = `${searchMode}:${trimmed}`;
+    if (lastSearchedRef.current === key) return;
+    const timer = window.setTimeout(() => {
+      lastSearchedRef.current = key;
+      void runSearch(trimmed, searchMode);
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [query, searchMode, subTab, runSearch]);
 
   async function handleSpellcheckSubmit(e: React.FormEvent) {
     e.preventDefault();

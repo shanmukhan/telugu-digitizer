@@ -2268,3 +2268,32 @@ progress.stat-progress::-moz-progress-bar {
   color: var(--ink);
   font: inherit;
 }
+
+/* Quick Lookup Modal Dialog */
+.quick-lookup-dialog {
+  inline-size: min(42rem, 92vw);
+  max-block-size: 85dvh;
+  overflow-y: auto;
+}
+
+.quick-lookup-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+.quick-lookup-dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.quick-lookup-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.quick-lookup-body {
+  max-block-size: 52dvh;
+  overflow-y: auto;
+  padding-inline-end: 0.2rem;
+}

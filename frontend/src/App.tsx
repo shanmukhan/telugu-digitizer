@@ -26,6 +26,7 @@ import { CorrectionMemoryPanel } from "./components/CorrectionMemoryPanel";
 import { DeleteConfirmDialog } from "./components/DeleteConfirmDialog";
 import { DictionaryPanel } from "./components/DictionaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
+import { QuickLookupDialog } from "./components/QuickLookupDialog";
 import {
   HeaderOcrStatusPill,
   OcrProgressStrip,
@@ -71,6 +72,8 @@ export function App() {
   const [review, setReview] = useState<PageReviewPayload | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [autoSyncBlocks, setAutoSyncBlocks] = useState(false);
+  const [autoAdvancePage, setAutoAdvancePage] = useState(true);
+  const [quickLookupWord, setQuickLookupWord] = useState<string | null>(null);
   const [syncRequest, setSyncRequest] = useState<{
     target: "scan" | "editor";
     blockId: string;
@@ -689,9 +692,22 @@ export function App() {
         res.correction_memory_created_count > 0
           ? `, added ${res.correction_memory_created_count} rule(s) to correction memory`
           : "";
+      let nextMsg = "";
+      if (autoAdvancePage) {
+        const nextPending =
+          pages.find(
+            (p) => p.page_number > selectedPageNumber && p.review_status !== "approved",
+          ) ?? pages.find((p) => p.page_number !== selectedPageNumber && p.review_status !== "approved");
+        if (nextPending) {
+          setSelectedPageNumber(nextPending.page_number);
+          setSelectedBlockId(null);
+          setSyncRequest(null);
+          nextMsg = ` → Advancing to Page ${nextPending.page_number}.`;
+        }
+      }
       setBanner({
         kind: "success",
-        text: `Page ${selectedPageNumber} approved: saved ${res.saved_edits_count} edit(s), approved ${res.approved_blocks_count} line(s)${memNote}.`,
+        text: `Page ${selectedPageNumber} approved: saved ${res.saved_edits_count} edit(s), approved ${res.approved_blocks_count} line(s)${memNote}.${nextMsg}`,
       });
     } catch (err) {
       setBanner({
@@ -1410,6 +1426,7 @@ export function App() {
                 ocrRunning={isOcrRunning}
                 syncTarget={syncRequest?.target === "editor" ? syncRequest : null}
                 autoSync={autoSyncBlocks}
+                autoAdvance={autoAdvancePage}
                 keyboardOpen={keyboardOpen}
                 onQuickStartOcr={() => handleStartOcr()}
                 onSelectBlock={handleSelectFromEditor}
@@ -1418,8 +1435,7 @@ export function App() {
                   triggerSync("scan", blockId);
                 }}
                 onLookupWord={(word) => {
-                  setDictionaryQuery(word);
-                  setActiveView("dictionary");
+                  setQuickLookupWord(word);
                 }}
                 onSyncToScan={() => {
                   if (selectedBlockId) {
@@ -1427,6 +1443,7 @@ export function App() {
                   }
                 }}
                 onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
+                onToggleAutoAdvance={() => setAutoAdvancePage((v) => !v)}
                 onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
                 onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
                 onSaveEdit={handleSaveBlockEdit}
@@ -1457,6 +1474,15 @@ export function App() {
         bookTitle={deleteTarget?.title ?? ""}
         onCancel={() => setDeleteTarget(null)}
         onConfirm={() => void confirmDeleteBook()}
+      />
+
+      <QuickLookupDialog
+        word={quickLookupWord}
+        onClose={() => setQuickLookupWord(null)}
+        onOpenFullDictionary={(w) => {
+          setDictionaryQuery(w);
+          setActiveView("dictionary");
+        }}
       />
     </div>
   );
