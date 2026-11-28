@@ -100,6 +100,22 @@ def test_real_telugu_lexicon_ocr_confusions_and_compounds() -> None:
     assert len(line_changes) == 1
     assert line_changes[0]["confidence"] >= 0.90
 
+    # Short unmatched leading '(' + unknown Telugu word (e.g., '(పజా' -> 'ప్రజా')
+    short_line, short_changes = _autocorrect_single_block(
+        block_text="(పజా పాలన",
+        book_id=UUID("00000000-0000-0000-0000-000000000001"),
+        by_incorrect={},
+        books_by_pair={},
+        lexicon=lex,
+        context_model=None,
+        use_correction_memory=False,
+        use_dictionary=True,
+        use_sentence_context=False,
+        min_confidence=0.78,
+    )
+    assert short_line == "ప్రజా పాలన"
+    assert len(short_changes) == 1
+
     # Balanced parentheses around a valid word must NEVER be stripped
     balanced_line, balanced_changes = _autocorrect_single_block(
         block_text="(ప్రథమభాగం) - 1",

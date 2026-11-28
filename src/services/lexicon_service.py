@@ -902,14 +902,15 @@ def _autocorrect_single_block(
                     use_sentence_context=use_sentence_context,
                     min_confidence=min_confidence,
                 )
-                # Recover broken leading rakara-vattu misread as unmatched '(' (e.g., '(పగమబాగం-' -> 'ప్రథమభాగం-').
+                # Recover broken leading rakara-vattu misread as unmatched '(' (e.g., '(పగమబాగం-' -> 'ప్రథమభాగం-', '(శీ' -> 'శ్రీ').
                 consumed_leading_paren = False
                 if (
                     lead.endswith("(")
                     and ")" not in trail
                     and ")" not in working_text
-                    and len(core) >= 3
+                    and len(core) >= 2
                     and _TELUGU_CONSONANT_RE.fullmatch(core[0])
+                    and not core[1:].startswith("\u0c4dర")
                     and not lexicon.is_known_word(core, context_model)
                 ):
                     rakara_probe = f"{core[0]}\u0c4dర{core[1:]}"
@@ -918,7 +919,7 @@ def _autocorrect_single_block(
                             "original": f"({core}",
                             "replacement": rakara_probe,
                             "source": "dictionary",
-                            "confidence": 0.93,
+                            "confidence": 0.96,
                             "reason": "Recovered broken leading rakāra vattu ('(' → ్ర)",
                         }
                     else:
@@ -941,7 +942,7 @@ def _autocorrect_single_block(
                         else:
                             rakara_prop = None
                     if rakara_prop is not None and (
-                        proposal is None or rakara_prop["confidence"] >= proposal["confidence"]
+                        proposal is None or (rakara_prop["confidence"] + 0.04) >= proposal["confidence"]
                     ):
                         proposal = rakara_prop
                         consumed_leading_paren = True
