@@ -53,10 +53,22 @@ fi
 .venv/bin/python -m pip install -e . --no-deps
 
 echo "==> Downloading official tessdata_best Telugu model..."
-mkdir -p models/tesseract/tessdata
+mkdir -p models/tesseract/tessdata models/lexicon
 if [[ ! -f models/tesseract/tessdata/tel.traineddata ]]; then
   curl -fsSL https://github.com/tesseract-ocr/tessdata_best/raw/main/tel.traineddata \
     -o models/tesseract/tessdata/tel.traineddata
+  echo "81b0a1cfaf8bbf0f87da72b8c348264c6f24130766f5c4ade733fc20c05aaccc  models/tesseract/tessdata/tel.traineddata" | sha256sum -c -
+fi
+
+if [[ ! -f models/lexicon/telugu_lexicon.tsv.gz ]]; then
+  echo "==> Building local Telugu lexicon (~186k words)..."
+  .venv/bin/python scripts/build_telugu_lexicon.py --output models/lexicon/telugu_lexicon.tsv.gz
+fi
+if [[ ! -f models/lexicon/telugu_dictionary.sqlite ]]; then
+  echo "==> Building standalone Telugu dictionary SQLite DB..."
+  .venv/bin/python scripts/build_telugu_dictionary_db.py \
+    --lexicon models/lexicon/telugu_lexicon.tsv.gz \
+    --output models/lexicon/telugu_dictionary.sqlite
 fi
 
 if [[ ! -f frontend/dist/index.html ]]; then
@@ -76,6 +88,7 @@ echo "==> Creating /etc/telugu-digitizer/env (if missing) and provisioning Postg
 sudo mkdir -p /etc/telugu-digitizer
 if [[ ! -f /etc/telugu-digitizer/env ]]; then
   DB_PASS="$(openssl rand -hex 18)"
+  ADMIN_PASS="$(openssl rand -hex 18)"
   sudo tee /etc/telugu-digitizer/env >/dev/null <<EOF
 DATABASE_URL=postgresql+psycopg://telugu_digitizer:${DB_PASS}@127.0.0.1:5432/telugu_digitizer
 WORKSPACE_DIR=${REPO_DIR}/workspace
@@ -85,6 +98,11 @@ API_PORT=${API_PORT}
 PROXY_HEADERS=true
 FORWARDED_ALLOW_IPS=127.0.0.1
 CORS_ALLOWED_ORIGINS=https://lahari.org,https://www.lahari.org
+ALLOW_GUEST_OCR=true
+RATE_LIMIT_ENABLED=true
+ENABLE_API_DOCS=false
+APP_ADMIN_USERNAME=admin
+APP_ADMIN_PASSWORD=${ADMIN_PASS}
 ENABLE_PADDLE_OCR=${WITH_PADDLE}
 OMP_NUM_THREADS=1
 OPENBLAS_NUM_THREADS=1
@@ -94,7 +112,7 @@ MAX_UPLOAD_MB=200
 MAX_PDF_PAGES=1000
 EOF
   sudo chmod 600 /etc/telugu-digitizer/env
-  echo "Created open (no-login) environment config in /etc/telugu-digitizer/env (port ${API_PORT})"
+  echo "Created guest-OCR environment config with admin-protected DELETE credentials in /etc/telugu-digitizer/env (port ${API_PORT})"
 
   sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
@@ -120,7 +138,7 @@ sudo systemctl enable telugu-digitizer.service
 sudo systemctl restart telugu-digitizer.service
 
 echo ""
-echo "Setup complete! Local API/UI active on http://127.0.0.1:${API_PORT} (open access, no login)."
+echo "Setup complete! Local API/UI active on http://127.0.0.1:${API_PORT} (guest OCR open; destructive deletes require admin creds in /etc/telugu-digitizer/env)."
 if command -v apache2ctl >/dev/null 2>&1 || [[ -x /usr/sbin/apache2ctl ]]; then
   echo "Detected Apache2. Proxy /telugu/ -> http://127.0.0.1:${API_PORT}/ inside your lahari.org VirtualHost."
 elif command -v caddy >/dev/null 2>&1; then

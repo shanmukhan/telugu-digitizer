@@ -12,6 +12,7 @@ from typing import Any
 
 from src.common.io import sha256_file
 from src.ocr.base import OCRProvider
+from src.ocr.layout import order_ocr_blocks_geometrically
 
 
 @functools.lru_cache(maxsize=16)
@@ -224,7 +225,6 @@ class PaddleOCRProvider(OCRProvider):
 
             for idx, text in enumerate(rec_texts):
                 raw_text = str(text)
-                lines.append(raw_text)
                 confidence = float(rec_scores[idx]) if idx < len(rec_scores) and rec_scores[idx] is not None else None
                 polygon = rec_polys[idx] if idx < len(rec_polys) else None
                 bbox = rec_boxes[idx] if idx < len(rec_boxes) else None
@@ -240,6 +240,9 @@ class PaddleOCRProvider(OCRProvider):
                         "reading_order": block_index,
                     }
                 )
+
+        blocks = order_ocr_blocks_geometrically(blocks)
+        lines = [str(b["text"]) for b in blocks]
 
         meta = self.provider_metadata()
         return {

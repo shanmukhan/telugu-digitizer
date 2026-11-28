@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -244,6 +245,13 @@ def aggregate_metrics(
 
     median_sec = statistics.median(sec_values) if sec_values else None
     mean_sec = statistics.mean(sec_values) if sec_values else None
+    p95_sec: float | None = None
+    if sec_values:
+        sorted_secs = sorted(sec_values)
+        pos = 0.95 * (len(sorted_secs) - 1)
+        lo = math.floor(pos)
+        hi = math.ceil(pos)
+        p95_sec = sorted_secs[lo] + (pos - lo) * (sorted_secs[hi] - sorted_secs[lo])
     pages_per_min = (60.0 / median_sec) if (median_sec is not None and median_sec > 0) else None
 
     return {
@@ -259,6 +267,7 @@ def aggregate_metrics(
         "exact_line_accuracy": _safe_ratio(total_line_matches, total_ref_lines),
         "median_sec_per_page": round(median_sec, 4) if median_sec is not None else None,
         "mean_sec_per_page": round(mean_sec, 4) if mean_sec is not None else None,
+        "p95_sec_per_page": round(p95_sec, 4) if p95_sec is not None else None,
         "pages_per_minute": round(pages_per_min, 2) if pages_per_min is not None else None,
         "totals": {
             "raw_edits": total_raw_edits,

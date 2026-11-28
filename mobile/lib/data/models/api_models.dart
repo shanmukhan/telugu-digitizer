@@ -43,10 +43,14 @@ class HostCapabilities {
     required this.maxUploadMb,
     required this.maxPdfPages,
     required this.engines,
+    this.guestOcrEnabled = true,
+    this.bookDeleteEnabled = false,
   });
 
   final String platformMachine;
   final bool authEnabled;
+  final bool guestOcrEnabled;
+  final bool bookDeleteEnabled;
   final int maxUploadMb;
   final int maxPdfPages;
   final Map<String, EngineCapability> engines;
@@ -70,6 +74,8 @@ class HostCapabilities {
     return HostCapabilities(
       platformMachine: json['platform_machine'] as String? ?? 'unknown',
       authEnabled: json['auth_enabled'] as bool? ?? false,
+      guestOcrEnabled: json['guest_ocr_enabled'] as bool? ?? true,
+      bookDeleteEnabled: json['book_delete_enabled'] as bool? ?? false,
       maxUploadMb: (json['max_upload_mb'] as num?)?.toInt() ?? 200,
       maxPdfPages: (json['max_pdf_pages'] as num?)?.toInt() ?? 1000,
       engines: mapped,

@@ -9,16 +9,23 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
-from src.common.io import sha256_bytes
+from src.common.cache_state import bump_sentence_context_epoch
+from src.common.io import sha256_bytes, sha256_file
 from src.common.logging_utils import log_event
 from src.core.config import AppSettings
 from src.core.storage import LocalFilesystemStorage
-from src.db.models import Book, BookPage
-from src.pdf.rasterizer import classify_and_extract_pdf_page
+from src.db.models import Book, BookPage, OCRRun
+from src.pdf.rasterizer import (
+    DEFAULT_MAX_RENDER_PIXELS,
+    bounded_pixmap_matrix,
+    bounded_render_dimensions,
+    classify_and_extract_pdf_page,
+)
 
 LOGGER = logging.getLogger("telugu_digitizer.services.books")
 
@@ -27,20 +34,18 @@ LOGGER = logging.getLogger("telugu_digitizer.services.books")
 # HTTP upload completes in ~2 seconds instead of hitting reverse-proxy 502 timeouts.
 EAGER_RENDER_MAX_PAGES = 10
 
-_PAGE_RENDER_LOCKS_GUARD = threading.Lock()
-_PAGE_RENDER_LOCKS: dict[tuple[uuid.UUID, int], threading.Lock] = {}
+_STRIPE_LOCK_COUNT = 64
+_PAGE_RENDER_LOCKS: tuple[threading.Lock, ...] = tuple(
+    threading.Lock() for _ in range(_STRIPE_LOCK_COUNT)
+)
+
+# Guard Pillow against adversarial decompression bombs across all render/inspection paths.
+Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
 def _get_page_render_lock(book_id: uuid.UUID, page_number: int) -> threading.Lock:
-    key = (book_id, page_number)
-    with _PAGE_RENDER_LOCKS_GUARD:
-        lock = _PAGE_RENDER_LOCKS.get(key)
-        if lock is None:
-            if len(_PAGE_RENDER_LOCKS) > 512:
-                _PAGE_RENDER_LOCKS.clear()
-            lock = threading.Lock()
-            _PAGE_RENDER_LOCKS[key] = lock
-        return lock
+    idx = hash((book_id, page_number)) % _STRIPE_LOCK_COUNT
+    return _PAGE_RENDER_LOCKS[idx]
 
 
 def ensure_page_image_rendered(
@@ -49,6 +54,7 @@ def ensure_page_image_rendered(
     storage: LocalFilesystemStorage,
     book: Book,
     page: BookPage,
+    max_render_pixels: int = DEFAULT_MAX_RENDER_PIXELS,
 ) -> Path:
     """Ensure a page PNG exists on disk, lazily rasterizing from the immutable source PDF if needed."""
     img_key = page.image_storage_key or f"pages/{book.id}/page-{page.page_number:04d}.png"
@@ -68,12 +74,26 @@ def ensure_page_image_rendered(
             return storage.resolve_key(img_key)
 
         dpi = int(page.render_dpi or 300)
-        matrix = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
         source_pdf_path = storage.resolve_key(book.source_storage_key)
         with pymupdf.open(source_pdf_path) as doc:
             if page.page_number < 1 or page.page_number > doc.page_count:
                 raise AppError("PAGE_NOT_FOUND", f"Page {page.page_number} out of range.", status_code=404)
             pdf_page = doc.load_page(page.page_number - 1)
+            matrix, effective_dpi, clamped = bounded_pixmap_matrix(
+                pdf_page.rect,
+                dpi,
+                max_pixels=max_render_pixels,
+            )
+            if clamped:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Clamped oversized PDF page render dimensions",
+                    book_id=str(book.id),
+                    page_number=page.page_number,
+                    requested_dpi=dpi,
+                    effective_dpi=round(effective_dpi, 2),
+                )
             pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
             png_bytes = pix.tobytes("png")
             width_px = int(pix.width)
@@ -96,7 +116,10 @@ def import_pdf_book(
     db: Session,
     storage: LocalFilesystemStorage,
     settings: AppSettings,
-    pdf_bytes: bytes,
+    pdf_bytes: bytes | None = None,
+    pdf_path: Path | None = None,
+    source_sha256: str | None = None,
+    size_bytes: int | None = None,
     original_filename: str,
     title: str,
     author: str | None = None,
@@ -107,33 +130,57 @@ def import_pdf_book(
 ) -> tuple[Book, bool]:
     """Validate and import a PDF book into PostgreSQL + read-only workspace storage.
 
-    Returns (book, is_duplicate). Duplicate uploads with matching source SHA-256
-    return the existing immutable book record without re-rasterizing.
+    Accepts either an already-spooled on-disk ``pdf_path`` (preferred, streaming) or
+    in-memory ``pdf_bytes``. Returns ``(book, is_duplicate)``. Duplicate uploads with
+    matching source SHA-256 return the existing immutable book without re-rasterizing.
     """
     cleaned_title = title.strip()
     if not cleaned_title:
         raise AppError("INVALID_TITLE", "Book title must not be empty.", status_code=400)
 
-    if not pdf_bytes:
+    if pdf_path is None and pdf_bytes is None:
         raise AppError("EMPTY_UPLOAD", "Uploaded PDF file is empty.", status_code=400)
 
     max_bytes = settings.max_upload_mb * 1024 * 1024
-    if len(pdf_bytes) > max_bytes:
-        raise AppError(
-            "PDF_TOO_LARGE",
-            f"Uploaded PDF exceeds maximum allowed size of {settings.max_upload_mb} MiB.",
-            status_code=413,
-            details={"size_bytes": len(pdf_bytes), "max_bytes": max_bytes},
-        )
+    if pdf_path is not None:
+        actual_size = size_bytes if size_bytes is not None else pdf_path.stat().st_size
+        if actual_size <= 0:
+            raise AppError("EMPTY_UPLOAD", "Uploaded PDF file is empty.", status_code=400)
+        if actual_size > max_bytes:
+            raise AppError(
+                "PDF_TOO_LARGE",
+                f"Uploaded PDF exceeds maximum allowed size of {settings.max_upload_mb} MiB.",
+                status_code=413,
+                details={"size_bytes": actual_size, "max_bytes": max_bytes},
+            )
+        with pdf_path.open("rb") as handle:
+            sig = handle.read(5)
+        if sig != b"%PDF-":
+            raise AppError(
+                "INVALID_PDF_SIGNATURE",
+                "Uploaded file does not begin with a valid %PDF- signature.",
+                status_code=400,
+            )
+        source_sha = source_sha256 or sha256_file(pdf_path)
+    else:
+        assert pdf_bytes is not None
+        if not pdf_bytes:
+            raise AppError("EMPTY_UPLOAD", "Uploaded PDF file is empty.", status_code=400)
+        if len(pdf_bytes) > max_bytes:
+            raise AppError(
+                "PDF_TOO_LARGE",
+                f"Uploaded PDF exceeds maximum allowed size of {settings.max_upload_mb} MiB.",
+                status_code=413,
+                details={"size_bytes": len(pdf_bytes), "max_bytes": max_bytes},
+            )
+        if not pdf_bytes.startswith(b"%PDF-"):
+            raise AppError(
+                "INVALID_PDF_SIGNATURE",
+                "Uploaded file does not begin with a valid %PDF- signature.",
+                status_code=400,
+            )
+        source_sha = source_sha256 or sha256_bytes(pdf_bytes)
 
-    if not pdf_bytes.startswith(b"%PDF-"):
-        raise AppError(
-            "INVALID_PDF_SIGNATURE",
-            "Uploaded file does not begin with a valid %PDF- signature.",
-            status_code=400,
-        )
-
-    source_sha = sha256_bytes(pdf_bytes)
     existing = db.scalars(select(Book).where(Book.source_sha256 == source_sha)).first()
     if existing is not None:
         return existing, True
@@ -141,7 +188,7 @@ def import_pdf_book(
     safe_filename = Path(original_filename or "document.pdf").name or "document.pdf"
 
     try:
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(pdf_path) if pdf_path is not None else pymupdf.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
         raise AppError(
             "INVALID_PDF_FILE",
@@ -150,6 +197,12 @@ def import_pdf_book(
         ) from exc
 
     with doc:
+        if getattr(doc, "is_encrypted", False):
+            raise AppError(
+                "ENCRYPTED_PDF_UNSUPPORTED",
+                "Encrypted or password-protected PDFs are not supported; please remove password protection before uploading.",
+                status_code=400,
+            )
         page_count = doc.page_count
         if page_count <= 0:
             raise AppError("EMPTY_PDF", "Uploaded PDF has zero pages.", status_code=400)
@@ -164,10 +217,15 @@ def import_pdf_book(
         book_id = uuid.uuid4()
         source_key = f"originals/{book_id}/source.pdf"
         dpi = settings.default_render_dpi
-        matrix = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+        max_pixels = settings.max_render_pixels
 
         try:
-            storage.write_bytes(source_key, pdf_bytes, read_only=True)
+            if pdf_path is not None:
+                storage.install_file(source_key, pdf_path, read_only=True)
+            else:
+                assert pdf_bytes is not None
+                storage.write_bytes(source_key, pdf_bytes, read_only=True)
+
             book = Book(
                 id=book_id,
                 title=cleaned_title,
@@ -194,6 +252,21 @@ def import_pdf_book(
                 img_key = f"pages/{book_id}/page-{page_number:04d}.png"
 
                 if eager_render_all or page_number == 1:
+                    matrix, effective_dpi, clamped = bounded_pixmap_matrix(
+                        page.rect,
+                        dpi,
+                        max_pixels=max_pixels,
+                    )
+                    if clamped:
+                        log_event(
+                            LOGGER,
+                            logging.WARNING,
+                            "Clamped oversized PDF page render dimensions during import",
+                            book_id=str(book_id),
+                            page_number=page_number,
+                            requested_dpi=dpi,
+                            effective_dpi=round(effective_dpi, 2),
+                        )
                     pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
                     png_bytes = pix.tobytes("png")
                     storage.write_bytes(img_key, png_bytes, read_only=False)
@@ -202,9 +275,11 @@ def import_pdf_book(
                     height_px = int(pix.height)
                 else:
                     # Defer heavy 300 DPI PNG rasterization until first page view or OCR run.
-                    rect = page.rect
-                    width_px = max(1, int(round(rect.width * dpi / 72.0)))
-                    height_px = max(1, int(round(rect.height * dpi / 72.0)))
+                    width_px, height_px = bounded_render_dimensions(
+                        page.rect,
+                        dpi,
+                        max_pixels=max_pixels,
+                    )
                     img_sha = None
 
                 db.add(
@@ -309,17 +384,34 @@ def delete_book_and_artifacts(
     db: Session,
     storage: LocalFilesystemStorage,
     book_id: uuid.UUID,
+    executor: Any | None = None,
 ) -> None:
-    """Delete DB records and all workspace files for a book."""
+    """Cancel any active OCR jobs, then delete DB records and all workspace files for a book."""
     book = db.get(Book, book_id)
     if book is None:
         raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
 
+    if executor is not None:
+        active_run_ids = list(
+            db.scalars(
+                select(OCRRun.id).where(
+                    OCRRun.book_id == book_id,
+                    OCRRun.status.in_(["queued", "running"]),
+                )
+            ).all()
+        )
+        for rid in active_run_ids:
+            executor.cancel_run(rid)
+        if active_run_ids and hasattr(executor, "wait_for_runs_settled"):
+            executor.wait_for_runs_settled(active_run_ids, timeout=5.0)
+
     db.delete(book)
     db.commit()
+    bump_sentence_context_epoch()
 
     storage.delete_prefix(f"originals/{book_id}")
     storage.delete_prefix(f"pages/{book_id}")
     storage.delete_prefix(f"ocr/{book_id}")
     storage.delete_prefix(f"exports/{book_id}")
+    storage.delete_prefix(f"training_crops/{book_id}")
     log_event(LOGGER, logging.INFO, "Deleted book and storage artifacts", book_id=str(book_id))

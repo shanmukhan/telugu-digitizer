@@ -14,13 +14,14 @@ ARG BUILD_PADDLE=true
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    HOME=/home/appuser \
     OMP_NUM_THREADS=2 \
     OPENBLAS_NUM_THREADS=2 \
     MKL_NUM_THREADS=2 \
     API_HOST=0.0.0.0 \
     API_PORT=8000 \
     PROXY_HEADERS=true \
-    FORWARDED_ALLOW_IPS=*
+    FORWARDED_ALLOW_IPS=127.0.0.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -43,10 +44,11 @@ RUN if [ "$BUILD_PADDLE" = "true" ]; then \
       && python -m pip install "paddleocr==3.7.0"; \
     fi
 
-# Download official Tesseract Telugu tessdata_best model
-RUN mkdir -p /app/models/tesseract/tessdata \
+# Download official Tesseract Telugu tessdata_best model with SHA-256 verification
+RUN mkdir -p /app/models/tesseract/tessdata /app/models/lexicon \
   && curl -fsSL https://github.com/tesseract-ocr/tessdata_best/raw/main/tel.traineddata \
-       -o /app/models/tesseract/tessdata/tel.traineddata
+       -o /app/models/tesseract/tessdata/tel.traineddata \
+  && echo "81b0a1cfaf8bbf0f87da72b8c348264c6f24130766f5c4ade733fc20c05aaccc  /app/models/tesseract/tessdata/tel.traineddata" | sha256sum -c -
 
 COPY pyproject.toml alembic.ini ./
 COPY alembic/ ./alembic/
@@ -55,9 +57,20 @@ COPY scripts/ ./scripts/
 COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+ARG BUILD_LEXICON=true
+RUN if [ "$BUILD_LEXICON" = "true" ]; then \
+      python scripts/build_telugu_lexicon.py --output /app/models/lexicon/telugu_lexicon.tsv.gz \
+      && python scripts/build_telugu_dictionary_db.py --lexicon /app/models/lexicon/telugu_lexicon.tsv.gz --output /app/models/lexicon/telugu_dictionary.sqlite; \
+    fi
+
+RUN groupadd --gid 1000 appuser \
+  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash appuser \
+  && chmod +x /usr/local/bin/docker-entrypoint.sh \
   && python -m pip install -e . --no-deps \
-  && mkdir -p /app/workspace
+  && mkdir -p /app/workspace /home/appuser/.paddlex \
+  && chown -R appuser:appuser /app /home/appuser
+
+USER appuser
 
 EXPOSE 8000
 

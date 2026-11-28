@@ -10,14 +10,15 @@ import platform
 import resource
 import shutil
 import sys
+import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
 import pymupdf
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,7 +31,9 @@ from src.db.models import Book, BookPage, ModelRegistry, OCRBlock, OCRRun, Proce
 from src.evaluation.metrics import normalize_nfc
 from src.ocr.base import OCRProvider, build_page_ocr_record
 from src.ocr.paddle_provider import PaddleOCRProvider
+from src.ocr.paddle_worker import IsolatedPaddleOCRProvider
 from src.ocr.tesseract_provider import TesseractOCRProvider
+from src.pdf.rasterizer import DEFAULT_MAX_RENDER_PIXELS, bounded_pixmap_matrix
 
 LOGGER = logging.getLogger("telugu_digitizer.services.ocr")
 
@@ -87,9 +90,14 @@ def inspect_host_ocr_capabilities(settings: AppSettings) -> dict[str, Any]:
     else:
         tess_available = True
 
+    admin_configured = bool(settings.effective_admin_credentials)
+    auth_enabled = bool(settings.auth_username and settings.auth_password)
     return {
         "platform_machine": platform.machine(),
-        "auth_enabled": bool(settings.auth_username and settings.auth_password),
+        "auth_enabled": auth_enabled,
+        "guest_ocr_enabled": (not auth_enabled) and settings.allow_guest_ocr,
+        "admin_delete_requires_auth": admin_configured or settings.is_network_exposed,
+        "book_delete_enabled": False if not settings.is_network_exposed else False,
         "max_upload_mb": settings.max_upload_mb,
         "max_pdf_pages": settings.max_pdf_pages,
         "engines": {
@@ -129,6 +137,16 @@ def build_ocr_provider(
                 status_code=503,
                 details={"engine": "paddleocr"},
             )
+        if settings.isolate_ocr_worker:
+            return IsolatedPaddleOCRProvider(
+                lang="te",
+                ocr_version="PP-OCRv5",
+                device=settings.paddle_device,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                timeout_sec=float(settings.ocr_page_timeout_sec),
+            )
         return PaddleOCRProvider(
             lang="te",
             ocr_version="PP-OCRv5",
@@ -145,6 +163,7 @@ def build_ocr_provider(
                 oem=1,
                 psm=tesseract_psm,
                 tesseract_cmd=settings.tesseract_cmd,
+                timeout_sec=float(settings.ocr_page_timeout_sec),
             )
         except FileNotFoundError as exc:
             raise AppError(
@@ -233,6 +252,7 @@ class OCRJobExecutor:
         self.session_factory = session_factory
         self.storage = storage
         self.settings = settings
+        self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-worker")
         self._futures: dict[uuid.UUID, Future[Any]] = {}
         self._providers: dict[tuple[str, int], OCRProvider] = {}
@@ -244,43 +264,71 @@ class OCRJobExecutor:
             canonical_engine,
             int(tesseract_psm) if canonical_engine == "tesseract_tel_best" else 0,
         )
-        provider = self._providers.get(cache_key)
-        if provider is None:
-            provider = build_ocr_provider(
-                canonical_engine,
-                self.settings,
-                tesseract_psm=tesseract_psm,
-            )
-            self._providers[cache_key] = provider
-        return provider
+        with self._lock:
+            provider = self._providers.get(cache_key)
+            if provider is None:
+                provider = build_ocr_provider(
+                    canonical_engine,
+                    self.settings,
+                    tesseract_psm=tesseract_psm,
+                )
+                self._providers[cache_key] = provider
+            return provider
 
     def submit_runs(self, run_ids: list[uuid.UUID]) -> None:
-        # Prune older completed futures to prevent unbounded memory retention.
-        if len(self._futures) > 64:
-            done_ids = [rid for rid, f in self._futures.items() if f.done()]
-            for rid in done_ids[:-32]:
-                self._futures.pop(rid, None)
-        for run_id in run_ids:
-            self._cancelled_runs.discard(run_id)
-            fut = self._executor.submit(self.execute_run, run_id)
-            self._futures[run_id] = fut
+        with self._lock:
+            # Prune older completed futures to prevent unbounded memory retention.
+            if len(self._futures) > 64:
+                done_ids = [rid for rid, f in self._futures.items() if f.done()]
+                for rid in done_ids[:-32]:
+                    self._futures.pop(rid, None)
+            for run_id in run_ids:
+                self._cancelled_runs.discard(run_id)
+                existing_fut = self._futures.get(run_id)
+                if existing_fut is not None and not existing_fut.done():
+                    continue
+                fut = self._executor.submit(self.execute_run, run_id)
+                self._futures[run_id] = fut
 
     def cancel_run(self, run_id: uuid.UUID) -> None:
         """Mark an active or queued run for cooperative cancellation."""
-        self._cancelled_runs.add(run_id)
-        fut = self._futures.get(run_id)
-        if fut is not None and not fut.done():
-            fut.cancel()
+        with self._lock:
+            self._cancelled_runs.add(run_id)
+            fut = self._futures.get(run_id)
+            if fut is not None and not fut.done():
+                fut.cancel()
 
     def wait_for_run(self, run_id: uuid.UUID, timeout: float | None = 120.0) -> None:
-        fut = self._futures.get(run_id)
+        with self._lock:
+            fut = self._futures.get(run_id)
         if fut is not None:
             fut.result(timeout=timeout)
 
+    def wait_for_runs_settled(self, run_ids: list[uuid.UUID], timeout: float = 5.0) -> None:
+        with self._lock:
+            futs = [self._futures[rid] for rid in run_ids if rid in self._futures]
+        deadline = datetime.now(timezone.utc).timestamp() + max(0.1, timeout)
+        for fut in futs:
+            remaining = max(0.05, deadline - datetime.now(timezone.utc).timestamp())
+            try:
+                fut.result(timeout=remaining)
+            except Exception:
+                pass
+
     def shutdown(self, wait: bool = True) -> None:
+        with self._lock:
+            providers = list(self._providers.values())
+            self._providers.clear()
         self._executor.shutdown(wait=wait)
-        self._futures.clear()
-        self._providers.clear()
+        for prov in providers:
+            close_fn = getattr(prov, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        with self._lock:
+            self._futures.clear()
 
     def _ensure_page_image_path(
         self,
@@ -289,7 +337,7 @@ class OCRJobExecutor:
         page: BookPage,
         requested_dpi: int,
         open_pdf_doc: pymupdf.Document | None = None,
-    ) -> tuple[Path, str, str]:
+    ) -> tuple[Path, str, str, int | None, int | None]:
         """Resolve or deterministically render the page PNG at requested_dpi."""
         if (
             page.image_storage_key
@@ -298,7 +346,7 @@ class OCRJobExecutor:
         ):
             img_path = self.storage.resolve_key(page.image_storage_key)
             img_sha = page.image_sha256 or sha256_file(img_path)
-            return img_path, page.image_storage_key, img_sha
+            return img_path, page.image_storage_key, img_sha, page.width_px, page.height_px
 
         target_key = (
             page.image_storage_key
@@ -307,11 +355,16 @@ class OCRJobExecutor:
         )
         if self.storage.exists(target_key):
             img_path = self.storage.resolve_key(target_key)
-            return img_path, target_key, sha256_file(img_path)
+            with Image.open(img_path) as im:
+                w, h = im.size
+            return img_path, target_key, sha256_file(img_path), w, h
 
-        matrix = pymupdf.Matrix(requested_dpi / 72.0, requested_dpi / 72.0)
+        max_pixels = getattr(self.settings, "max_render_pixels", DEFAULT_MAX_RENDER_PIXELS)
         if open_pdf_doc is not None:
             pdf_page = open_pdf_doc.load_page(page.page_number - 1)
+            matrix, _eff_dpi, _clamped = bounded_pixmap_matrix(
+                pdf_page.rect, requested_dpi, max_pixels=max_pixels
+            )
             pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
             png_bytes = pix.tobytes("png")
             width_px, height_px = int(pix.width), int(pix.height)
@@ -319,6 +372,9 @@ class OCRJobExecutor:
             source_pdf_path = self.storage.resolve_key(book.source_storage_key)
             with pymupdf.open(source_pdf_path) as doc:
                 pdf_page = doc.load_page(page.page_number - 1)
+                matrix, _eff_dpi, _clamped = bounded_pixmap_matrix(
+                    pdf_page.rect, requested_dpi, max_pixels=max_pixels
+                )
                 pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
                 png_bytes = pix.tobytes("png")
                 width_px, height_px = int(pix.width), int(pix.height)
@@ -328,7 +384,7 @@ class OCRJobExecutor:
             page.image_sha256 = img_sha
             page.width_px = width_px
             page.height_px = height_px
-        return img_path, target_key, img_sha
+        return img_path, target_key, img_sha, width_px, height_px
 
     def _apply_preprocessing_profile(
         self,
@@ -336,68 +392,87 @@ class OCRJobExecutor:
         img_path: Path,
         img_key: str,
         img_sha: str,
+        img_w: int | None,
+        img_h: int | None,
         book_id: uuid.UUID,
         page_number: int,
         render_dpi: int,
         profile: str,
-    ) -> tuple[Path, str, str]:
+    ) -> tuple[Path, str, str, int | None, int | None]:
         """Apply optional non-destructive preprocessing without modifying the original render."""
         if profile == "none":
-            return img_path, img_key, img_sha
+            return img_path, img_key, img_sha, img_w, img_h
 
         derived_key = f"pages/{book_id}/pre-{profile}-dpi-{render_dpi}/page-{page_number:04d}.png"
         if self.storage.exists(derived_key):
             derived_path = self.storage.resolve_key(derived_key)
-            return derived_path, derived_key, sha256_file(derived_path)
+            with Image.open(derived_path) as im:
+                w, h = im.size
+            return derived_path, derived_key, sha256_file(derived_path), w, h
 
         import cv2
         import numpy as np
 
         img_bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
         if img_bgr is None:
-            return img_path, img_key, img_sha
+            return img_path, img_key, img_sha, img_w, img_h
 
         if profile == "contrast_clahe":
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-            out_img = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+            out_img = clahe.apply(gray)
         elif profile == "deskew":
+            # Focus on the inner 90% margin and horizontally dilate text glyphs into line bars
+            # so dark scanner borders / spine shadows do not dominate minAreaRect.
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            inv = cv2.bitwise_not(gray)
+            h_img, w_img = gray.shape[:2]
+            margin_y = max(0, int(h_img * 0.05))
+            margin_x = max(0, int(w_img * 0.05))
+            roi = gray[margin_y : h_img - margin_y, margin_x : w_img - margin_x]
+            if roi.size == 0:
+                roi = gray
+            inv = cv2.bitwise_not(roi)
             thresh = cv2.threshold(inv, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-            coords = np.column_stack(np.where(thresh > 0))
-            angle = 0.0
-            if len(coords) >= 50:
-                rect_angle = float(cv2.minAreaRect(coords)[-1])
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
+            dilated = cv2.dilate(thresh, kernel, iterations=1)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            angles: list[float] = []
+            for cnt in contours:
+                x_c, y_c, w_c, h_c = cv2.boundingRect(cnt)
+                if w_c < 40 or h_c < 8 or w_c > roi.shape[1] * 0.95 or h_c > roi.shape[0] * 0.30:
+                    continue
+                rect_angle = float(cv2.minAreaRect(cnt)[-1])
                 if rect_angle < -45:
-                    angle = -(90 + rect_angle)
+                    cand_angle = -(90 + rect_angle)
                 elif rect_angle > 45:
-                    angle = 90 - rect_angle
+                    cand_angle = 90 - rect_angle
                 else:
-                    angle = -rect_angle
-            if 0.4 <= abs(angle) <= 15.0:
-                h, w = img_bgr.shape[:2]
-                center = (w // 2, h // 2)
+                    cand_angle = -rect_angle
+                if abs(cand_angle) <= 12.0:
+                    angles.append(cand_angle)
+            angle = float(np.median(angles)) if angles else 0.0
+            if 0.4 <= abs(angle) <= 12.0:
+                center = (w_img // 2, h_img // 2)
                 rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
                 out_img = cv2.warpAffine(
                     img_bgr,
                     rot_mat,
-                    (w, h),
+                    (w_img, h_img),
                     flags=cv2.INTER_CUBIC,
                     borderMode=cv2.BORDER_REPLICATE,
                 )
             else:
                 out_img = img_bgr
         else:
-            return img_path, img_key, img_sha
+            return img_path, img_key, img_sha, img_w, img_h
 
         ok, enc = cv2.imencode(".png", out_img)
         if not ok:
-            return img_path, img_key, img_sha
+            return img_path, img_key, img_sha, img_w, img_h
         png_bytes = enc.tobytes()
         derived_path = self.storage.write_bytes(derived_key, png_bytes, read_only=False)
-        return derived_path, derived_key, sha256_bytes(png_bytes)
+        out_h, out_w = out_img.shape[:2]
+        return derived_path, derived_key, sha256_bytes(png_bytes), int(out_w), int(out_h)
 
     def execute_run(self, run_id: uuid.UUID) -> None:
         """Execute or resume a durable OCRRun page-by-page without losing progress."""
@@ -484,26 +559,36 @@ class OCRJobExecutor:
             engine_dir = "paddle" if canonical_engine == "paddle_ppocrv5_te" else "tesseract"
             open_pdf_doc: pymupdf.Document | None = None
 
+            # Preload all already-completed page IDs in one query (eliminates resume N+1 commits).
+            completed_page_ids = set(
+                db.scalars(
+                    select(OCRBlock.book_page_id)
+                    .where(OCRBlock.ocr_run_id == ocr_run.id)
+                    .distinct()
+                ).all()
+            )
+            ocr_page_dir = self.storage.workspace_root / "ocr" / str(book.id) / str(ocr_run.id) / engine_dir
+            existing_json_names = (
+                {e.name for e in ocr_page_dir.iterdir() if e.is_file()} if ocr_page_dir.is_dir() else set()
+            )
+            pending_pages: list[BookPage] = []
+            for p in target_pages:
+                p_json_name = f"page-{p.page_number:04d}.json"
+                if p.id in completed_page_ids or p_json_name in existing_json_names:
+                    completed_pages += 1
+                else:
+                    pending_pages.append(p)
+            if completed_pages > 0 and job is not None:
+                job.progress_current = completed_pages
+                db.commit()
+
             try:
-                for page in target_pages:
+                for page in pending_pages:
                     if run_id in self._cancelled_runs:
                         was_cancelled = True
                         break
 
-                    existing_blocks = db.scalars(
-                        select(OCRBlock.id).where(
-                            OCRBlock.ocr_run_id == ocr_run.id,
-                            OCRBlock.book_page_id == page.id,
-                        )
-                    ).first()
-                    # Check if page marker file already exists (handles 0-block blank pages on resume too).
                     page_json_key = f"ocr/{book.id}/{ocr_run.id}/{engine_dir}/page-{page.page_number:04d}.json"
-                    if existing_blocks is not None or self.storage.exists(page_json_key):
-                        completed_pages += 1
-                        if job is not None:
-                            job.progress_current = completed_pages
-                            db.commit()
-                        continue
 
                     try:
                         needs_custom_render = not (
@@ -514,26 +599,23 @@ class OCRJobExecutor:
                         if needs_custom_render and open_pdf_doc is None and self.storage.exists(book.source_storage_key):
                             open_pdf_doc = pymupdf.open(self.storage.resolve_key(book.source_storage_key))
 
-                        img_path, img_key, img_sha = self._ensure_page_image_path(
+                        img_path, img_key, img_sha, img_w, img_h = self._ensure_page_image_path(
                             book=book,
                             page=page,
                             requested_dpi=render_dpi,
                             open_pdf_doc=open_pdf_doc,
                         )
-                        img_path, img_key, img_sha = self._apply_preprocessing_profile(
+                        img_path, img_key, img_sha, img_w, img_h = self._apply_preprocessing_profile(
                             img_path=img_path,
                             img_key=img_key,
                             img_sha=img_sha,
+                            img_w=img_w,
+                            img_h=img_h,
                             book_id=book.id,
                             page_number=page.page_number,
                             render_dpi=render_dpi,
                             profile=preprocessing_profile,
                         )
-                        try:
-                            with Image.open(img_path) as im:
-                                img_w, img_h = im.size
-                        except Exception:
-                            img_w, img_h = (None, None)
                         log_event(
                             LOGGER,
                             logging.INFO,
@@ -549,6 +631,11 @@ class OCRJobExecutor:
                             rss_mb=_peak_rss_mb(),
                         )
                         recognition = provider.recognize(img_path)
+
+                        # Abort cleanly without recreating files/rows if run was cancelled or book deleted mid-page.
+                        if run_id in self._cancelled_runs or db.get(Book, book.id) is None:
+                            was_cancelled = True
+                            break
 
                         raw_payload = recognition["raw_payload"]
                         if provider.engine_name == "paddleocr":
@@ -734,6 +821,22 @@ def create_or_reuse_ocr_runs(
             tesseract_psm=tesseract_psm,
             include_digital_text_pages=include_digital_text_pages,
         )
+        active_existing = db.scalars(
+            select(OCRRun)
+            .where(
+                OCRRun.book_id == book.id,
+                OCRRun.idempotency_key == idem_key,
+                OCRRun.status.in_(("running", "queued")),
+            )
+            .order_by(OCRRun.created_at.desc())
+        ).first()
+        if active_existing is not None:
+            all_run_ids.append(active_existing.id)
+            if primary_job_id is None and active_existing.processing_job_id is not None:
+                primary_job_id = active_existing.processing_job_id
+            reused_all = False
+            continue
+
         if not force_rerun:
             existing = db.scalars(
                 select(OCRRun)
@@ -820,7 +923,7 @@ def resume_ocr_run(
     ocr_run = db.get(OCRRun, run_id)
     if ocr_run is None:
         raise AppError("OCR_RUN_NOT_FOUND", f"OCR run {run_id} not found.", status_code=404)
-    if ocr_run.status == "completed":
+    if ocr_run.status in ("completed", "running", "queued"):
         return ocr_run
     ocr_run.status = "queued"
     ocr_run.error_summary = None

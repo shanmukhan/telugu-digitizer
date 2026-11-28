@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import uuid
 from typing import Any
 
 from PIL import Image
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
+from src.common.cache_state import bump_sentence_context_epoch
 from src.common.io import sha256_bytes
 from src.common.logging_utils import log_event
 from src.core.storage import LocalFilesystemStorage
@@ -68,44 +70,61 @@ def _vertical_overlap_ratio(box_a: list[float], box_b: list[float]) -> float:
     return inter / min_h
 
 
-def _is_low_confidence(engine_name: str | None, confidence: float | None) -> bool:
+def _is_low_confidence(
+    engine_name: str | None,
+    confidence: float | None,
+    *,
+    tesseract_threshold: float = 75.0,
+    paddle_threshold: float = 0.85,
+) -> bool:
     if confidence is None:
         return False
     if engine_name == "tesseract":
-        return confidence < 75.0
-    return confidence < 0.85
+        return confidence < tesseract_threshold
+    return confidence < paddle_threshold
 
 
-def _match_comparator_block(
+def _match_comparator_text(
     primary_block: OCRBlock,
     primary_bbox: list[float] | None,
     comparator_blocks_with_bbox: list[tuple[OCRBlock, list[float] | None]],
-    fallback_idx: int,
-) -> OCRBlock | None:
+) -> str | None:
+    """Match comparator OCR blocks strictly by vertical bounding-box overlap (never blind index fallback)."""
     _ = primary_block
-    if not comparator_blocks_with_bbox:
+    if not comparator_blocks_with_bbox or primary_bbox is None:
         return None
-    if primary_bbox is not None:
-        best_score = 0.0
-        best_block: OCRBlock | None = None
-        for comp, comp_bbox in comparator_blocks_with_bbox:
-            if comp_bbox is None:
-                continue
-            y_ov = _vertical_overlap_ratio(primary_bbox, comp_bbox)
-            if y_ov <= 0.3:
-                continue
-            # Prefer horizontal overlap as tiebreaker for multi-column lines.
-            x_inter = max(0.0, min(primary_bbox[2], comp_bbox[2]) - max(primary_bbox[0], comp_bbox[0]))
-            x_union = max(max(primary_bbox[2], comp_bbox[2]) - min(primary_bbox[0], comp_bbox[0]), 1.0)
-            score = y_ov + 0.5 * (x_inter / x_union)
-            if score > best_score:
-                best_score = score
-                best_block = comp
-        if best_block is not None:
-            return best_block
-    if 0 <= fallback_idx < len(comparator_blocks_with_bbox):
-        return comparator_blocks_with_bbox[fallback_idx][0]
-    return None
+
+    scored_matches: list[tuple[float, float, OCRBlock]] = []
+    for comp, comp_bbox in comparator_blocks_with_bbox:
+        if comp_bbox is None:
+            continue
+        y_ov = _vertical_overlap_ratio(primary_bbox, comp_bbox)
+        if y_ov < 0.30:
+            continue
+        x_inter = max(0.0, min(primary_bbox[2], comp_bbox[2]) - max(primary_bbox[0], comp_bbox[0]))
+        x_union = max(max(primary_bbox[2], comp_bbox[2]) - min(primary_bbox[0], comp_bbox[0]), 1.0)
+        x_overlap = x_inter / max(1.0, min(primary_bbox[2] - primary_bbox[0], comp_bbox[2] - comp_bbox[0]))
+        # Guard against matching a different column horizontally when boxes share the same Y band.
+        if x_overlap <= 0.0 and (primary_bbox[2] - primary_bbox[0]) < 0.55 * x_union:
+            continue
+        scored_matches.append((comp_bbox[0], y_ov + 0.5 * (x_inter / x_union), comp))
+
+    if not scored_matches:
+        return None
+    if len(scored_matches) == 1:
+        return scored_matches[0][2].raw_text
+
+    # If one comparator engine split a horizontal line into multiple spans overlapping this band, join left-to-right;
+    # otherwise pick highest scoring block.
+    joined_parts = [
+        m[2].raw_text.strip()
+        for m in sorted(scored_matches, key=lambda item: item[0])
+        if m[1] >= 0.40 and m[2].raw_text.strip()
+    ]
+    if joined_parts:
+        return " ".join(joined_parts)
+    best = max(scored_matches, key=lambda item: item[1])
+    return best[2].raw_text
 
 
 def _get_or_create_human_draft_version(db: Session, book_id: uuid.UUID) -> DocumentTextVersion:
@@ -176,6 +195,8 @@ def get_page_review_payload(
     page_number: int,
     primary_run_id: uuid.UUID | None = None,
     comparator_run_id: uuid.UUID | None = None,
+    low_conf_threshold_tesseract: float = 75.0,
+    low_conf_threshold_paddle: float = 0.85,
 ) -> dict[str, Any]:
     """Build combined side-by-side review payload for one book page."""
     if page_number < 1:
@@ -284,6 +305,10 @@ def get_page_review_payload(
             select(CorrectionMemory).where(
                 CorrectionMemory.language_code == book.language_code,
                 CorrectionMemory.status == "active",
+                or_(
+                    CorrectionMemory.scope == "global_suggestion",
+                    CorrectionMemory.book_id == book.id,
+                ),
             )
         ).all()
     )
@@ -334,14 +359,18 @@ def get_page_review_payload(
             "ignore" if latest_action == "ignored" else "paragraph",
         )
         bbox = _bbox_from_block(blk)
-        comp_block = _match_comparator_block(blk, bbox, comparator_blocks_with_bbox, idx)
-        comp_text = comp_block.raw_text if comp_block else None
+        comp_text = _match_comparator_text(blk, bbox, comparator_blocks_with_bbox)
 
         disagreement = False
         if comp_text is not None:
             disagreement = normalize_nfc(blk.raw_text).strip() != normalize_nfc(comp_text).strip()
 
-        low_conf = _is_low_confidence(primary_engine, blk.confidence)
+        low_conf = _is_low_confidence(
+            primary_engine,
+            blk.confidence,
+            tesseract_threshold=low_conf_threshold_tesseract,
+            paddle_threshold=low_conf_threshold_paddle,
+        )
         short_or_empty = len(blk.raw_text.strip()) <= 1
         suggestions = find_block_suggestions_from_index(
             by_incorrect=by_incorrect,
@@ -467,9 +496,17 @@ def _maybe_record_training_sample(
             existing.annotation_status = "verified"
             existing.reviewer_id = reviewer_id
             existing.allowed_for_training = True
-    except Exception:
-        # Never block review edit saving if optional crop extraction fails.
-        pass
+    except Exception as exc:
+        # Never block review edit saving if optional crop extraction fails, but always log it.
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "Skipped optional training crop capture due to error",
+            book_id=str(book.id),
+            block_id=str(block.id),
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
 
 
 def submit_block_edit(
@@ -624,6 +661,7 @@ def submit_block_edit(
             correction_entry_id = mem.id
 
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(edit_row)
     db.refresh(page)
 
@@ -659,6 +697,7 @@ def insert_manual_review_block(
     text: str,
     block_role: str = "paragraph",
     primary_run_id: uuid.UUID | None = None,
+    bbox: list[float] | None = None,
 ) -> dict[str, Any]:
     """Insert a reviewer-authored line block when OCR missed a printed line."""
     cleaned = text.strip()
@@ -670,6 +709,15 @@ def insert_manual_review_block(
             f"Unsupported block_role {block_role!r}. Allowed: {sorted(ALLOWED_BLOCK_ROLES)}.",
             status_code=400,
         )
+
+    polygon: list[list[float]] | None = None
+    if bbox is not None:
+        if len(bbox) != 4:
+            raise AppError("INVALID_BBOX", "bbox must contain 4 numbers [x1, y1, x2, y2].", status_code=400)
+        x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        if not all(math.isfinite(v) for v in (x1, y1, x2, y2)) or x2 < x1 or y2 < y1:
+            raise AppError("INVALID_BBOX", "bbox coordinates must be finite with x2 >= x1 and y2 >= y1.", status_code=400)
+        polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
 
     page = db.scalars(
         select(BookPage).where(BookPage.book_id == book_id, BookPage.page_number == page_number)
@@ -710,9 +758,9 @@ def insert_manual_review_block(
         raw_text=cleaned,
         normalized_text=normalize_nfc(cleaned),
         confidence=None,
-        polygon=None,
+        polygon=polygon,
         reading_order=next_idx,
-        raw_engine_payload={"source": "human_inserted"},
+        raw_engine_payload={"source": "human_inserted", **({"bbox": bbox} if bbox is not None else {})},
     )
     db.add(new_blk)
     db.flush()
@@ -734,6 +782,7 @@ def insert_manual_review_block(
     db.refresh(new_blk)
     return {
         "block_id": new_blk.id,
+        "ocr_run_id": target_run.id,
         "block_index": new_blk.block_index,
         "reading_order": new_blk.reading_order,
         "block_type": new_blk.block_type,
@@ -768,6 +817,7 @@ def update_digital_page_text(
         "page_kind": page.page_kind,
         "extracted_text_char_count": page.extracted_text_char_count,
         "text": page.digital_text_content or "",
+        "review_status": page.review_status,
     }
 
 
@@ -867,6 +917,36 @@ def update_page_review_status(
     }
 
 
+def _resolve_primary_run_id_for_page(
+    db: Session,
+    book_id: uuid.UUID,
+    page_id: uuid.UUID,
+) -> uuid.UUID | None:
+    """Resolve the best usable OCRRun ID for a page without loading full review suggestions."""
+    runs_info = list_book_ocr_runs(db, book_id)
+    usable_runs = [r for r in runs_info if r["status"] in ("completed", "partial")]
+    if not usable_runs:
+        return None
+    usable_ids = [r["ocr_run_id"] for r in usable_runs]
+    counts = db.execute(
+        select(OCRBlock.ocr_run_id, func.count(OCRBlock.id))
+        .where(OCRBlock.book_page_id == page_id, OCRBlock.ocr_run_id.in_(usable_ids))
+        .group_by(OCRBlock.ocr_run_id)
+    ).all()
+    block_count_by_run = {row[0]: int(row[1]) for row in counts}
+    best = max(
+        usable_runs,
+        key=lambda r: (
+            block_count_by_run.get(r["ocr_run_id"], 0) > 0,
+            (r.get("progress_current") or 0) > 0 or r["status"] == "completed",
+            r["engine"] == "paddleocr",
+            r["status"] == "completed",
+            r.get("progress_current") or 0,
+        ),
+    )
+    return best["ocr_run_id"]
+
+
 def batch_save_and_approve_page(
     *,
     db: Session,
@@ -903,6 +983,37 @@ def batch_save_and_approve_page(
     memory_created_count = 0
     memory_skipped_noise_count = 0
 
+    # Bulk preload target blocks, latest edits, and existing DocumentTextBlocks to eliminate N+1 SQL loops.
+    target_edit_block_ids = list({item["block_id"] for item in edits_list})
+    preloaded_blocks: dict[uuid.UUID, OCRBlock] = {}
+    preloaded_latest_edits: dict[uuid.UUID, ReviewEdit] = {}
+    preloaded_doc_blocks: dict[uuid.UUID, DocumentTextBlock] = {}
+    if target_edit_block_ids:
+        for b_row in db.scalars(
+            select(OCRBlock).where(
+                OCRBlock.id.in_(target_edit_block_ids),
+                OCRBlock.book_page_id == page.id,
+            )
+        ).all():
+            preloaded_blocks[b_row.id] = b_row
+
+        for e_row in db.scalars(
+            select(ReviewEdit)
+            .where(ReviewEdit.ocr_block_id.in_(target_edit_block_ids))
+            .distinct(ReviewEdit.ocr_block_id)
+            .order_by(ReviewEdit.ocr_block_id, ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
+        ).all():
+            preloaded_latest_edits[e_row.ocr_block_id] = e_row
+
+        for d_row in db.scalars(
+            select(DocumentTextBlock).where(
+                DocumentTextBlock.version_id == version.id,
+                DocumentTextBlock.ocr_block_id.in_(target_edit_block_ids),
+            )
+        ).all():
+            if d_row.ocr_block_id is not None:
+                preloaded_doc_blocks[d_row.ocr_block_id] = d_row
+
     for item in edits_list:
         blk_id = item["block_id"]
         edited_text = str(item["edited_text"])
@@ -919,54 +1030,45 @@ def batch_save_and_approve_page(
         if block_role is not None and block_role not in ALLOWED_BLOCK_ROLES:
             raise AppError("INVALID_BLOCK_ROLE", f"Unsupported block_role {block_role!r}.", status_code=400)
 
-        blk = db.get(OCRBlock, blk_id)
-        if blk is None or blk.book_page_id != page.id:
+        blk = preloaded_blocks.get(blk_id)
+        if blk is None:
             raise AppError(
                 "OCR_BLOCK_NOT_FOUND",
                 f"OCR block {blk_id} not found on page {page_number}.",
                 status_code=404,
             )
 
-        latest_edit = db.scalars(
-            select(ReviewEdit)
-            .where(ReviewEdit.ocr_block_id == blk.id)
-            .order_by(ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
-        ).first()
+        latest_edit = preloaded_latest_edits.get(blk.id)
         previous_text = latest_edit.edited_text if latest_edit else blk.raw_text
 
-        db.add(
-            ReviewEdit(
-                ocr_block_id=blk.id,
-                previous_text=previous_text,
-                edited_text=edited_text,
-                action=action,
-                reviewer_id=reviewer_id,
-                review_note=review_note,
-            )
+        new_edit = ReviewEdit(
+            ocr_block_id=blk.id,
+            previous_text=previous_text,
+            edited_text=edited_text,
+            action=action,
+            reviewer_id=reviewer_id,
+            review_note=review_note,
         )
+        db.add(new_edit)
+        preloaded_latest_edits[blk.id] = new_edit
 
-        doc_block = db.scalars(
-            select(DocumentTextBlock).where(
-                DocumentTextBlock.version_id == version.id,
-                DocumentTextBlock.ocr_block_id == blk.id,
-            )
-        ).first()
+        doc_block = preloaded_doc_blocks.get(blk.id)
         effective_role = (
             "ignore"
             if action == "ignored"
             else (block_role if block_role is not None else (doc_block.block_role if doc_block else "paragraph"))
         )
         if doc_block is None:
-            db.add(
-                DocumentTextBlock(
-                    version_id=version.id,
-                    book_page_id=page.id,
-                    ocr_block_id=blk.id,
-                    final_text=edited_text,
-                    reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
-                    block_role=effective_role,
-                )
+            doc_block = DocumentTextBlock(
+                version_id=version.id,
+                book_page_id=page.id,
+                ocr_block_id=blk.id,
+                final_text=edited_text,
+                reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
+                block_role=effective_role,
             )
+            db.add(doc_block)
+            preloaded_doc_blocks[blk.id] = doc_block
         else:
             doc_block.final_text = edited_text
             doc_block.block_role = effective_role
@@ -1005,11 +1107,8 @@ def batch_save_and_approve_page(
         edited_block_ids.add(blk.id)
         saved_edits_count += 1
 
-    # Resolve primary run if not supplied so remaining blocks can be snapshotted/approved.
-    resolved_run_id = primary_run_id
-    if resolved_run_id is None:
-        review_payload = get_page_review_payload(db=db, book_id=book.id, page_number=page_number)
-        resolved_run_id = review_payload["primary_run_id"]
+    # Resolve primary run lightly without rebuilding suggestions or comparator matching.
+    resolved_run_id = primary_run_id or _resolve_primary_run_id_for_page(db, book.id, page.id)
 
     if resolved_run_id is not None:
         run_blocks = list(
@@ -1022,7 +1121,7 @@ def batch_save_and_approve_page(
                 .order_by(OCRBlock.reading_order, OCRBlock.block_index)
             ).all()
         )
-        run_block_ids = [b.id for b in run_blocks]
+        run_block_ids = [b.id for b in run_blocks if b.id not in edited_block_ids]
         doc_by_block: dict[uuid.UUID, DocumentTextBlock] = {}
         latest_edit_by_block: dict[uuid.UUID, ReviewEdit] = {}
         if run_block_ids:
@@ -1037,7 +1136,8 @@ def batch_save_and_approve_page(
             for edit_row in db.scalars(
                 select(ReviewEdit)
                 .where(ReviewEdit.ocr_block_id.in_(run_block_ids))
-                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+                .distinct(ReviewEdit.ocr_block_id)
+                .order_by(ReviewEdit.ocr_block_id, ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
             ).all():
                 latest_edit_by_block[edit_row.ocr_block_id] = edit_row
 
@@ -1097,6 +1197,7 @@ def batch_save_and_approve_page(
         page.review_status = "in_review"
 
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(page)
     log_event(
         LOGGER,

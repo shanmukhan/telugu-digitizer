@@ -2,13 +2,14 @@
 # Cloudflare Edge handles public TLS termination and connects to Caddy on port 8080.
 :8080 {
 	request_body {
-		max_size 250MB
+		max_size 205MB
 	}
 
 	header {
 		X-Content-Type-Options nosniff
 		X-Frame-Options SAMEORIGIN
 		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 		-Server
 	}
 

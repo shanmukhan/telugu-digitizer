@@ -300,11 +300,18 @@ export async function updatePageDigitalText(
   bookId: string,
   pageNumber: number,
   digitalTextContent: string,
-): Promise<{ book_id: string; page_number: number; digital_text_content: string; review_status: string }> {
+): Promise<{
+  book_id: string;
+  page_number: number;
+  page_kind: string;
+  extracted_text_char_count: number;
+  text: string;
+  review_status: string | null;
+}> {
   return requestJson(`/api/v1/books/${bookId}/pages/${pageNumber}/digital-text`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ digital_text_content: digitalTextContent }),
+    body: JSON.stringify({ text: digitalTextContent }),
   });
 }
 

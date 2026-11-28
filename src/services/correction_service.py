@@ -8,10 +8,11 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
+from src.common.cache_state import bump_sentence_context_epoch
 from src.common.logging_utils import log_event
 from src.db.models import CorrectionMemory
 from src.evaluation.metrics import normalize_nfc
@@ -389,6 +390,9 @@ def _strip_edge_punctuation(span: str) -> tuple[str, str, str]:
     return span[:start], span[start:end], span[end:]
 
 
+_SPLIT_KEEP_WS_RE = re.compile(r"(\s+)")
+
+
 def find_block_suggestions_from_index(
     *,
     by_incorrect: dict[str, list[CorrectionMemory]],
@@ -397,10 +401,12 @@ def find_block_suggestions_from_index(
     book_id: uuid.UUID,
     max_ngram: int = 4,
 ) -> list[dict[str, Any]]:
-    """Find contextual correction candidates for one block using a prebuilt suggestion index."""
+    """Find contextual correction candidates for one block while preserving original whitespace/newlines."""
     if not by_incorrect:
         return []
-    tokens = block_text.split()
+    parts = _SPLIT_KEEP_WS_RE.split(block_text)
+    word_slots = [idx for idx, seg in enumerate(parts) if seg and not seg.isspace()]
+    tokens = [parts[idx] for idx in word_slots]
     if not tokens:
         return []
 
@@ -429,14 +435,18 @@ def find_block_suggestions_from_index(
             distinct_targets = {normalize_nfc(c.corrected_text).strip() for c in candidates}
             has_conflict = len(distinct_targets) > 1
 
+            first_part_idx = word_slots[start]
+            last_part_idx = word_slots[start + length - 1]
+            prefix_ws_preserved = "".join(parts[:first_part_idx])
+            suffix_ws_preserved = "".join(parts[last_part_idx + 1 :])
+
             for entry in candidates:
                 if entry.id in seen_ids:
                     continue
                 seen_ids.add(entry.id)
                 ctx_label, ctx_rank = _context_score(entry, left_ctx, right_ctx, book_id)
                 replacement_span = f"{lead_punct}{entry.corrected_text}{trail_punct}"
-                proposed_tokens = tokens[:start] + replacement_span.split() + tokens[start + length :]
-                proposed_block_text = " ".join(proposed_tokens)
+                proposed_block_text = f"{prefix_ws_preserved}{replacement_span}{suffix_ws_preserved}"
                 cor_key = normalize_nfc(entry.corrected_text).strip()
                 suggestions.append(
                     {
@@ -491,6 +501,7 @@ def approve_correction(db: Session, correction_id: uuid.UUID) -> CorrectionMemor
         raise AppError("CORRECTION_NOT_FOUND", f"Correction {correction_id} not found.", status_code=404)
     entry.approved_count += 1
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(entry)
     return entry
 
@@ -509,6 +520,7 @@ def reject_correction(
     if disable:
         entry.status = "rejected"
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(entry)
     return entry
 
@@ -545,6 +557,7 @@ def update_correction_status(
             )
         entry.scope = scope
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(entry)
     return entry
 
@@ -556,8 +569,10 @@ def list_corrections(
     status: str | None = None,
     query: str | None = None,
     language_code: str = "te",
+    limit: int = 200,
+    offset: int = 0,
 ) -> list[CorrectionMemory]:
-    """List correction memory records for governance and audit inspection."""
+    """List correction memory records with SQL filtering and bounded pagination."""
     stmt = select(CorrectionMemory).where(CorrectionMemory.language_code == language_code)
     if book_id is not None:
         stmt = stmt.where(CorrectionMemory.book_id == book_id)
@@ -565,12 +580,21 @@ def list_corrections(
         if status not in ALLOWED_STATUSES:
             raise AppError("INVALID_CORRECTION_STATUS", f"Unsupported status {status!r}.", status_code=400)
         stmt = stmt.where(CorrectionMemory.status == status)
-    rows = list(db.scalars(stmt.order_by(CorrectionMemory.created_at.desc())).all())
     if query and query.strip():
         q_nfc = normalize_nfc(query).strip()
-        rows = [
-            r
-            for r in rows
-            if q_nfc in normalize_nfc(r.incorrect_text) or q_nfc in normalize_nfc(r.corrected_text)
-        ]
-    return rows
+        pat = f"%{q_nfc}%"
+        stmt = stmt.where(
+            or_(
+                CorrectionMemory.incorrect_text.ilike(pat),
+                CorrectionMemory.corrected_text.ilike(pat),
+            )
+        )
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    return list(
+        db.scalars(
+            stmt.order_by(CorrectionMemory.created_at.desc(), CorrectionMemory.id.desc())
+            .limit(safe_limit)
+            .offset(safe_offset)
+        ).all()
+    )

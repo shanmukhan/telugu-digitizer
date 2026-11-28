@@ -6,7 +6,6 @@ import {
   batchSavePage,
   cancelOcrRun,
   createManualPageBlock,
-  deleteBook,
   getHostCapabilities,
   getOcrRunStatus,
   getPageReview,
@@ -23,7 +22,6 @@ import {
 } from "./api/client";
 import { BookUploadForm } from "./components/BookUploadForm";
 import { CorrectionMemoryPanel } from "./components/CorrectionMemoryPanel";
-import { DeleteConfirmDialog } from "./components/DeleteConfirmDialog";
 import { DictionaryPanel } from "./components/DictionaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
 import { QuickLookupDialog } from "./components/QuickLookupDialog";
@@ -128,7 +126,6 @@ export function App() {
   const [ocrIncludeDigital, setOcrIncludeDigital] = useState<boolean>(false);
   const [busyUpload, setBusyUpload] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<BookSummary | null>(null);
   const [banner, setBanner] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(
     null,
   );
@@ -277,10 +274,18 @@ export function App() {
         let finishedRun: OCRRunStatus | null = null;
         for (const st of fetched) {
           const prevEntry = prevProgressRef.current[st.ocr_run_id];
-          const advanced = prevEntry && st.progress_current > prevEntry.progress;
+          const advanced = Boolean(prevEntry && st.progress_current > prevEntry.progress);
           const becameTerminal =
-            st.status === "completed" || st.status === "partial" || st.status === "failed";
-          if (advanced || becameTerminal) {
+            st.status === "completed" ||
+            st.status === "partial" ||
+            st.status === "failed" ||
+            st.status === "cancelled";
+          const periodicRefresh =
+            advanced &&
+            (st.progress_current === 1 ||
+              (st.progress_total > 0 && st.progress_current >= st.progress_total) ||
+              st.progress_current % 4 === 0);
+          if (becameTerminal || periodicRefresh) {
             shouldRefreshBookDetail = true;
           }
           if (
@@ -312,7 +317,12 @@ export function App() {
           const isZeroPartial =
             finishedRun.status === "partial" && (finishedRun.progress_current ?? 0) === 0;
           setBanner({
-            kind: finishedRun.status === "failed" || isZeroPartial ? "error" : finishedRun.status === "partial" ? "info" : "success",
+            kind:
+              finishedRun.status === "failed" || isZeroPartial
+                ? "error"
+                : finishedRun.status === "partial" || finishedRun.status === "cancelled"
+                  ? "info"
+                  : "success",
             text: `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages)${finishedRun.error_summary ? `: ${finishedRun.error_summary}` : "."}`,
           });
         }
@@ -732,13 +742,18 @@ export function App() {
       return;
     }
     try {
-      for (const blk of targets) {
-        await submitBlockEdit(blk.block_id, {
+      await batchSavePage(selectedBookId, selectedPageNumber, {
+        primaryRunId: review.primary_run_id,
+        edits: targets.map((blk) => ({
+          block_id: blk.block_id,
           edited_text: blk.current_text,
           action: "approved",
           block_role: blk.block_role ?? "paragraph",
-        });
-      }
+          add_to_correction_memory: false,
+        })),
+        approveRemainingBlocks: false,
+        markPageApproved: false,
+      });
       await Promise.all([
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
@@ -751,23 +766,6 @@ export function App() {
       setBanner({
         kind: "error",
         text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch approval failed.",
-      });
-    }
-  }
-
-  async function confirmDeleteBook() {
-    if (!deleteTarget) return;
-    const targetId = deleteTarget.book_id;
-    const targetTitle = deleteTarget.title;
-    setDeleteTarget(null);
-    try {
-      await deleteBook(targetId);
-      setBanner({ kind: "success", text: `Deleted "${targetTitle}".` });
-      await refreshBooks();
-    } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Delete failed.",
       });
     }
   }
@@ -1054,14 +1052,54 @@ export function App() {
             )}
 
             {selectedBook && (
-              <div style={{ marginTop: "0.75rem" }}>
-                <button
-                  type="button"
-                  className="danger btn-compact"
-                  onClick={() => setDeleteTarget(selectedBook)}
-                >
-                  Delete Selected Book
-                </button>
+              <div style={{ marginTop: "0.75rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                  <span>Select another book</span>
+                  <select
+                    aria-label="Select another book"
+                    value={selectedBookId ?? ""}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      if (!nextId) return;
+                      setSelectedBookId(nextId);
+                      setSelectedPageNumber(1);
+                      setSelectedPrimaryRunId(null);
+                      setSelectedBlockId(null);
+                    }}
+                  >
+                    {books.map((book) => (
+                      <option key={book.book_id} value={book.book_id}>
+                        {book.title} ({book.page_count}p)
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                  {books.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn-compact"
+                      onClick={() => {
+                        const idx = books.findIndex((b) => b.book_id === selectedBookId);
+                        const nextBook = books[(idx + 1) % books.length];
+                        if (!nextBook) return;
+                        setSelectedBookId(nextBook.book_id);
+                        setSelectedPageNumber(1);
+                        setSelectedPrimaryRunId(null);
+                        setSelectedBlockId(null);
+                      }}
+                    >
+                      Switch Book →
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    onClick={() => setUploadExpanded(true)}
+                  >
+                    + Upload Another Book
+                  </button>
+                </div>
               </div>
             )}
           </section>
@@ -1467,13 +1505,6 @@ export function App() {
         onInsertText={handleKeyboardInsert}
         onBackspace={handleKeyboardBackspace}
         targetDescription={keyboardTargetLabel}
-      />
-
-      <DeleteConfirmDialog
-        open={deleteTarget !== null}
-        bookTitle={deleteTarget?.title ?? ""}
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={() => void confirmDeleteBook()}
       />
 
       <QuickLookupDialog

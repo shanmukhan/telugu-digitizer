@@ -215,15 +215,17 @@ class LibraryTabView extends StatelessWidget {
                                     color: AppTheme.primary,
                                   ),
                                 ),
-                                IconButton(
-                                  tooltip: 'Delete Book',
-                                  onPressed: () =>
-                                      _confirmDeleteBook(context, book),
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    color: AppTheme.dangerBorder,
+                                if (viewModel.capabilities?.bookDeleteEnabled ??
+                                    false)
+                                  IconButton(
+                                    tooltip: 'Delete Book',
+                                    onPressed: () =>
+                                        _confirmDeleteBook(context, book),
+                                    icon: const Icon(
+                                      Icons.delete_outline,
+                                      color: AppTheme.dangerBorder,
+                                    ),
                                   ),
-                                ),
                               ],
                             ],
                           ),

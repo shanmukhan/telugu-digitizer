@@ -4,9 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telugu-book-digitizer"
-version = "0.1.0"
-description = "Phase 1 CLI proof of concept for local printed Telugu OCR and benchmarking"
+version = "0.5.0"
+description = "Local-first printed Telugu book digitization workbench, REST API, dictionary, and DOCX/TXT exporter"
 requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.14",
+    "anyio>=4.0",
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "jiwer>=4.0",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "pandas>=2.2",
+    "pillow>=11.0",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.10",
+    "pymupdf>=1.25",
+    "python-docx>=1.1",
+    "python-multipart>=0.0.18",
+    "PyYAML>=6.0",
+    "rapidfuzz>=3.10",
+    "regex>=2024.11",
+    "SQLAlchemy>=2.0",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+]
+ocr-paddle = [
+    "paddleocr>=3.0",
+    "paddlepaddle>=3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

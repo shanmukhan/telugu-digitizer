@@ -173,7 +173,12 @@ export function SourcePageViewer({
             cachedPdfDocRef.current.doc.destroy().catch(() => {});
             cachedPdfDocRef.current = null;
           }
-          const task = pdfjsLib.getDocument(resolveAppUrl(`/api/v1/books/${bookId}/pdf`));
+          const task = pdfjsLib.getDocument({
+            url: resolveAppUrl(`/api/v1/books/${bookId}/pdf`),
+            disableAutoFetch: true,
+            disableStream: false,
+            rangeChunkSize: 65536,
+          });
           loadingTask = task;
           pdfDoc = await task.promise;
           if (cancelled) {

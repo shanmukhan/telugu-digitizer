@@ -96,9 +96,9 @@ class _ServerSettingsSheetState extends State<ServerSettingsSheet> {
                       DigitizerApiService.defaultBaseUrl,
                 ),
                 ActionChip(
-                  label: const Text('Pi LAN (192.168.1.13:8085)'),
+                  label: const Text('Local LAN (:8085)'),
                   onPressed: () =>
-                      _urlController.text = 'http://192.168.1.13:8085',
+                      _urlController.text = 'http://raspberrypi.local:8085',
                 ),
                 ActionChip(
                   label: const Text('Localhost (127.0.0.1:8000)'),
@@ -117,6 +117,23 @@ class _ServerSettingsSheetState extends State<ServerSettingsSheet> {
               keyboardType: TextInputType.url,
             ),
             const SizedBox(height: 12),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _urlController,
+              builder: (context, urlVal, _) {
+                final trimmed = urlVal.text.trim().toLowerCase();
+                final isPlainHttp = trimmed.startsWith('http://') &&
+                    !trimmed.startsWith('http://127.0.0.1') &&
+                    !trimmed.startsWith('http://localhost');
+                if (!isPlainHttp) return const SizedBox.shrink();
+                return const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Warning: Plain HTTP sends requests and optional Basic Auth credentials unencrypted over the network. Prefer HTTPS outside localhost.',
+                    style: TextStyle(fontSize: 12, color: Colors.deepOrange),
+                  ),
+                );
+              },
+            ),
             Row(
               children: [
                 Expanded(

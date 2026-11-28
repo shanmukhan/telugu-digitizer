@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import resource
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,7 +66,9 @@ def run_ocr_on_manifest(
     log = logger or logging.getLogger("telugu_digitizer.ocr")
 
     providers: dict[str, OCRProvider] = {}
+    init_times_ms: dict[str, float] = {}
     for engine_key in engines:
+        t_init = time.perf_counter()
         if engine_key == "paddle":
             providers["paddle"] = PaddleOCRProvider(device=paddle_device)
         elif engine_key == "tesseract":
@@ -74,6 +79,7 @@ def run_ocr_on_manifest(
             )
         else:
             raise ValueError(f"Unsupported engine {engine_key!r}. Choose 'paddle' and/or 'tesseract'.")
+        init_times_ms[engine_key] = round((time.perf_counter() - t_init) * 1000.0, 2)
 
     run_summary: dict[str, Any] = {
         "run_id": safe_run_id,
@@ -221,8 +227,19 @@ def run_ocr_on_manifest(
         engine_meta = provider.provider_metadata()
         if cold_start_ms is not None and engine_meta.get("cold_start_ms") is None:
             engine_meta["cold_start_ms"] = cold_start_ms
+        if engine_meta.get("model_load_ms") is None:
+            engine_meta["model_load_ms"] = (
+                cold_start_ms if cold_start_ms is not None else init_times_ms.get(engine_key)
+            )
         if warmup_elapsed_ms is not None:
             engine_meta["warmup_elapsed_ms"] = warmup_elapsed_ms
+        ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak_rss_mb = (
+            float(ru_maxrss) / (1024.0 * 1024.0)
+            if sys.platform == "darwin"
+            else float(ru_maxrss) / 1024.0
+        )
+        engine_meta["peak_rss_mb"] = round(peak_rss_mb, 2)
 
         run_summary["engines"][engine_key] = {
             "metadata": engine_meta,

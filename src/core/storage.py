@@ -41,6 +41,29 @@ class LocalFilesystemStorage:
             raise ValueError(f"Invalid storage key: {storage_key!r}")
         return validate_within_workspace(self.workspace_root / cleaned, self.workspace_root)
 
+    def install_file(self, storage_key: str, src_path: Path, *, read_only: bool = False) -> Path:
+        """Install an existing on-disk file into workspace atomically without full RAM buffering."""
+        import tempfile
+
+        target = self.resolve_key(storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and read_only:
+            os.chmod(target, 0o644)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        tmp_path = Path(tmp_name)
+        try:
+            with src_path.open("rb") as src, os.fdopen(fd, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(tmp_path, target)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        if read_only:
+            os.chmod(target, 0o444)
+        return target
+
     def write_bytes(self, storage_key: str, data: bytes, *, read_only: bool = False) -> Path:
         target = self.resolve_key(storage_key)
         if target.exists() and read_only:

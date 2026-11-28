@@ -6,16 +6,17 @@ import io
 import logging
 import re
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import docx
 import pymupdf
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement, parse_xml
-from docx.oxml.ns import nsdecls, qn
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Mm, Pt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -43,6 +44,15 @@ ALLOWED_FORMATS = {"docx", "txt"}
 ALLOWED_LAYOUT_MODES = {"editable_flow", "page_preserving"}
 ALLOWED_TEXT_VERSIONS = {"human_approved", "raw_ocr"}
 
+# XML 1.0 forbids C0 control characters outside \t, \n, \r (frequently found in dirty digital PDF text layers).
+_XML_ILLEGAL_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W_P_TAG = f"{{{_W_NS}}}p"
+_W_T_TAG = f"{{{_W_NS}}}t"
+_W_BR_TAG = f"{{{_W_NS}}}br"
+_W_TAB_TAG = f"{{{_W_NS}}}tab"
+_W_TYPE_ATTR = f"{{{_W_NS}}}type"
+
 
 @dataclass
 class ExportBlockItem:
@@ -61,6 +71,11 @@ class PageExportContent:
     block_items: list[ExportBlockItem] | None = None
 
 
+def _sanitize_xml_text(value: str, *, normalize_unicode_nfc: bool = False) -> str:
+    cleaned = _XML_ILLEGAL_CTRL_RE.sub("", value)
+    return normalize_nfc(cleaned) if normalize_unicode_nfc else cleaned
+
+
 def sanitize_export_stem(title: str, book_id: uuid.UUID) -> str:
     """Create a deterministic, filesystem-safe filename stem from a book title."""
     cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "", title).strip()
@@ -71,32 +86,52 @@ def sanitize_export_stem(title: str, book_id: uuid.UUID) -> str:
     return cleaned[:80]
 
 
+def _set_telugu_rpr_fonts(element_rpr: Any, font_family: str) -> None:
+    rfonts = element_rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = OxmlElement("w:rFonts")
+        element_rpr.insert(0, rfonts)
+    rfonts.set(qn("w:ascii"), font_family)
+    rfonts.set(qn("w:hAnsi"), font_family)
+    rfonts.set(qn("w:cs"), font_family)
+    lang = element_rpr.find(qn("w:lang"))
+    if lang is None:
+        lang = OxmlElement("w:lang")
+        element_rpr.append(lang)
+    lang.set(qn("w:val"), "te-IN")
+    lang.set(qn("w:bidi"), "te-IN")
+
+
 def _configure_telugu_font(style: Any, font_family: str, size_pt: float, bold: bool = False) -> None:
     style.font.name = font_family
     style.font.size = Pt(size_pt)
     style.font.bold = bold
     rpr = style.element.get_or_add_rPr()
-    rfonts = rpr.find(qn("w:rFonts"))
-    if rfonts is None:
-        rfonts = OxmlElement("w:rFonts")
-        rpr.insert(0, rfonts)
-    rfonts.set(qn("w:ascii"), font_family)
-    rfonts.set(qn("w:hAnsi"), font_family)
-    rfonts.set(qn("w:cs"), font_family)
-    lang = rpr.find(qn("w:lang"))
-    if lang is None:
-        lang = OxmlElement("w:lang")
-        rpr.append(lang)
-    lang.set(qn("w:val"), "te-IN")
-    lang.set(qn("w:bidi"), "te-IN")
+    _set_telugu_rpr_fonts(rpr, font_family)
+
+
+def _apply_run_telugu_font(run: Any, font_family: str, size_pt: float, *, bold: bool = False) -> None:
+    run.font.size = Pt(size_pt)
+    run.font.bold = bold
+    rpr = run._r.get_or_add_rPr()
+    _set_telugu_rpr_fonts(rpr, font_family)
 
 
 def _append_field(paragraph: Any, instruction: str) -> None:
     run = paragraph.add_run()
-    fld_begin = parse_xml(rf'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
-    instr = parse_xml(rf'<w:instrText {nsdecls("w")} xml:space="preserve"> {instruction} </w:instrText>')
-    fld_sep = parse_xml(rf'<w:fldChar {nsdecls("w")} w:fldCharType="separate"/>')
-    fld_end = parse_xml(rf'<w:fldChar {nsdecls("w")} w:fldCharType="end"/>')
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" {instruction} "
+
+    fld_sep = OxmlElement("w:fldChar")
+    fld_sep.set(qn("w:fldCharType"), "separate")
+
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+
     run._r.append(fld_begin)
     run._r.append(instr)
     run._r.append(fld_sep)
@@ -189,40 +224,53 @@ def _collect_export_pages(
                     rect = pdf_doc.load_page(0).rect
                     fallback_first_page_dims = (float(rect.width), float(rect.height))
 
-    blocks_by_page: dict[uuid.UUID, list[OCRBlock]] = {}
+    # Project only needed scalar columns (never hydrating raw_engine_payload / polygon JSONB blobs).
+    blocks_by_page: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, str, str]]] = {}
     latest_edit_by_block: dict[uuid.UUID, str] = {}
     latest_action_by_block: dict[uuid.UUID, str] = {}
-    doc_block_by_ocr_id: dict[uuid.UUID, DocumentTextBlock] = {}
-    if selected_run is not None:
-        all_run_blocks = list(
-            db.scalars(
-                select(OCRBlock)
-                .where(OCRBlock.ocr_run_id == selected_run.id)
-                .order_by(OCRBlock.book_page_id, OCRBlock.reading_order, OCRBlock.block_index)
-            ).all()
-        )
-        for blk in all_run_blocks:
-            blocks_by_page.setdefault(blk.book_page_id, []).append(blk)
+    doc_block_by_ocr_id: dict[uuid.UUID, tuple[str, str]] = {}
 
-        if text_version != "raw_ocr" and all_run_blocks:
-            all_block_ids = [b.id for b in all_run_blocks]
-            for edit in db.scalars(
-                select(ReviewEdit)
-                .where(ReviewEdit.ocr_block_id.in_(all_block_ids))
-                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
-            ).all():
-                latest_edit_by_block[edit.ocr_block_id] = edit.edited_text
-                latest_action_by_block[edit.ocr_block_id] = edit.action
+    if selected_run is not None:
+        raw_block_rows = db.execute(
+            select(
+                OCRBlock.id,
+                OCRBlock.book_page_id,
+                OCRBlock.block_type,
+                OCRBlock.raw_text,
+            )
+            .where(OCRBlock.ocr_run_id == selected_run.id)
+            .order_by(OCRBlock.book_page_id, OCRBlock.reading_order, OCRBlock.block_index)
+        ).all()
+        for blk_id, blk_page_id, blk_type, blk_raw_text in raw_block_rows:
+            blocks_by_page.setdefault(blk_page_id, []).append((blk_id, blk_page_id, blk_type, blk_raw_text))
+
+        if text_version != "raw_ocr" and raw_block_rows:
+            # Fetch ONLY the latest ReviewEdit per block in SQL (eliminates full-history hydration & huge IN lists).
+            latest_edit_rows = db.execute(
+                select(ReviewEdit.ocr_block_id, ReviewEdit.edited_text, ReviewEdit.action)
+                .join(OCRBlock, ReviewEdit.ocr_block_id == OCRBlock.id)
+                .where(OCRBlock.ocr_run_id == selected_run.id)
+                .distinct(ReviewEdit.ocr_block_id)
+                .order_by(ReviewEdit.ocr_block_id, ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
+            ).all()
+            for eb_id, eb_text, eb_action in latest_edit_rows:
+                latest_edit_by_block[eb_id] = eb_text
+                latest_action_by_block[eb_id] = eb_action
 
             if version_row is not None:
-                for dblk in db.scalars(
-                    select(DocumentTextBlock).where(
+                doc_rows = db.execute(
+                    select(
+                        DocumentTextBlock.ocr_block_id,
+                        DocumentTextBlock.final_text,
+                        DocumentTextBlock.block_role,
+                    ).where(
                         DocumentTextBlock.version_id == version_row.id,
-                        DocumentTextBlock.ocr_block_id.in_(all_block_ids),
+                        DocumentTextBlock.ocr_block_id.is_not(None),
                     )
-                ).all():
-                    if dblk.ocr_block_id is not None:
-                        doc_block_by_ocr_id[dblk.ocr_block_id] = dblk
+                ).all()
+                for d_ocr_id, d_final_text, d_role in doc_rows:
+                    if d_ocr_id is not None:
+                        doc_block_by_ocr_id[d_ocr_id] = (d_final_text, d_role)
 
     collected: list[PageExportContent] = []
     reviewed_pages: list[int] = []
@@ -256,24 +304,19 @@ def _collect_export_pages(
         page_blocks: list[str] = []
         page_block_items: list[ExportBlockItem] = []
         if selected_run is not None:
-            ocr_blocks = blocks_by_page.get(page.id, [])
-            for blk in ocr_blocks:
+            for blk_id, _blk_page_id, blk_type, blk_raw_text in blocks_by_page.get(page.id, []):
                 if text_version == "raw_ocr":
-                    if blk.block_type == "manual_line":
+                    if blk_type == "manual_line":
                         continue
-                    txt = blk.raw_text
+                    txt = blk_raw_text
                     role = "paragraph"
                 else:
-                    dblk = doc_block_by_ocr_id.get(blk.id)
-                    action = latest_action_by_block.get(blk.id)
-                    role = dblk.block_role if dblk is not None else ("ignore" if action == "ignored" else "paragraph")
+                    dblk = doc_block_by_ocr_id.get(blk_id)
+                    action = latest_action_by_block.get(blk_id)
+                    role = dblk[1] if dblk is not None else ("ignore" if action == "ignored" else "paragraph")
                     if role == "ignore" or action == "ignored":
                         continue
-                    txt = (
-                        dblk.final_text
-                        if dblk is not None
-                        else latest_edit_by_block.get(blk.id, blk.raw_text)
-                    )
+                    txt = dblk[0] if dblk is not None else latest_edit_by_block.get(blk_id, blk_raw_text)
                 if txt.strip():
                     page_blocks.append(txt)
                     page_block_items.append(ExportBlockItem(text=txt, role=role))
@@ -325,10 +368,13 @@ def _build_docx_bytes(
     include_table_of_contents: bool,
     is_fully_reviewed: bool,
 ) -> tuple[bytes, dict[str, Any]]:
+    from docx.enum.style import WD_STYLE_TYPE
+
     doc = Document()
-    doc.core_properties.title = book.title
+    normalize_out = text_version != "raw_ocr"
+    doc.core_properties.title = _sanitize_xml_text(book.title, normalize_unicode_nfc=normalize_out)
     if book.author:
-        doc.core_properties.author = book.author
+        doc.core_properties.author = _sanitize_xml_text(book.author, normalize_unicode_nfc=normalize_out)
     doc.core_properties.comments = (
         f"Telugu Book Digitizer export ({layout_mode}, {text_version}, source_sha256={book.source_sha256})"
     )
@@ -338,6 +384,15 @@ def _build_docx_bytes(
     doc.styles["Normal"].paragraph_format.space_after = Pt(6)
     _configure_telugu_font(doc.styles["Heading 1"], font_family, 20, bold=True)
     _configure_telugu_font(doc.styles["Heading 2"], font_family, 15, bold=True)
+
+    if "TeluguVerse" not in doc.styles:
+        verse_style = doc.styles.add_style("TeluguVerse", WD_STYLE_TYPE.PARAGRAPH)
+        verse_style.base_style = doc.styles["Normal"]
+        _configure_telugu_font(verse_style, font_family, body_font_size, bold=False)
+        verse_style.paragraph_format.left_indent = Inches(0.35)
+        verse_style.paragraph_format.space_before = Pt(3)
+        verse_style.paragraph_format.space_after = Pt(4)
+        verse_style.paragraph_format.line_spacing = 1.25
 
     section = doc.sections[0]
     section.top_margin = Inches(1.0)
@@ -360,9 +415,13 @@ def _build_docx_bytes(
 
     # Document header block in editable_flow or unreviewed notice banner
     if layout_mode == "editable_flow":
-        doc.add_heading(book.title, level=1)
+        h_title = doc.add_heading("", level=1)
+        h_run = h_title.add_run(_sanitize_xml_text(book.title, normalize_unicode_nfc=normalize_out))
+        _apply_run_telugu_font(h_run, font_family, 20, bold=True)
         if book.author:
-            author_p = doc.add_paragraph(book.author)
+            author_p = doc.add_paragraph()
+            a_run = author_p.add_run(_sanitize_xml_text(book.author, normalize_unicode_nfc=normalize_out))
+            _apply_run_telugu_font(a_run, font_family, body_font_size)
             author_p.paragraph_format.space_after = Pt(10)
 
     if text_version == "raw_ocr":
@@ -396,31 +455,34 @@ def _build_docx_bytes(
 
         items = page.block_items or [ExportBlockItem(text=t, role="paragraph") for t in page.blocks]
         for item in items:
-            block_text = item.text
+            safe_text = _sanitize_xml_text(item.text, normalize_unicode_nfc=normalize_out)
+            if not safe_text.strip():
+                continue
             if item.role == "heading_1":
                 p = doc.add_heading(level=1)
-                run = p.add_run(block_text)
-                run.font.name = font_family
-                run.font.size = Pt(20)
-                run.font.bold = True
+                run = p.add_run(safe_text)
+                _apply_run_telugu_font(run, font_family, 20, bold=True)
             elif item.role == "heading_2":
                 p = doc.add_heading(level=2)
-                run = p.add_run(block_text)
-                run.font.name = font_family
-                run.font.size = Pt(15)
-                run.font.bold = True
+                run = p.add_run(safe_text)
+                _apply_run_telugu_font(run, font_family, 15, bold=True)
+            elif item.role == "verse":
+                p = doc.add_paragraph(style="TeluguVerse")
+                run = p.add_run(safe_text)
+                _apply_run_telugu_font(run, font_family, body_font_size)
             else:
                 p = doc.add_paragraph()
-                run = p.add_run(block_text)
-                run.font.name = font_family
-                run.font.size = Pt(body_font_size)
-            expected_blocks.append(block_text)
+                run = p.add_run(safe_text)
+                _apply_run_telugu_font(run, font_family, body_font_size)
+            expected_blocks.append(safe_text)
 
     buf = io.BytesIO()
     doc.save(buf)
     raw_bytes = buf.getvalue()
+    buf.close()
+    del doc
 
-    # Quality validation: re-open DOCX and verify every block is present in order.
+    # Streaming O(1)-DOM DOCX XML validation after releasing the builder DOM from RAM.
     validation = _validate_docx_bytes(
         raw_bytes=raw_bytes,
         expected_blocks=expected_blocks,
@@ -435,14 +497,55 @@ def _validate_docx_bytes(
     expected_blocks: list[str],
     expected_page_breaks: int,
 ) -> dict[str, Any]:
-    reopened = docx.Document(io.BytesIO(raw_bytes))
-    extracted_paras = [normalize_nfc(p.text).strip() for p in reopened.paragraphs if p.text.strip()]
+    """Validate DOCX package and text completeness using streaming iterparse (low peak RAM)."""
+    extracted_paras: list[str] = []
+    page_breaks = 0
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+            with zf.open("word/document.xml") as doc_xml:
+                p_depth = 0
+                para_chunks: list[str] = []
+                for event, elem in ET.iterparse(doc_xml, events=("start", "end")):
+                    tag = elem.tag
+                    if event == "start":
+                        if tag == _W_P_TAG:
+                            if p_depth == 0:
+                                para_chunks.clear()
+                            p_depth += 1
+                    else:
+                        if tag == _W_T_TAG and p_depth > 0 and elem.text:
+                            para_chunks.append(elem.text)
+                        elif tag == _W_TAB_TAG and p_depth > 0:
+                            para_chunks.append("\t")
+                        elif tag == _W_BR_TAG:
+                            if elem.attrib.get(_W_TYPE_ATTR) == "page":
+                                page_breaks += 1
+                            elif p_depth > 0:
+                                para_chunks.append("\n")
+                        elif tag == _W_P_TAG:
+                            p_depth = max(0, p_depth - 1)
+                            if p_depth == 0:
+                                text_val = normalize_nfc("".join(para_chunks)).strip()
+                                if text_val:
+                                    extracted_paras.append(text_val)
+                                para_chunks.clear()
+                                elem.clear()
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+        raise AppError(
+            "EXPORT_VALIDATION_FAILED",
+            f"Generated DOCX archive/XML failed validation: {exc}",
+            status_code=500,
+        ) from exc
 
     # Verify ordered subsequence match of all expected transcript blocks
     cursor = 0
     matched = 0
     for expected in expected_blocks:
-        exp_nfc = normalize_nfc(expected).strip()
+        exp_nfc = _sanitize_xml_text(expected, normalize_unicode_nfc=True).strip()
+        if not exp_nfc:
+            matched += 1
+            continue
         while cursor < len(extracted_paras):
             if extracted_paras[cursor] == exp_nfc:
                 matched += 1
@@ -450,8 +553,6 @@ def _validate_docx_bytes(
                 break
             cursor += 1
 
-    # Count explicit page breaks in XML
-    page_breaks = len(reopened.element.body.xpath(".//w:br[@w:type='page']"))
     passed = matched == len(expected_blocks) and page_breaks >= expected_page_breaks
     if not passed:
         raise AppError(
@@ -524,26 +625,16 @@ def create_book_export(
     include_page_numbers: bool = True,
     include_table_of_contents: bool = False,
 ) -> DocumentExport:
-    """Generate, validate, persist, and register a DOCX or UTF-8 TXT book export."""
+    """Generate and validate a DOCX or TXT book export, saving file + export manifest."""
     fmt = export_format.strip().lower()
+    layout = layout_mode.strip().lower()
+    ver = text_version.strip().lower()
     if fmt not in ALLOWED_FORMATS:
-        raise AppError(
-            "UNSUPPORTED_EXPORT_FORMAT",
-            f"Unsupported export format {export_format!r}. Allowed: {sorted(ALLOWED_FORMATS)}.",
-            status_code=400,
-        )
-    if fmt == "docx" and layout_mode not in ALLOWED_LAYOUT_MODES:
-        raise AppError(
-            "UNSUPPORTED_LAYOUT_MODE",
-            f"Unsupported layout_mode {layout_mode!r}. Allowed: {sorted(ALLOWED_LAYOUT_MODES)}.",
-            status_code=400,
-        )
-    if text_version not in ALLOWED_TEXT_VERSIONS:
-        raise AppError(
-            "UNSUPPORTED_TEXT_VERSION",
-            f"Unsupported text_version {text_version!r}. Allowed: {sorted(ALLOWED_TEXT_VERSIONS)}.",
-            status_code=400,
-        )
+        raise AppError("INVALID_EXPORT_FORMAT", f"Unsupported format {export_format!r}.", status_code=400)
+    if layout not in ALLOWED_LAYOUT_MODES:
+        raise AppError("INVALID_LAYOUT_MODE", f"Unsupported layout_mode {layout_mode!r}.", status_code=400)
+    if ver not in ALLOWED_TEXT_VERSIONS:
+        raise AppError("INVALID_TEXT_VERSION", f"Unsupported text_version {text_version!r}.", status_code=400)
 
     book = db.get(Book, book_id)
     if book is None:
@@ -553,96 +644,93 @@ def create_book_export(
         db=db,
         storage=storage,
         book=book,
-        text_version=text_version,
+        text_version=ver,
         primary_run_id=primary_run_id,
     )
 
-    stem = sanitize_export_stem(book.title, book.id)
+    clean_font = (font_family or "Noto Serif Telugu").strip() or "Noto Serif Telugu"
+    size_pt = max(9, min(int(body_font_size), 24))
+
     if fmt == "docx":
-        mode_slug = "editable-flow" if layout_mode == "editable_flow" else "page-preserving"
-        filename = f"{stem}_{mode_slug}.docx"
         out_bytes, validation = _build_docx_bytes(
             book=book,
             pages=pages,
-            layout_mode=layout_mode,
-            text_version=text_version,
-            font_family=font_family,
-            body_font_size=body_font_size,
+            layout_mode=layout,
+            text_version=ver,
+            font_family=clean_font,
+            body_font_size=size_pt,
             include_page_numbers=include_page_numbers,
             include_table_of_contents=include_table_of_contents,
             is_fully_reviewed=is_fully_reviewed,
         )
-        effective_mode = layout_mode
-        exporter_lib = f"python-docx=={docx.__version__}"
+        suffix = f"{layout.replace('_', '-')}.docx"
     else:
-        filename = f"{stem}.txt"
         out_bytes, validation = _build_txt_bytes(pages=pages)
-        effective_mode = "plain_text"
-        exporter_lib = "python-utf8"
+        suffix = "plain.txt"
 
     export_id = uuid.uuid4()
+    stem = sanitize_export_stem(book.title, book.id)
+    filename = f"{stem}_{ver}_{suffix}"
     storage_key = f"exports/{book.id}/{export_id}/{filename}"
     manifest_key = f"exports/{book.id}/{export_id}/export-manifest.json"
-    created_at = datetime.now(timezone.utc)
-
-    manifest_payload = {
-        "export_id": str(export_id),
-        "book_id": str(book.id),
-        "title": book.title,
-        "transcript_version_id": str(version_id) if version_id else None,
-        "text_version": text_version,
-        "format": fmt,
-        "layout_mode": effective_mode,
-        "font_family": font_family,
-        "exporter_library": exporter_lib,
-        "created_at": created_at.isoformat(),
-        "source_pdf_sha256": book.source_sha256,
-        "included_pages": [p.page_number for p in pages],
-        "reviewed_pages": reviewed_pages,
-        "is_fully_reviewed": is_fully_reviewed,
-        "validation": validation,
-    }
 
     storage.write_bytes(storage_key, out_bytes, read_only=False)
+    manifest_payload = {
+        "schema_version": 1,
+        "export_id": str(export_id),
+        "book_id": str(book.id),
+        "book_title": book.title,
+        "source_pdf_sha256": book.source_sha256,
+        "transcript_version_id": str(version_id) if version_id else None,
+        "format": fmt,
+        "layout_mode": layout,
+        "text_version": ver,
+        "font_family": clean_font,
+        "body_font_size": size_pt,
+        "is_fully_reviewed": is_fully_reviewed,
+        "included_pages": [p.page_number for p in pages],
+        "reviewed_pages": reviewed_pages,
+        "validation": validation,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
     storage.write_json(manifest_key, manifest_payload)
 
-    export_row = DocumentExport(
+    record = DocumentExport(
         id=export_id,
         book_id=book.id,
         transcript_version_id=version_id,
         format=fmt,
-        layout_mode=effective_mode,
-        text_version=text_version,
-        font_family=font_family,
+        layout_mode=layout,
+        text_version=ver,
+        font_family=clean_font,
         filename=filename,
         storage_key=storage_key,
         manifest_storage_key=manifest_key,
         status="completed",
         is_fully_reviewed=is_fully_reviewed,
         options={
-            "body_font_size": body_font_size,
+            "body_font_size": size_pt,
             "include_page_numbers": include_page_numbers,
             "include_table_of_contents": include_table_of_contents,
             "primary_run_id": str(primary_run_id) if primary_run_id else None,
         },
         validation=validation,
-        created_at=created_at,
     )
-    db.add(export_row)
+    db.add(record)
     db.commit()
-    db.refresh(export_row)
-
+    db.refresh(record)
     log_event(
         LOGGER,
         logging.INFO,
         "Created validated book export",
-        export_id=str(export_id),
         book_id=str(book.id),
+        export_id=str(export_id),
         format=fmt,
-        layout_mode=effective_mode,
+        layout_mode=layout,
+        text_version=ver,
         is_fully_reviewed=is_fully_reviewed,
     )
-    return export_row
+    return record
 
 
 def list_book_exports(db: Session, book_id: uuid.UUID) -> list[DocumentExport]:

@@ -2,7 +2,7 @@
 # Caddy obtains and renews Let's Encrypt HTTPS certificates for lahari.org automatically.
 {$APP_DOMAIN:lahari.org}, www.{$APP_DOMAIN:lahari.org} {
 	request_body {
-		max_size 250MB
+		max_size 205MB
 	}
 
 	header {
@@ -10,6 +10,7 @@
 		X-Content-Type-Options nosniff
 		X-Frame-Options SAMEORIGIN
 		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 		-Server
 	}
 

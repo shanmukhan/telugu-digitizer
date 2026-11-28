@@ -221,8 +221,10 @@ def render_markdown_report(
         cold_str = f"{cold_ms:.1f} ms" if isinstance(cold_ms, (int, float)) else "N/A (per-invocation CLI)"
         warm_page_ms = meta.get("warmup_elapsed_ms")
         warm_str = f"{warm_page_ms:.1f} ms" if isinstance(warm_page_ms, (int, float)) else "not run"
+        peak_rss = meta.get("peak_rss_mb")
+        rss_str = f"{peak_rss:.1f} MiB" if isinstance(peak_rss, (int, float)) else "not recorded"
         lines.append(
-            f"- **{engine}**: `model_id={meta.get('model_id')}`, init cold start={cold_str}, warmup page={warm_str}"
+            f"- **{engine}**: `model_id={meta.get('model_id')}`, init cold start={cold_str}, warmup page={warm_str}, peak RSS={rss_str}"
         )
 
     lines.extend(
@@ -230,8 +232,8 @@ def render_markdown_report(
             "",
             "## Overall Benchmark Results",
             "",
-            "| Engine | Scored Pages | CER | NFC CER | WER | Grapheme ER | Exact-line % | Median sec/page | Pages/min |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| Engine | Scored Pages | CER | NFC CER | WER | Grapheme ER | Exact-line % | Median sec/page | Mean sec/page | P95 sec/page | Pages/min |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for engine, m in sorted(overall.items()):
@@ -239,7 +241,8 @@ def render_markdown_report(
             f"| `{engine}` | {m['pages_scored']} / {m['pages_total']} | "
             f"{_fmt_pct(m['cer'])} | {_fmt_pct(m['nfc_cer'])} | {_fmt_pct(m['wer'])} | "
             f"{_fmt_pct(m['grapheme_er'])} | {_fmt_pct(m['exact_line_accuracy'])} | "
-            f"{_fmt_num(m['median_sec_per_page'])} | {_fmt_num(m['pages_per_minute'], 2)} |"
+            f"{_fmt_num(m['median_sec_per_page'])} | {_fmt_num(m.get('mean_sec_per_page'))} | "
+            f"{_fmt_num(m.get('p95_sec_per_page'))} | {_fmt_num(m['pages_per_minute'], 2)} |"
         )
 
     for dim_title, dim_key in (

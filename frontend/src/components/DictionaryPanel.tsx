@@ -200,15 +200,30 @@ export function DictionaryPanel({
     }
   }
 
-  function handleApplySpellFix(token: string, replacement: string) {
-    setCheckInput((prev) => prev.replace(token, replacement));
+  function handleApplySpellFix(token: string, replacement: string, tokenIndex?: number) {
+    setCheckInput((prev) => {
+      if (tokenIndex !== undefined) {
+        const matches = Array.from(prev.matchAll(/\S+/g));
+        const match = matches[tokenIndex];
+        if (match && match.index !== undefined) {
+          const innerPos = match[0].indexOf(token);
+          if (innerPos >= 0) {
+            const absStart = match.index + innerPos;
+            return prev.slice(0, absStart) + replacement + prev.slice(absStart + token.length);
+          }
+        }
+      }
+      return prev.replace(token, replacement);
+    });
     setCheckResult((prev) =>
       prev
         ? {
             ...prev,
             known_words_count: prev.known_words_count + 1,
             unknown_words_count: Math.max(0, prev.unknown_words_count - 1),
-            issues: prev.issues.filter((i) => i.token !== token),
+            issues: prev.issues.filter((i) =>
+              tokenIndex !== undefined ? i.token_index !== tokenIndex : i.token !== token,
+            ),
           }
         : null,
     );
@@ -624,7 +639,7 @@ export function DictionaryPanel({
                             key={sug}
                             type="button"
                             className="btn-compact primary"
-                            onClick={() => handleApplySpellFix(issue.token, sug)}
+                            onClick={() => handleApplySpellFix(issue.token, sug, issue.token_index)}
                           >
                             → <span lang="te">{sug}</span>
                           </button>

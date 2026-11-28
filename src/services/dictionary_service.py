@@ -10,10 +10,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
+from src.common.cache_state import bump_sentence_context_epoch
 from src.db.models import CustomDictionaryWord
 from src.evaluation.metrics import normalize_nfc
 from src.services.lexicon_service import (
@@ -22,6 +23,7 @@ from src.services.lexicon_service import (
     _strip_edge_punct,
     get_telugu_lexicon,
     is_telugu_word,
+    strip_telugu_joiners,
     telugu_ocr_edit_distance,
 )
 
@@ -108,12 +110,13 @@ def _suggest_alternatives(
             }
         )
 
-    cands = lexicon._raw_candidates_for_unit(clean, custom_ctx)
+    clean_no_joiner = strip_telugu_joiners(clean)
+    cands = lexicon._raw_candidates_for_unit(clean_no_joiner, custom_ctx)
     ranked: list[tuple[float, str]] = []
     for c in cands:
         if c in seen:
             continue
-        dist = telugu_ocr_edit_distance(clean, c)
+        dist = telugu_ocr_edit_distance(clean_no_joiner, c)
         if dist <= 1.8:
             weight = lexicon.words.get(c, 50)
             score = -dist * 2.0 + (0.25 if weight >= 500 else 0.0) + min(weight, 5000) / 10000.0
@@ -233,41 +236,54 @@ def search_dictionary(
     seen_words: set[str] = set()
     exact_match = False
 
-    # 1. Search PostgreSQL custom words first.
-    q_lower = q_clean.lower()
-    custom_rows = list(
-        db.scalars(
+    # 1. Search PostgreSQL custom words first using SQL filtering (bounded, no full-table load).
+    if effective_mode == "telugu":
+        custom_stmt = (
             select(CustomDictionaryWord)
-            .where(CustomDictionaryWord.language_code == "te")
-            .order_by(CustomDictionaryWord.created_at.desc())
-        ).all()
-    )
-    for row in custom_rows:
-        w_nfc = normalize_nfc(row.word).strip()
-        matched_custom = False
-        if effective_mode == "telugu":
-            matched_custom = w_nfc == q_clean or w_nfc.startswith(q_clean)
-        else:
-            haystack = " ".join(
-                filter(None, [row.translit, row.meaning_en, row.meaning_te, row.notes])
-            ).lower()
-            matched_custom = q_lower in haystack
-        if matched_custom:
-            if w_nfc == q_clean:
-                exact_match = True
-            seen_words.add(w_nfc)
-            items.append(
-                {
-                    "word": w_nfc,
-                    "weight": 10000,
-                    "sources": ["Custom Dictionary"],
-                    "translit": row.translit or "",
-                    "has_definition": bool(_custom_word_definitions(row)),
-                    "is_custom": True,
-                    "custom_word_id": row.id,
-                    "definitions": _custom_word_definitions(row),
-                }
+            .where(
+                CustomDictionaryWord.language_code == "te",
+                or_(
+                    CustomDictionaryWord.word == q_clean,
+                    CustomDictionaryWord.word.startswith(q_clean),
+                ),
             )
+            .order_by(CustomDictionaryWord.created_at.desc())
+            .limit(safe_limit)
+        )
+    else:
+        like_pat = f"%{q_clean}%"
+        custom_stmt = (
+            select(CustomDictionaryWord)
+            .where(
+                CustomDictionaryWord.language_code == "te",
+                or_(
+                    CustomDictionaryWord.translit.ilike(like_pat),
+                    CustomDictionaryWord.meaning_en.ilike(like_pat),
+                    CustomDictionaryWord.meaning_te.ilike(like_pat),
+                    CustomDictionaryWord.notes.ilike(like_pat),
+                ),
+            )
+            .order_by(CustomDictionaryWord.created_at.desc())
+            .limit(safe_limit)
+        )
+
+    for row in db.scalars(custom_stmt).all():
+        w_nfc = normalize_nfc(row.word).strip()
+        if w_nfc == q_clean:
+            exact_match = True
+        seen_words.add(w_nfc)
+        items.append(
+            {
+                "word": w_nfc,
+                "weight": 10000,
+                "sources": ["Custom Dictionary"],
+                "translit": row.translit or "",
+                "has_definition": bool(_custom_word_definitions(row)),
+                "is_custom": True,
+                "custom_word_id": row.id,
+                "definitions": _custom_word_definitions(row),
+            }
+        )
 
     # 2. Search SQLite reference dictionary.
     conn = _open_readonly_sqlite(dictionary_db_path)
@@ -332,7 +348,7 @@ def search_dictionary(
                         break
             else:
                 # English meaning or Latin transliteration search via FTS5.
-                tokens = _FTS_TOKEN_RE.findall(q_lower)
+                tokens = _FTS_TOKEN_RE.findall(q_clean.lower())
                 if tokens:
                     if len(tokens) == 1:
                         fts_query = f'"{tokens[0]}"*'
@@ -545,24 +561,34 @@ def check_telugu_text(
     }
 
 
-def list_custom_words(db: Session, query: str | None = None) -> list[CustomDictionaryWord]:
-    stmt = (
-        select(CustomDictionaryWord)
-        .where(CustomDictionaryWord.language_code == "te")
-        .order_by(CustomDictionaryWord.created_at.desc())
-    )
-    rows = list(db.scalars(stmt).all())
+def list_custom_words(
+    db: Session,
+    query: str | None = None,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[CustomDictionaryWord]:
+    stmt = select(CustomDictionaryWord).where(CustomDictionaryWord.language_code == "te")
     if query and query.strip():
-        q_nfc = normalize_nfc(query).strip().lower()
-        rows = [
-            r
-            for r in rows
-            if q_nfc in normalize_nfc(r.word).lower()
-            or (r.meaning_en and q_nfc in r.meaning_en.lower())
-            or (r.meaning_te and q_nfc in normalize_nfc(r.meaning_te).lower())
-            or (r.translit and q_nfc in r.translit.lower())
-        ]
-    return rows
+        q_nfc = normalize_nfc(query).strip()
+        pat = f"%{q_nfc}%"
+        stmt = stmt.where(
+            or_(
+                CustomDictionaryWord.word.ilike(pat),
+                CustomDictionaryWord.meaning_en.ilike(pat),
+                CustomDictionaryWord.meaning_te.ilike(pat),
+                CustomDictionaryWord.translit.ilike(pat),
+            )
+        )
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    return list(
+        db.scalars(
+            stmt.order_by(CustomDictionaryWord.created_at.desc())
+            .limit(safe_limit)
+            .offset(safe_offset)
+        ).all()
+    )
 
 
 def create_custom_word(
@@ -600,6 +626,7 @@ def create_custom_word(
         if notes is not None:
             existing.notes = notes.strip() or None
         db.commit()
+        bump_sentence_context_epoch()
         db.refresh(existing)
         return existing
 
@@ -613,6 +640,7 @@ def create_custom_word(
     )
     db.add(entry)
     db.commit()
+    bump_sentence_context_epoch()
     db.refresh(entry)
     LOGGER.info("Added custom Telugu dictionary word: %s", entry.word)
     return entry
@@ -624,3 +652,4 @@ def delete_custom_word(db: Session, word_id: uuid.UUID) -> None:
         raise AppError("CUSTOM_WORD_NOT_FOUND", f"Custom word {word_id} not found.", status_code=404)
     db.delete(row)
     db.commit()
+    bump_sentence_context_epoch()

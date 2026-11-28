@@ -21,15 +21,29 @@ def _pg_bin(name: str) -> str:
     return str(bin_path)
 
 
-def init_and_start(pgdata: Path, port: int) -> None:
+def init_and_start(
+    pgdata: Path,
+    port: int,
+    *,
+    auth_method: str = "trust",
+    superuser_password: str | None = None,
+) -> None:
     pgdata.parent.mkdir(parents=True, exist_ok=True)
     log_file = pgdata.parent / "postgres.log"
 
     if not (pgdata / "PG_VERSION").is_file():
-        subprocess.run(
-            [_pg_bin("initdb"), "-D", str(pgdata), "-U", "postgres", "--auth=trust", "--encoding=UTF8"],
-            check=True,
-        )
+        init_cmd = [_pg_bin("initdb"), "-D", str(pgdata), "-U", "postgres", f"--auth={auth_method}", "--encoding=UTF8"]
+        pwfile_path: Path | None = None
+        if superuser_password:
+            pwfile_path = pgdata.parent / ".pg_init_pw"
+            pwfile_path.write_text(superuser_password + "\n", encoding="utf-8")
+            os.chmod(pwfile_path, 0o600)
+            init_cmd.extend(["--pwfile", str(pwfile_path)])
+        try:
+            subprocess.run(init_cmd, check=True)
+        finally:
+            if pwfile_path is not None and pwfile_path.exists():
+                pwfile_path.unlink()
         conf = pgdata / "postgresql.conf"
         with conf.open("a", encoding="utf-8") as handle:
             handle.write(f"\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = '{pgdata.parent}'\n")
@@ -43,6 +57,8 @@ def init_and_start(pgdata: Path, port: int) -> None:
 
     # Ensure role and database exist idempotently.
     env = {**os.environ, "PGHOST": "127.0.0.1", "PGPORT": str(port)}
+    if superuser_password and "PGPASSWORD" not in env:
+        env["PGPASSWORD"] = superuser_password
     role_exists = subprocess.run(
         [_pg_bin("psql"), "-U", "postgres", "-d", "postgres", "-tAc", "SELECT 1 FROM pg_roles WHERE rolname='telugu_digitizer';"],
         capture_output=True,
@@ -83,10 +99,17 @@ def main() -> int:
     parser.add_argument("action", choices=["start", "stop", "status"])
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--pgdata", type=Path, default=_repo_root() / ".tools" / "pgdata")
+    parser.add_argument("--auth", choices=["trust", "scram-sha-256"], default="trust")
+    parser.add_argument("--superuser-password", default=None)
     args = parser.parse_args()
 
     if args.action == "start":
-        init_and_start(args.pgdata, args.port)
+        init_and_start(
+            args.pgdata,
+            args.port,
+            auth_method=args.auth,
+            superuser_password=args.superuser_password,
+        )
         print(f"PostgreSQL running on 127.0.0.1:{args.port} (data={args.pgdata})")
     elif args.action == "stop":
         stop(args.pgdata)

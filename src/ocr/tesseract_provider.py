@@ -14,6 +14,7 @@ from typing import Any
 from src.common.io import sha256_file
 from src.common.manifest import resolve_tesseract_command
 from src.ocr.base import OCRProvider
+from src.ocr.layout import order_ocr_blocks_geometrically
 
 
 @functools.lru_cache(maxsize=16)
@@ -88,7 +89,7 @@ def parse_tesseract_tsv(tsv_text: str) -> list[dict[str, Any]]:
                 "reading_order": block_idx,
             }
         )
-    return blocks
+    return order_ocr_blocks_geometrically(blocks)
 
 
 class TesseractOCRProvider(OCRProvider):
@@ -103,6 +104,7 @@ class TesseractOCRProvider(OCRProvider):
         oem: int = 1,
         psm: int = 6,
         tesseract_cmd: str | None = None,
+        timeout_sec: float | None = 180.0,
     ) -> None:
         if lang != "tel":
             raise ValueError(f"Phase 1 requires Tesseract Telugu lang='tel', got {lang!r}.")
@@ -121,6 +123,7 @@ class TesseractOCRProvider(OCRProvider):
         self.oem = oem
         self.psm = int(psm)
         self.tesseract_cmd = resolve_tesseract_command(tesseract_cmd)
+        self.timeout_sec = float(timeout_sec) if timeout_sec is not None else None
         st = self.traineddata_path.stat()
         self.traineddata_sha256 = _cached_traineddata_sha256(
             str(self.traineddata_path.resolve()),
@@ -175,7 +178,12 @@ class TesseractOCRProvider(OCRProvider):
                 "tessedit_create_txt=1",
             ]
             t0 = time.perf_counter()
-            proc = subprocess.run(cmd, capture_output=True)
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=self.timeout_sec)
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError(
+                    f"Tesseract timed out after {self.timeout_sec}s on {img.name}"
+                ) from exc
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
             if proc.returncode != 0:

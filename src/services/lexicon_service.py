@@ -22,10 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.api.errors import AppError
+from src.common.cache_state import current_sentence_context_epoch
 from src.db.models import (
     Book,
     BookPage,
@@ -44,8 +45,24 @@ LOGGER = logging.getLogger("telugu_digitizer.services.lexicon")
 _DEFAULT_LEXICON_PATH = Path(__file__).resolve().parents[2] / "models" / "lexicon" / "telugu_lexicon.tsv.gz"
 
 _EDGE_PUNCT = ".,!?;:\"'()[]{}—–-।॥“”‘’/\\|•*"
-_TELUGU_WORD_RE = re.compile(r"^[\u0C01-\u0C63\u0C78-\u0C7F]+$")
+_TELUGU_WORD_RE = re.compile(r"^[\u0C00-\u0C63\u0C78-\u0C7F\u200C\u200D]+$")
 _TELUGU_LETTER_RE = re.compile(r"[\u0C05-\u0C39\u0C58-\u0C61]")
+_SPLIT_KEEP_WS_RE = re.compile(r"(\s+)")
+
+
+def strip_telugu_joiners(token: str) -> str:
+    """Remove ZWNJ/ZWJ joiners cleanly for base lexicon matching."""
+    return token.replace("\u200c", "").replace("\u200d", "")
+
+
+def _is_valid_word_final_pollu(token: str) -> bool:
+    """Return True when joiners appear strictly as classical word-final nakara-pollu (న్‍ / న్‌)."""
+    return (
+        len(token) >= 3
+        and token.endswith(("న్\u200d", "న్\u200c"))
+        and "\u200c" not in token[:-1]
+        and "\u200d" not in token[:-1]
+    )
 _TELUGU_MATRAS = ("ా", "ి", "ీ", "ు", "ూ", "ృ", "ె", "ే", "ై", "ొ", "ో", "ౌ", "ం", "్", "ః")
 
 # Common Telugu case markers, plural suffixes, and postpositions so valid inflections are not mis-flagged.
@@ -327,15 +344,16 @@ class TeluguLexicon:
 
             skel = visual_skeleton(w)
             bucket = self.skeleton_index[skel]
-            if len(bucket) < 10:
+            cap = 48 if w in self.curated else 32
+            if len(bucket) < cap:
                 bucket.append(w)
 
-            # Index 1-char deletes for top 60k words (low RAM, catches missing/extra chars).
-            if idx < 60_000 and 4 <= len(w) <= 22:
+            # Index 1-char deletes for top 100k words (low RAM, catches missing/extra chars in literary Telugu).
+            if idx < 100_000 and 4 <= len(w) <= 22:
                 for pos in range(len(w)):
                     dkey = w[:pos] + w[pos + 1 :]
                     dbucket = self.delete1_index[dkey]
-                    if len(dbucket) < 6:
+                    if len(dbucket) < 8:
                         dbucket.append(w)
 
     @classmethod
@@ -366,6 +384,8 @@ class TeluguLexicon:
 
     def is_known_word(self, word: str, context: SentenceContextModel | None = None) -> bool:
         """Check exact lexicon, verified DB vocab, inflected suffix forms, and simple 2-part compounds."""
+        if _is_valid_word_final_pollu(word):
+            word = strip_telugu_joiners(word)
         if self.has_exact(word, context):
             return True
         # Check common Telugu suffixes.
@@ -476,24 +496,38 @@ class TeluguLexicon:
         if self.is_known_word(token, context):
             return None
 
+        # Spurious mid-word ZWNJ/ZWJ (common Tesseract conjunct artifact): strip joiners first.
+        has_joiner = "\u200c" in token or "\u200d" in token
+        work_token = strip_telugu_joiners(token) if has_joiner else token
+        if has_joiner and work_token != token and self.is_known_word(work_token, context):
+            return {
+                "original": token,
+                "replacement": work_token,
+                "source": "dictionary",
+                "confidence": 0.94,
+                "reason": "Removed spurious ZWNJ/ZWJ joiner inside Telugu conjunct",
+            }
+        if len(work_token) < 3:
+            return None
+
         candidates: dict[str, str] = {}  # candidate_word -> kind
-        for c in self._raw_candidates_for_unit(token, context):
+        for c in self._raw_candidates_for_unit(work_token, context):
             candidates[c] = "direct"
 
         # Suffix-preserved stem correction (e.g., వర్ధనలు -> వర్ణన + లు).
         for suf in _TELUGU_SUFFIXES:
-            if len(token) > len(suf) + 3 and token.endswith(suf):
-                stem = token[: -len(suf)]
+            if len(work_token) > len(suf) + 3 and work_token.endswith(suf):
+                stem = work_token[: -len(suf)]
                 for stem_cand in self._raw_candidates_for_unit(stem, context):
                     full_cand = stem_cand + suf
-                    if full_cand != token and full_cand not in candidates:
+                    if full_cand != work_token and full_cand not in candidates:
                         candidates[full_cand] = "suffix"
 
         # Compound-preserved correction (e.g., అష్టాదశ + వర్ధనలు -> అష్టాదశవర్ణనలు).
-        if not candidates and len(token) >= 8:
-            for split_at in range(3, len(token) - 3):
-                left = token[:split_at]
-                right = token[split_at:]
+        if not candidates and len(work_token) >= 8:
+            for split_at in range(3, len(work_token) - 3):
+                left = work_token[:split_at]
+                right = work_token[split_at:]
                 if self.has_exact(left, context) and not self._is_known_or_suffixed(right, context):
                     right_cands = self._raw_candidates_for_unit(right, context)
                     for suf in _TELUGU_SUFFIXES:
@@ -503,26 +537,26 @@ class TeluguLexicon:
                                 right_cands.add(sc + suf)
                     for rc in right_cands:
                         full_cand = left + rc
-                        if full_cand != token:
+                        if full_cand != work_token:
                             candidates[full_cand] = "compound"
                 elif self._is_known_or_suffixed(right, context) and not self.has_exact(left, context):
                     for lc in self._raw_candidates_for_unit(left, context):
                         full_cand = lc + right
-                        if full_cand != token:
+                        if full_cand != work_token:
                             candidates[full_cand] = "compound"
 
         if not candidates:
             return None
 
-        max_dist = 1.15 if len(token) <= 6 else 1.45
+        max_dist = 1.15 if len(work_token) <= 6 else 1.45
         scored: list[tuple[float, float, str, str, bool]] = []
         for cand, kind in candidates.items():
-            dist = telugu_ocr_edit_distance(token, cand)
+            dist = telugu_ocr_edit_distance(work_token, cand)
             if dist <= 0.0 or dist > max_dist:
                 continue
 
             # Base similarity from OCR distance.
-            denom = max(2.2, len(token) * 0.42)
+            denom = max(2.2, len(work_token) * 0.42)
             base_conf = max(0.0, 1.0 - (dist / denom))
 
             # Lexicon prior.
@@ -577,7 +611,9 @@ class TeluguLexicon:
                 return None
 
         source = "sentence_context" if used_context else "dictionary"
-        reason = _describe_ocr_change(token, best_cand)
+        reason = _describe_ocr_change(work_token, best_cand)
+        if has_joiner:
+            reason += " + cleaned ZWNJ/ZWJ"
         if best_kind == "compound":
             reason += " (compound)"
         if used_context:
@@ -610,14 +646,70 @@ def get_telugu_lexicon(lexicon_path: Path | None = None) -> TeluguLexicon:
         return lexicon
 
 
+_CONTEXT_LOCK = threading.Lock()
+_CONTEXT_CACHE: dict[tuple[str, str], tuple[tuple[Any, ...], SentenceContextModel]] = {}
+_MAX_CACHED_BOOK_CONTEXTS = 16
+
+
+def _sentence_context_signature(
+    *,
+    db: Session,
+    book_id: uuid.UUID,
+    language_code: str,
+) -> tuple[Any, ...]:
+    """Compute a fast sub-millisecond freshness signature for cached bigram context models."""
+    block_cnt = db.scalar(
+        select(func.count(DocumentTextBlock.id))
+        .join(DocumentTextVersion, DocumentTextBlock.version_id == DocumentTextVersion.id)
+        .join(Book, DocumentTextVersion.book_id == Book.id)
+        .where(Book.language_code == language_code, DocumentTextBlock.block_role != "ignore")
+    )
+    corr_cnt, corr_sum = db.execute(
+        select(
+            func.count(CorrectionMemory.id),
+            func.coalesce(func.sum(CorrectionMemory.approved_count), 0),
+        ).where(
+            CorrectionMemory.language_code == language_code,
+            CorrectionMemory.status == "active",
+            or_(CorrectionMemory.scope == "global_suggestion", CorrectionMemory.book_id == book_id),
+        )
+    ).one()
+    cw_cnt, cw_max_ts = db.execute(
+        select(
+            func.count(CustomDictionaryWord.id),
+            func.max(CustomDictionaryWord.updated_at),
+        ).where(CustomDictionaryWord.language_code == language_code)
+    ).one()
+    return (
+        current_sentence_context_epoch(),
+        int(block_cnt or 0),
+        int(corr_cnt or 0),
+        int(corr_sum or 0),
+        int(cw_cnt or 0),
+        cw_max_ts.isoformat() if cw_max_ts is not None else "",
+    )
+
+
 def build_sentence_context_model(
     *,
     db: Session,
     book_id: uuid.UUID,
     language_code: str = "te",
     max_global_blocks: int = 15_000,
+    use_cache: bool = True,
 ) -> SentenceContextModel:
-    """Build an in-memory Telugu vocabulary & bigram model from verified PostgreSQL records."""
+    """Build or return a cached in-memory Telugu vocabulary & bigram model from PostgreSQL."""
+    bind = db.get_bind()
+    bind_key = str(getattr(bind, "url", "")) if bind is not None else ""
+    cache_key = (f"{bind_key}:{language_code}:{max_global_blocks}", str(book_id))
+    signature = _sentence_context_signature(db=db, book_id=book_id, language_code=language_code)
+
+    if use_cache:
+        with _CONTEXT_LOCK:
+            cached = _CONTEXT_CACHE.get(cache_key)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+
     model = SentenceContextModel()
 
     # Harvest human-verified DocumentTextBlocks across books (weighting current book higher).
@@ -638,19 +730,20 @@ def build_sentence_context_model(
         same_book = row_book_id == book_id
         model.add_sentence(final_text, same_book=same_book, weight=3 if same_book else 1)
 
-    # Also harvest verified spans & contexts from active correction_memory.
+    # Also harvest verified spans & contexts from active correction_memory relevant to this book.
     corr_rows = db.scalars(
         select(CorrectionMemory).where(
             CorrectionMemory.language_code == language_code,
             CorrectionMemory.status == "active",
+            or_(
+                CorrectionMemory.scope == "global_suggestion",
+                CorrectionMemory.book_id == book_id,
+            ),
+            CorrectionMemory.approved_count > CorrectionMemory.rejected_count,
         )
     ).all()
     for corr in corr_rows:
-        if corr.approved_count <= corr.rejected_count:
-            continue
         same_book = corr.book_id == book_id
-        if corr.scope == "book_only" and not same_book:
-            continue
         model.add_correction_context(
             corr.corrected_text,
             corr.left_context,
@@ -666,6 +759,13 @@ def build_sentence_context_model(
     for cw in custom_words:
         if cw:
             model.add_sentence(cw, same_book=True, weight=5)
+
+    if use_cache:
+        with _CONTEXT_LOCK:
+            if len(_CONTEXT_CACHE) >= _MAX_CACHED_BOOK_CONTEXTS and cache_key not in _CONTEXT_CACHE:
+                oldest_key = next(iter(_CONTEXT_CACHE))
+                _CONTEXT_CACHE.pop(oldest_key, None)
+            _CONTEXT_CACHE[cache_key] = (signature, model)
 
     return model
 
@@ -728,16 +828,25 @@ def _autocorrect_single_block(
 
     # Layer 2 & 3: Telugu dictionary + OCR visual confusion + sentence/bigram context.
     if use_dictionary:
-        tokens = working_text.split()
-        if tokens:
-            cores = [_strip_edge_punct(t)[1] for t in tokens]
-            new_tokens = list(tokens)
-            for idx, raw_tok in enumerate(tokens):
+        parts = _SPLIT_KEEP_WS_RE.split(working_text)
+        word_slots = [pos for pos, seg in enumerate(parts) if seg and not seg.isspace()]
+        if word_slots:
+            cores = [_strip_edge_punct(parts[pos])[1] for pos in word_slots]
+            for word_idx, part_pos in enumerate(word_slots):
+                raw_tok = parts[part_pos]
                 lead, core, trail = _strip_edge_punct(raw_tok)
                 if not core or not is_telugu_word(core):
                     continue
-                prev_core = cores[idx - 1] if idx > 0 and is_telugu_word(cores[idx - 1]) else None
-                next_core = cores[idx + 1] if idx + 1 < len(cores) and is_telugu_word(cores[idx + 1]) else None
+                prev_core = (
+                    strip_telugu_joiners(cores[word_idx - 1])
+                    if word_idx > 0 and is_telugu_word(cores[word_idx - 1])
+                    else None
+                )
+                next_core = (
+                    strip_telugu_joiners(cores[word_idx + 1])
+                    if word_idx + 1 < len(cores) and is_telugu_word(cores[word_idx + 1])
+                    else None
+                )
                 proposal = lexicon.suggest_word(
                     core,
                     prev_word=prev_core,
@@ -747,10 +856,10 @@ def _autocorrect_single_block(
                     min_confidence=min_confidence,
                 )
                 if proposal is not None:
-                    new_tokens[idx] = f"{lead}{proposal['replacement']}{trail}"
-                    cores[idx] = proposal["replacement"]
+                    parts[part_pos] = f"{lead}{proposal['replacement']}{trail}"
+                    cores[word_idx] = proposal["replacement"]
                     changes.append(proposal)
-            working_text = " ".join(new_tokens)
+            working_text = "".join(parts)
 
     return working_text, changes
 
@@ -787,6 +896,10 @@ def propose_page_autocorrections(
                 select(CorrectionMemory).where(
                     CorrectionMemory.language_code == book.language_code,
                     CorrectionMemory.status == "active",
+                    or_(
+                        CorrectionMemory.scope == "global_suggestion",
+                        CorrectionMemory.book_id == book.id,
+                    ),
                 )
             ).all()
         )

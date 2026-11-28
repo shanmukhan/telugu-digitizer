@@ -13,6 +13,9 @@ export interface EngineCapability {
 export interface HostCapabilities {
   platform_machine: string;
   auth_enabled: boolean;
+  guest_ocr_enabled?: boolean;
+  admin_delete_requires_auth?: boolean;
+  book_delete_enabled?: boolean;
   max_upload_mb: number;
   max_pdf_pages: number;
   engines: Record<string, EngineCapability>;
@@ -207,6 +210,8 @@ export interface ManualBlockCreateResult {
   block_id: string;
   ocr_run_id: string;
   block_index: number;
+  reading_order: number | null;
+  block_type: string;
   raw_text: string;
   current_text: string;
   block_role: BlockRole;

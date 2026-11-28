@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ErrorBody(BaseModel):
@@ -22,7 +22,7 @@ class ErrorResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     database: str
-    workspace_dir: str
+    workspace: str = "ready"
 
 
 class EngineCapabilityResponse(BaseModel):
@@ -34,6 +34,9 @@ class EngineCapabilityResponse(BaseModel):
 class CapabilitiesResponse(BaseModel):
     platform_machine: str
     auth_enabled: bool
+    guest_ocr_enabled: bool = True
+    admin_delete_requires_auth: bool = False
+    book_delete_enabled: bool = False
     max_upload_mb: int
     max_pdf_pages: int
     engines: dict[str, EngineCapabilityResponse]
@@ -98,6 +101,7 @@ class DigitalTextPageResponse(BaseModel):
     source: str = "pdf_digital_text_extraction"
     extracted_text_char_count: int
     text: str
+    review_status: str | None = None
 
 
 class PageRangeSpec(BaseModel):
@@ -252,16 +256,16 @@ class PageReviewResponse(BaseModel):
 
 
 class BlockEditRequest(BaseModel):
-    edited_text: str
-    action: str = "corrected"
-    block_role: str | None = None
-    review_note: str | None = None
-    reviewer_id: str | None = None
+    edited_text: str = Field(..., max_length=20_000)
+    action: str = Field(default="corrected", max_length=32)
+    block_role: str | None = Field(default=None, max_length=32)
+    review_note: str | None = Field(default=None, max_length=1_000)
+    reviewer_id: str | None = Field(default=None, max_length=100)
     add_to_correction_memory: bool = False
-    memory_scope: str = "book_only"
-    correction_type: str | None = None
-    incorrect_span: str | None = None
-    corrected_span: str | None = None
+    memory_scope: str = Field(default="book_only", max_length=32)
+    correction_type: str | None = Field(default=None, max_length=32)
+    incorrect_span: str | None = Field(default=None, max_length=500)
+    corrected_span: str | None = Field(default=None, max_length=500)
     auto_filter_noise: bool = False
 
 
@@ -271,7 +275,7 @@ class PageAutocorrectRequest(BaseModel):
     use_dictionary: bool = True
     use_sentence_context: bool = True
     min_confidence: float = Field(default=0.78, ge=0.5, le=0.99)
-    current_texts: dict[str, str] = Field(default_factory=dict)
+    current_texts: dict[str, str] = Field(default_factory=dict, max_length=500)
 
 
 class AutocorrectChangeItem(BaseModel):
@@ -302,19 +306,19 @@ class PageAutocorrectResponse(BaseModel):
 
 class BatchBlockEditItem(BaseModel):
     block_id: UUID
-    edited_text: str
-    action: str = "corrected"
-    block_role: str | None = None
-    review_note: str | None = None
-    reviewer_id: str | None = None
+    edited_text: str = Field(..., max_length=20_000)
+    action: str = Field(default="corrected", max_length=32)
+    block_role: str | None = Field(default=None, max_length=32)
+    review_note: str | None = Field(default=None, max_length=1_000)
+    reviewer_id: str | None = Field(default=None, max_length=100)
     add_to_correction_memory: bool = True
-    memory_scope: str = "book_only"
-    correction_type: str | None = None
+    memory_scope: str = Field(default="book_only", max_length=32)
+    correction_type: str | None = Field(default=None, max_length=32)
 
 
 class PageBatchSaveRequest(BaseModel):
     primary_run_id: UUID | None = None
-    edits: list[BatchBlockEditItem] = Field(default_factory=list)
+    edits: list[BatchBlockEditItem] = Field(default_factory=list, max_length=500)
     approve_remaining_blocks: bool = True
     mark_page_approved: bool = True
 
@@ -343,13 +347,15 @@ class BlockEditResponse(BaseModel):
 
 
 class ManualBlockCreateRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=50_000)
     block_role: str = "paragraph"
     primary_run_id: UUID | None = None
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
 
 
 class ManualBlockCreateResponse(BaseModel):
     block_id: UUID
+    ocr_run_id: UUID
     block_index: int
     reading_order: int | None
     block_type: str
@@ -359,7 +365,14 @@ class ManualBlockCreateResponse(BaseModel):
 
 
 class DigitalTextUpdateRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=200_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_field(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "text" not in data and "digital_text_content" in data:
+            return {**data, "text": data["digital_text_content"]}
+        return data
 
 
 class PageReviewStatusRequest(BaseModel):

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Iterable
 
 import pymupdf
+from PIL import Image
 
 from src.common.io import atomic_write_bytes, sanitize_id, sha256_bytes, sha256_file, validate_within_workspace
 from src.common.logging_utils import log_event
@@ -14,13 +16,68 @@ from src.common.manifest import PageManifestEntry
 
 LOGGER = logging.getLogger("telugu_digitizer.pdf")
 
+DEFAULT_MAX_RENDER_PIXELS = 25_000_000
 
-def has_legacy_font_encoding(extracted: str) -> bool:
-    """Detect legacy non-Unicode font encodings (PUA glyphs or Anu/Shree-Lipi symbol maps).
 
-    Pages whose text layer uses Private Use Area codepoints (U+E000..U+F8FF) or
-    high-density non-Unicode symbol/Latin-1 glyph mappings cannot be used as
-    valid digital text and must be routed through visual OCR.
+def bounded_render_dimensions(
+    page_rect: pymupdf.Rect,
+    requested_dpi: int,
+    *,
+    max_pixels: int = DEFAULT_MAX_RENDER_PIXELS,
+) -> tuple[int, int]:
+    """Compute target pixel dimensions clamped cleanly to ``max_pixels``."""
+    raw_w = max(1.0, float(page_rect.width) * float(requested_dpi) / 72.0)
+    raw_h = max(1.0, float(page_rect.height) * float(requested_dpi) / 72.0)
+    area = raw_w * raw_h
+    if max_pixels > 0 and area > max_pixels:
+        scale = math.sqrt(float(max_pixels) / area)
+        return max(1, int(round(raw_w * scale))), max(1, int(round(raw_h * scale)))
+    return max(1, int(round(raw_w))), max(1, int(round(raw_h)))
+
+
+def bounded_pixmap_matrix(
+    page_rect: pymupdf.Rect,
+    requested_dpi: int,
+    *,
+    max_pixels: int = DEFAULT_MAX_RENDER_PIXELS,
+) -> tuple[pymupdf.Matrix, float, bool]:
+    """Return a PyMuPDF render Matrix capped so rendered pixel area stays <= ``max_pixels``."""
+    base_scale = float(requested_dpi) / 72.0
+    raw_w = max(1.0, float(page_rect.width) * base_scale)
+    raw_h = max(1.0, float(page_rect.height) * base_scale)
+    area = raw_w * raw_h
+    if max_pixels > 0 and area > max_pixels:
+        factor = math.sqrt(float(max_pixels) / area)
+        eff_scale = base_scale * factor
+        return pymupdf.Matrix(eff_scale, eff_scale), float(requested_dpi) * factor, True
+    return pymupdf.Matrix(base_scale, base_scale), float(requested_dpi), False
+
+
+_LEGACY_TELUGU_FONT_RE = (
+    "anu",
+    "priyankaa",
+    "hemalatha",
+    "shree-tel",
+    "shreelipi",
+    "sreelipi",
+    "tikkana",
+    "tl-tt",
+    "lekhini",
+    "vangmaya",
+    "gautami-legacy",
+)
+
+
+def has_legacy_font_encoding(
+    extracted: str,
+    *,
+    font_names: Iterable[str] | None = None,
+) -> bool:
+    """Detect legacy non-Unicode font encodings (PUA glyphs, Anu/Shree-Lipi maps, or 7-bit ASCII legacy fonts).
+
+    Pages whose text layer uses Private Use Area codepoints (U+E000..U+F8FF),
+    Latin-1 symbol mappings, known non-Unicode DTP Telugu fonts, or dense mid-word
+    ASCII symbol artifacts cannot be used as valid digital text and must be routed to OCR.
     """
     non_ws = [ch for ch in extracted if not ch.isspace()]
     if not non_ws:
@@ -28,13 +85,29 @@ def has_legacy_font_encoding(extracted: str) -> bool:
     pua_count = sum(1 for ch in non_ws if "\ue000" <= ch <= "\uf8ff")
     if pua_count > 0 and (pua_count / len(non_ws)) >= 0.10:
         return True
-    # Anu / Shree-Lipi legacy 8-bit fonts map Telugu syllables onto Latin-1 supplement (U+00A1..U+00FF)
-    # and ASCII punctuation/symbols with zero Telugu Unicode characters.
+
     telugu_count = sum(1 for ch in non_ws if "\u0c00" <= ch <= "\u0c7f")
     if telugu_count == 0:
         latin1_sym_count = sum(1 for ch in non_ws if "\u00a1" <= ch <= "\u00ff")
         if (latin1_sym_count / len(non_ws)) >= 0.25:
             return True
+
+        if font_names:
+            for fname in font_names:
+                lower = str(fname or "").lower()
+                if any(pat in lower for pat in _LEGACY_TELUGU_FONT_RE):
+                    return True
+
+        # Detect 7-bit ASCII legacy Telugu encoding (high mid-token ~, ^, |, `, {, }, @ inside >= 25% of tokens).
+        tokens = [t for t in extracted.split() if len(t) >= 3]
+        if len(tokens) >= 6:
+            garbled_tokens = sum(
+                1
+                for tok in tokens
+                if any(sym in tok[1:-1] for sym in ("~", "^", "|", "`", "{", "}", "@", "\\"))
+            )
+            if (garbled_tokens / len(tokens)) >= 0.20:
+                return True
     return False
 
 
@@ -45,7 +118,11 @@ def classify_and_extract_pdf_page(page: pymupdf.Page) -> tuple[str, int, float, 
     """
     extracted = page.get_text("text") or ""
     char_count = sum(1 for ch in extracted if not ch.isspace())
-    legacy_encoded = has_legacy_font_encoding(extracted)
+    try:
+        font_names = [str(f[3] or "") for f in page.get_fonts(full=False) if len(f) > 3]
+    except Exception:
+        font_names = []
+    legacy_encoded = has_legacy_font_encoding(extracted, font_names=font_names)
 
     page_rect = page.rect
     page_area = max(float(page_rect.width * page_rect.height), 1.0)
@@ -145,10 +222,11 @@ def render_pdf_pages(
     book_output_dir.mkdir(parents=True, exist_ok=True)
 
     source_pdf_sha256 = sha256_file(pdf_file)
-    matrix = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
 
     entries: list[PageManifestEntry] = []
     with pymupdf.open(pdf_file) as doc:
+        if getattr(doc, "is_encrypted", False):
+            raise ValueError(f"PDF is encrypted and cannot be rasterized: {pdf_file}")
         selected_pages = resolve_page_numbers(
             doc.page_count,
             start_page=start_page,
@@ -178,13 +256,11 @@ def render_pdf_pages(
                 rect = page.rect
 
                 if skip_existing and image_path.is_file():
-                    png_bytes = image_path.read_bytes()
-                    with pymupdf.open(stream=png_bytes, filetype="png") as img_doc:
-                        pix_rect = img_doc[0].rect
-                        width_px = int(pix_rect.width)
-                        height_px = int(pix_rect.height)
-                    image_sha = sha256_bytes(png_bytes)
+                    with Image.open(image_path) as existing_img:
+                        width_px, height_px = existing_img.size
+                    image_sha = sha256_file(image_path)
                 else:
+                    matrix, _effective_dpi, _clamped = bounded_pixmap_matrix(rect, dpi)
                     pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
                     png_bytes = pix.tobytes("png")
                     atomic_write_bytes(image_path, png_bytes)

@@ -1,8 +1,8 @@
-# Telugu Book Digitizer — Phase 1 (CLI OCR Proof of Concept)
+# Telugu Book Digitizer
 
-Local-first CLI pipeline to rasterize printed Telugu book PDFs, run **PaddleOCR PP-OCRv5 Telugu** (`lang="te"`, `ocr_version="PP-OCRv5"`) and **Tesseract 5 Telugu** (`tel.traineddata` from `tessdata_best`, `--oem 1`) on identical 300 DPI page images, preserve raw OCR outputs untouched, and compute reproducible Telugu OCR benchmark metrics.
+Local-first printed Telugu book digitization platform: rasterizes scanned PDFs, runs **PaddleOCR PP-OCRv5 Telugu** (`lang="te"`, `ocr_version="PP-OCRv5"`) and **Tesseract 5 Telugu** (`tel.traineddata` from `tessdata_best`), provides a FastAPI + PostgreSQL + React + Flutter proofreading workbench with correction memory, standalone Telugu-English dictionary, and Telugu-styled `.docx`/`.txt` export.
 
-> **Scope notice:** This repository currently implements **Phase 1 only** (`docs/04-phase-1-implementation-plan.md`). No web UI, FastAPI backend, database, LLM post-correction, or DOCX exporter is included in this phase.
+> **Architecture note:** Includes the Phase 1 CLI benchmark pipeline alongside the full Phases 2–5 web/mobile digitization workbench (`src/api/`, `frontend/`, `mobile/`), deployable locally or on Raspberry Pi + HTTPS reverse proxy (`deploy/`).
 
 ---
 

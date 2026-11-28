@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from urllib.parse import quote
@@ -129,16 +136,84 @@ def get_db(request: Request):
         db.close()
 
 
+def require_admin_for_destructive(
+    request: Request,
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> None:
+    """Protect destructive DELETE endpoints in public/proxy mode using Admin Basic Auth."""
+    admin_creds = settings.effective_admin_credentials
+    if admin_creds is None:
+        if settings.is_network_exposed:
+            raise AppError(
+                "ADMIN_AUTH_REQUIRED",
+                "Destructive delete operations require APP_ADMIN_USERNAME and APP_ADMIN_PASSWORD when network-exposed.",
+                status_code=403,
+            )
+        return
+
+    admin_user, admin_pass = admin_creds
+    rate_limiter = getattr(request.app.state, "rate_limiter", None)
+    client_ip = request.client.host if request.client and request.client.host else "unknown"
+    if rate_limiter is not None:
+        locked, retry_after = rate_limiter.is_limited(
+            "admin_auth_fail",
+            client_ip,
+            limit=settings.rate_limit_auth_failures,
+            window_seconds=300.0,
+        )
+        if locked:
+            raise AppError(
+                "RATE_LIMIT_EXCEEDED",
+                "Too many failed admin authentication attempts. Please retry later.",
+                status_code=429,
+                details={"retry_after_seconds": retry_after},
+            )
+
+    auth_header = request.headers.get("authorization", "")
+    authorized = False
+    provided_creds = False
+    if auth_header.startswith("Basic "):
+        token = auth_header[6:].strip()
+        try:
+            decoded = base64.b64decode(token, validate=True).decode("utf-8")
+            if ":" in decoded:
+                provided_creds = True
+                user, password = decoded.split(":", 1)
+                authorized = hmac.compare_digest(
+                    user.encode("utf-8"), admin_user.encode("utf-8")
+                ) and hmac.compare_digest(
+                    password.encode("utf-8"), admin_pass.encode("utf-8")
+                )
+        except (binascii.Error, UnicodeDecodeError):
+            provided_creds = True
+            authorized = False
+
+    if not authorized:
+        if provided_creds and rate_limiter is not None:
+            rate_limiter.allow(
+                "admin_auth_fail",
+                client_ip,
+                limit=settings.rate_limit_auth_failures,
+                window_seconds=300.0,
+            )
+        raise AppError(
+            "UNAUTHORIZED",
+            "Admin credentials required for destructive delete operations.",
+            status_code=401,
+        )
+
+
 @router.get("/health", response_model=HealthResponse)
 def health_check(
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[AppSettings, Depends(get_settings)],
 ) -> HealthResponse:
     db.execute(text("SELECT 1"))
+    workspace_status = "ready" if settings.workspace_dir.exists() else "uninitialized"
     return HealthResponse(
         status="ok",
         database="connected",
-        workspace_dir=str(settings.workspace_dir),
+        workspace=workspace_status,
     )
 
 
@@ -162,29 +237,71 @@ async def upload_book(
     orthography_profile: str = Form(default="unspecified"),
     training_consent: bool = Form(default=False),
 ) -> BookUploadResponse:
-    pdf_bytes = await file.read()
-    book, duplicate = await run_in_threadpool(
-        import_pdf_book,
-        db=db,
-        storage=storage,
-        settings=settings,
-        pdf_bytes=pdf_bytes,
-        original_filename=file.filename or "document.pdf",
-        title=title,
-        author=author,
-        publisher=publisher,
-        publication_year=publication_year,
-        orthography_profile=orthography_profile,
-        training_consent=training_consent,
-    )
-    return BookUploadResponse(
-        book_id=book.id,
-        title=book.title,
-        page_count=book.page_count,
-        source_sha256=book.source_sha256,
-        status="uploaded",
-        duplicate=duplicate,
-    )
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    tmp_dir = storage.workspace_root / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix="upload_", suffix=".pdf", dir=tmp_dir)
+    tmp_path = Path(tmp_name)
+    hasher = hashlib.sha256()
+    total_bytes = 0
+    first_chunk_checked = False
+    try:
+        with os.fdopen(fd, "wb") as out_handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not first_chunk_checked:
+                    first_chunk_checked = True
+                    if not chunk.startswith(b"%PDF-"):
+                        raise AppError(
+                            "INVALID_PDF_SIGNATURE",
+                            "Uploaded file does not begin with a valid %PDF- signature.",
+                            status_code=400,
+                        )
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise AppError(
+                        "PDF_TOO_LARGE",
+                        f"Uploaded PDF exceeds maximum allowed size of {settings.max_upload_mb} MiB.",
+                        status_code=413,
+                        details={"size_bytes": total_bytes, "max_bytes": max_bytes},
+                    )
+                hasher.update(chunk)
+                out_handle.write(chunk)
+            out_handle.flush()
+
+        if total_bytes == 0:
+            raise AppError("EMPTY_UPLOAD", "Uploaded PDF file is empty.", status_code=400)
+
+        source_sha256 = hasher.hexdigest()
+        book, duplicate = await run_in_threadpool(
+            import_pdf_book,
+            db=db,
+            storage=storage,
+            settings=settings,
+            pdf_path=tmp_path,
+            source_sha256=source_sha256,
+            size_bytes=total_bytes,
+            original_filename=file.filename or "document.pdf",
+            title=title,
+            author=author,
+            publisher=publisher,
+            publication_year=publication_year,
+            orthography_profile=orthography_profile,
+            training_consent=training_consent,
+        )
+        return BookUploadResponse(
+            book_id=book.id,
+            title=book.title,
+            page_count=book.page_count,
+            source_sha256=book.source_sha256,
+            status="uploaded",
+            duplicate=duplicate,
+        )
+    finally:
+        await file.close()
+        tmp_path.unlink(missing_ok=True)
 
 
 @router.get("/books", response_model=BookListResponse)
@@ -201,10 +318,12 @@ def get_book(book_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]) -> Boo
 @router.delete("/books/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_book(
     book_id: uuid.UUID,
+    _admin: Annotated[None, Depends(require_admin_for_destructive)],
     db: Annotated[Session, Depends(get_db)],
     storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+    executor: Annotated[OCRJobExecutor, Depends(get_executor)],
 ) -> Response:
-    delete_book_and_artifacts(db=db, storage=storage, book_id=book_id)
+    delete_book_and_artifacts(db=db, storage=storage, book_id=book_id, executor=executor)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -317,7 +436,13 @@ def get_page_image(
         book = db.get(Book, book_id)
         if book is None:
             raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
-        img_path = ensure_page_image_rendered(db=db, storage=storage, book=book, page=page)
+        img_path = ensure_page_image_rendered(
+            db=db,
+            storage=storage,
+            book=book,
+            page=page,
+            max_render_pixels=request.app.state.settings.max_render_pixels,
+        )
     else:
         img_path = storage.resolve_key(page.image_storage_key)
 
@@ -519,6 +644,7 @@ def get_page_review(
     book_id: uuid.UUID,
     page_number: int,
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
     primary_run_id: uuid.UUID | None = None,
     comparator_run_id: uuid.UUID | None = None,
 ) -> PageReviewResponse:
@@ -528,6 +654,8 @@ def get_page_review(
         page_number=page_number,
         primary_run_id=primary_run_id,
         comparator_run_id=comparator_run_id,
+        low_conf_threshold_tesseract=settings.low_conf_threshold_tesseract,
+        low_conf_threshold_paddle=settings.low_conf_threshold_paddle,
     )
     return PageReviewResponse(**payload)
 
@@ -626,6 +754,7 @@ def post_manual_page_block(
         text=payload.text,
         block_role=payload.block_role,
         primary_run_id=payload.primary_run_id,
+        bbox=payload.bbox,
     )
     return ManualBlockCreateResponse(**result)
 
@@ -713,8 +842,17 @@ def get_correction_memory_list(
     book_id: uuid.UUID | None = None,
     status_filter: str | None = None,
     q: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
 ) -> CorrectionListResponse:
-    rows = list_corrections(db=db, book_id=book_id, status=status_filter, query=q)
+    rows = list_corrections(
+        db=db,
+        book_id=book_id,
+        status=status_filter,
+        query=q,
+        limit=limit,
+        offset=offset,
+    )
     return CorrectionListResponse(items=[_serialize_correction_record(r) for r in rows])
 
 
@@ -967,6 +1105,7 @@ def post_custom_dictionary_word(
 @router.delete("/dictionary/custom/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_custom_dictionary_word_route(
     word_id: uuid.UUID,
+    _admin: Annotated[None, Depends(require_admin_for_destructive)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Response:
     delete_custom_word(db, word_id)

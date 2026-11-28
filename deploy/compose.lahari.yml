@@ -32,14 +32,14 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 8000
       PROXY_HEADERS: "true"
-      FORWARDED_ALLOW_IPS: "*"
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.16.0.0/12,127.0.0.1}
       WORKSPACE_DIR: /app/workspace
       TESSDATA_DIR: /app/models/tesseract/tessdata
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - ../workspace:/app/workspace
-      - paddle_models:/root/.paddlex
+      - paddle_models:/home/appuser/.paddlex
 
   caddy:
     image: caddy:2-alpine
