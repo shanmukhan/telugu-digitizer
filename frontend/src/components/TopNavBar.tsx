@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { BookOCRRunSummary, BookSummary } from "../types/api";
-import { buildRunTelemetry, formatEngineLabel } from "../utils/formatters";
+import { buildRunTelemetry, computeBookOcrCoverage, formatEngineLabel } from "../utils/formatters";
 
 export type WorkspaceView = "review" | "dictionary" | "memory" | "export";
 
@@ -71,8 +71,8 @@ export function TopNavBar({
   // Derive concise OCR button status
   const running = runs.find((r) => r.status === "running");
   const queued = runs.find((r) => r.status === "queued");
-  const completedRuns = runs.filter((r) => r.status === "completed");
   const partialOrFailed = runs.filter((r) => r.status === "partial" || r.status === "failed");
+  const coverage = selectedBook ? computeBookOcrCoverage(selectedBook, runs) : null;
   const needsScanOcr = selectedBook
     ? selectedBook.scanned_pages_count + selectedBook.mixed_pages_count > 0
     : false;
@@ -90,9 +90,15 @@ export function TopNavBar({
     } else if (queued) {
       ocrTone = "active";
       ocrLabel = `Queued · ${formatEngineLabel(queued.engine)}`;
-    } else if (completedRuns.length > 0 || !needsScanOcr) {
+    } else if (!needsScanOcr) {
       ocrTone = "ready";
-      ocrLabel = needsScanOcr ? "OCR Ready" : "Digital PDF";
+      ocrLabel = "Digital PDF";
+    } else if (coverage?.isFullyCovered) {
+      ocrTone = "ready";
+      ocrLabel = "OCR Ready";
+    } else if (coverage?.isPartialCoverage) {
+      ocrTone = "warn";
+      ocrLabel = `OCR ${coverage.coveredPagesCount}/${coverage.totalPages}p · Continue`;
     } else if (partialOrFailed.length > 0) {
       ocrTone = "warn";
       ocrLabel = "Resume OCR";

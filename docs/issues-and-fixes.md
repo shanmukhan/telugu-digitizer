@@ -247,3 +247,22 @@ All colours are CSS custom properties in `:root` of `frontend/src/styles/app.css
   - Added thread-safe on-demand page rasterization (`ensure_page_image_rendered`) in `src/services/book_service.py`.
   - For books with `> 10` pages (`EAGER_RENDER_MAX_PAGES = 10`), `import_pdf_book` classifies all pages and pre-renders only Page 1 synchronously (completing upload in ~2 seconds), deferring remaining 300 DPI PNG renders until first page view (`GET /api/v1/books/{book_id}/pages/{page_number}/image`), OCR (`src/services/ocr_service.py`), or training crop extraction (`src/services/review_service.py`).
   - Added regression test `test_large_pdf_import_uses_lazy_page_rendering_on_demand` in `tests/test_lexicon_and_autocorrect.py` (32/32 backend tests passing against PostgreSQL).
+
+---
+
+## 12. 2026-11-28 — UI/UX Redesign, Telugu *Vattu* Auto-Correction, `global_suggestion` Default, and Partial-Book OCR Continuation + Stitched Export
+
+### Issues Addressed
+1. **Cluttered multi-banner shell & proofreading fatigue:** Implemented all 4 phases of [UI_UX_REDESIGN_PROPOSAL.md](UI_UX_REDESIGN_PROPOSAL.md) — slim `52 px` `TopNavBar` with searchable Book Switcher, `44 px` unified page sub-toolbar, virtualized `PageRail`, Two-Density `ReviewEditorPanel` with inline Telugu grapheme diff, `ImportBookDialog`, `OcrRunnerDrawer`, `ShortcutsDialog`, `ToastRegion`, `PinnedLineCrop` for tablets/mobile, and `@layer`-structured `app.css`.
+2. **Broken Telugu display headings (`(పగమబాగం- 1` → `ప్రథమభాగం- 1`) & noisy comparator chips:**
+   - Expanded `_CONFUSION_GROUPS`, `_TIGHT_CONFUSION_PAIRS`, and `_SKELETON_MAP` in `src/services/lexicon_service.py` with aspirated/visual Telugu pairs (`బ ↔ భ`, `థ ↔ గ`, `ప ↔ ఫ`, `క ↔ ఖ`, `గ ↔ ఘ`, `ట ↔ ఠ`, `డ ↔ ఢ`, `చ ↔ ఛ`).
+   - Added a *vattu*-stripped consonant skeleton index (`vattu_skeleton_index`), single-miss DP cost (`0.40`) for 2-codepoint conjuncts (`్ + consonant`), and unmatched leading `(` → `్ర` recovery in `_autocorrect_single_block`.
+   - Added the `textured_bold` OCR preprocessing profile (`src/services/ocr_service.py`, `OcrRunnerDrawer.tsx`) combining deskew + CLAHE + `2×2` morphological opening + unsharp sharpening for halftone/stippled headings.
+   - Collapsed noisy comparator mismatches (`> 18` changed tokens / `> 28` tokens) behind an expandable summary in `ReviewEditorPanel.tsx`.
+3. **Default correction memory scope:** Changed the default `memory_scope` from `"book_only"` to `"global_suggestion"` across `ReviewEditorPanel.tsx`, `App.tsx`, `src/api/schemas.py`, `src/services/review_service.py`, and `src/services/correction_service.py`.
+4. **No clear path to continue remaining pages after a Pages 1–5 sample OCR run (and single-run export gap):**
+   - Added interval-merging coverage detection (`computeBookOcrCoverage` in `frontend/src/utils/formatters.ts`) so books with only a sample range completed (`1–5` of `406`) display **`OCR 5/406p · Continue`** in `TopNavBar` instead of misleadingly showing green `✓ OCR Ready`.
+   - Surfaced a direct **`▶ Continue Remaining (Pages 6–406)`** / **`⚡ Fast Draft (6–406)`** continuation strip in `OcrProgressStrip`, direct **`Continue Remaining Pages (6–406)`** + **`OCR Page N Only`** actions on uncovered pages in `ReviewEditorPanel`, and pre-filled remaining-page presets in `OcrRunnerDrawer`.
+   - Upgraded `_collect_export_pages` in `src/services/export_service.py` so default full-book exports (`primary_run_id=None`) stitch blocks per page across all usable runs while prioritizing human-approved/edited blocks — preserving approved Pages 1–5 edits seamlessly when continuing Pages 6–406 in a second run.
+   - Added regression tests in `tests/test_phase5_export.py`, `tests/test_lexicon_and_autocorrect.py`, `frontend/src/components/OcrStatusBar.test.tsx`, and `frontend/src/components/RedesignComponents.test.tsx`.
+

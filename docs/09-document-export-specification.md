@@ -6,6 +6,12 @@ Generate files from the selected transcript version, preferably `human_approved`
 
 All Telugu content must be genuine Unicode text. Do not transliterate Telugu into Latin characters.
 
+### Multi-range OCR run stitching (Auto-select mode)
+When exporting without an explicit `primary_run_id` (`primary_run_id=None`, the UI default), `_collect_export_pages` resolves blocks **per page** across all usable (`completed` / `partial`) OCR runs for the book:
+- For `human_approved` exports, any run containing human-reviewed `DocumentTextBlock` or `ReviewEdit` entries for a page takes precedence on that page.
+- Otherwise, the highest-priority populated run for that page is selected.
+- This allows reviewers to run a fast sample range (e.g., Pages `1–5`), approve those pages, and later run the remaining range (`6–406`) without losing approved edits or dropping Pages `1–5` from the final `.docx`/`.txt` export. Passing an explicit `primary_run_id` restricts export strictly to that single run.
+
 ## 2. Export modes
 
 ### A. Editable-flow DOCX

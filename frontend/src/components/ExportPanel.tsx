@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 import { ApiClientError, createBookExport, listBookExports, resolveAppUrl } from "../api/client";
 import type { BookOCRRunSummary, BookSummary, ExportRecord, PageSummary } from "../types/api";
-import { formatEngineLabel, formatLayoutMode } from "../utils/formatters";
+import { computeBookOcrCoverage, formatEngineLabel, formatLayoutMode } from "../utils/formatters";
 
 interface ExportPanelProps {
   book: BookSummary;
@@ -25,6 +25,7 @@ export function ExportPanel({
   const fontId = useId();
 
   const usableRuns = runs.filter((r) => r.status === "completed" || r.status === "partial");
+  const coverage = computeBookOcrCoverage(book, runs);
   const needsOcrFirst =
     usableRuns.length === 0 && book.scanned_pages_count + book.mixed_pages_count > 0;
 
@@ -136,6 +137,26 @@ export function ExportPanel({
         </div>
       )}
 
+      {!needsOcrFirst && coverage.isPartialCoverage && (
+        <div className="export-callout warn" role="status">
+          <div>
+            <strong>
+              Partial OCR coverage ({coverage.coveredPagesCount} of {coverage.totalPages} pages OCR&apos;d)
+            </strong>
+            <span className="hint-text">
+              {" "}
+              · Only Pages {coverage.coveredRangeLabel} currently have OCR text. Continue OCR on
+              Pages {coverage.nextStartPage}–{coverage.nextEndPage} for a complete book export.
+            </span>
+          </div>
+          {onGoToReview && (
+            <button type="button" className="btn-compact" onClick={onGoToReview}>
+              Continue OCR →
+            </button>
+          )}
+        </div>
+      )}
+
       {!needsOcrFirst && pages.length > 0 && (
         <div className={`export-coverage-callout ${unreviewedCount === 0 ? "ok" : "info"}`}>
           <strong>
@@ -191,7 +212,7 @@ export function ExportPanel({
                 value={selectedRunId}
                 onChange={(e) => setSelectedRunId(e.target.value)}
               >
-                <option value="">Auto-select primary run</option>
+                <option value="">Auto-select best per page (stitches multi-range runs &amp; approved edits)</option>
                 {usableRuns.map((run) => (
                   <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
                     {formatEngineLabel(run.engine)} ({run.progress_current ?? 0}/{run.progress_total ?? book.page_count} pages)

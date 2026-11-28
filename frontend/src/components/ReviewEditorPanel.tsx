@@ -9,6 +9,7 @@ import type {
   ReviewBlock,
 } from "../types/api";
 import {
+  type BookOcrCoverage,
   formatCorrectionScope,
   formatEngineLabel,
   formatReviewStatus,
@@ -684,6 +685,9 @@ interface ReviewEditorPanelProps {
   onToggleKeyboard?: () => void;
   onSelectPrimaryRun: (runId: string) => void;
   onQuickStartOcr?: () => Promise<void>;
+  ocrCoverage?: BookOcrCoverage | null;
+  onContinueRemainingOcr?: (startPage: number, endPage: number) => Promise<void>;
+  onRunCurrentPageOcr?: (pageNumber: number) => Promise<void>;
   onOpenFullScanMobile?: () => void;
   onDirtyCountChange?: (count: number) => void;
   onSaveEdit: (
@@ -731,6 +735,9 @@ export function ReviewEditorPanel({
   onToggleKeyboard,
   onSelectPrimaryRun,
   onQuickStartOcr,
+  ocrCoverage = null,
+  onContinueRemainingOcr,
+  onRunCurrentPageOcr,
   onOpenFullScanMobile,
   onDirtyCountChange,
   onSaveEdit,
@@ -1483,43 +1490,89 @@ export function ReviewEditorPanel({
           </div>
         )}
 
-        {!isDigitalPage && review.blocks.length === 0 && (
-          <div className="panel-card empty-page-card">
-            <p style={{ marginTop: 0 }}>
-              <strong>No OCR text extracted for this page yet.</strong>
-            </p>
-            <p className="hint-text">
-              {review.available_runs.length === 0
-                ? "Run OCR from the top bar (or click below) before proofreading or exporting."
-                : selectedRun &&
-                    (selectedRun.status === "partial" || selectedRun.status === "failed") &&
-                    (selectedRun.progress_current ?? 0) === 0
-                  ? `${formatEngineLabel(selectedRun.engine)} stopped before processing this page (${selectedRun.error_summary || "0 pages completed"}).`
-                  : "This page appears blank or had no detected text lines in the selected OCR run."}
-            </p>
-            <div className="badge-row">
-              {alternatePopulatedRun && (
-                <button
-                  type="button"
-                  className="primary"
-                  onClick={() => onSelectPrimaryRun(alternatePopulatedRun.ocr_run_id)}
-                >
-                  Switch to {formatEngineLabel(alternatePopulatedRun.engine)}
-                </button>
-              )}
-              {review.available_runs.length === 0 && onQuickStartOcr && (
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={ocrRunning}
-                  onClick={() => void onQuickStartOcr()}
-                >
-                  {ocrRunning ? "OCR Running…" : "Run Selected OCR Now"}
-                </button>
-              )}
+        {!isDigitalPage && review.blocks.length === 0 && (() => {
+          const isUncoveredPage = Boolean(
+            ocrCoverage && ocrCoverage.hasAnyOcr && !ocrCoverage.isPageCovered(review.page_number),
+          );
+          const remainingLabel = ocrCoverage
+            ? `${ocrCoverage.nextStartPage}–${ocrCoverage.nextEndPage}`
+            : `${review.page_number}–${review.page_count}`;
+          return (
+            <div className="panel-card empty-page-card">
+              <p style={{ marginTop: 0 }}>
+                <strong>
+                  {isUncoveredPage
+                    ? `Page ${review.page_number} has not been OCR'd yet.`
+                    : "No OCR text extracted for this page yet."}
+                </strong>
+              </p>
+              <p className="hint-text">
+                {review.available_runs.length === 0
+                  ? "Run OCR from the top bar (or click below) before proofreading or exporting."
+                  : isUncoveredPage && ocrCoverage
+                    ? `Only Pages ${ocrCoverage.coveredRangeLabel} (${ocrCoverage.coveredPagesCount}/${ocrCoverage.totalPages}) have been OCR'd so far. Continue OCR below — your approved edits on earlier pages are preserved.`
+                    : selectedRun &&
+                        (selectedRun.status === "partial" || selectedRun.status === "failed") &&
+                        (selectedRun.progress_current ?? 0) === 0
+                      ? `${formatEngineLabel(selectedRun.engine)} stopped before processing this page (${selectedRun.error_summary || "0 pages completed"}).`
+                      : "This page appears blank or had no detected text lines in the selected OCR run."}
+              </p>
+              <div className="badge-row">
+                {isUncoveredPage && ocrCoverage && onContinueRemainingOcr && (
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={ocrRunning}
+                    onClick={() =>
+                      void onContinueRemainingOcr(
+                        ocrCoverage.nextStartPage,
+                        ocrCoverage.nextEndPage,
+                      )
+                    }
+                  >
+                    {ocrRunning
+                      ? "OCR Running…"
+                      : `▶ Continue Remaining Pages (${remainingLabel})`}
+                  </button>
+                )}
+                {isUncoveredPage && onRunCurrentPageOcr && (
+                  <button
+                    type="button"
+                    disabled={ocrRunning}
+                    onClick={() => void onRunCurrentPageOcr(review.page_number)}
+                  >
+                    OCR Page {review.page_number} Only
+                  </button>
+                )}
+                {!isUncoveredPage && alternatePopulatedRun && (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => onSelectPrimaryRun(alternatePopulatedRun.ocr_run_id)}
+                  >
+                    Switch to {formatEngineLabel(alternatePopulatedRun.engine)}
+                  </button>
+                )}
+                {onQuickStartOcr && (
+                  <button
+                    type="button"
+                    className={
+                      review.available_runs.length === 0 && !isUncoveredPage ? "primary" : undefined
+                    }
+                    disabled={ocrRunning}
+                    onClick={() => void onQuickStartOcr()}
+                  >
+                    {ocrRunning
+                      ? "OCR Running…"
+                      : review.available_runs.length === 0
+                        ? "Run Selected OCR Now"
+                        : "OCR Options…"}
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <div className="blocks-stack">
           {visibleBlocks.map((block) => (

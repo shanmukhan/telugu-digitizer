@@ -163,4 +163,53 @@ describe("HeaderOcrStatusPill & OcrProgressStrip", () => {
     fireEvent.click(screen.getByRole("button", { name: "Export DOCX / TXT" }));
     expect(onGoToExport).toHaveBeenCalledTimes(1);
   });
+
+  it("surfaces a direct Continue Remaining Pages strip after a 1–5 page sample run even when hideWhenReady is true", () => {
+    const onContinue = vi.fn().mockResolvedValue(undefined);
+    const onOpenDrawer = vi.fn();
+    const runs: BookOCRRunSummary[] = [
+      {
+        ocr_run_id: "run-sample",
+        engine: "paddleocr",
+        model_id: "PP-OCRv5_server_det+te_PP-OCRv5_mobile_rec",
+        status: "completed",
+        progress_current: 5,
+        progress_total: 5,
+        started_at: "2026-11-24T00:00:00Z",
+        config: { start_page: 1, end_page: 5 },
+        created_at: "2026-11-24T00:00:00Z",
+        completed_at: "2026-11-24T00:01:00Z",
+      },
+    ];
+
+    render(
+      <>
+        <HeaderOcrStatusPill book={SAMPLE_BOOK} runs={runs} />
+        <OcrProgressStrip
+          book={SAMPLE_BOOK}
+          runs={runs}
+          pages={SAMPLE_PAGES}
+          activeView="review"
+          hideWhenReady
+          onQuickStartSample={vi.fn().mockResolvedValue(undefined)}
+          onQuickStartFull={vi.fn().mockResolvedValue(undefined)}
+          onContinueRemaining={onContinue}
+          onOpenOcrDrawer={onOpenDrawer}
+          onResumeRun={vi.fn().mockResolvedValue(undefined)}
+          onGoToExport={vi.fn()}
+          onGoToReview={vi.fn()}
+        />
+      </>,
+    );
+
+    expect(screen.getByText(/OCR 5\/20 Pages · Continue/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Continue Remaining \(Pages 6–20\)/i }));
+    expect(onContinue).toHaveBeenCalledWith(6, 20, false);
+
+    fireEvent.click(screen.getByRole("button", { name: /Fast Draft \(6–20\)/i }));
+    expect(onContinue).toHaveBeenCalledWith(6, 20, true);
+
+    fireEvent.click(screen.getByRole("button", { name: /OCR Options/i }));
+    expect(onOpenDrawer).toHaveBeenCalledTimes(1);
+  });
 });

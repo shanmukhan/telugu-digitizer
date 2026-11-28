@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef } from "react";
 import type { BookOCRRunSummary, BookSummary, HostCapabilities } from "../types/api";
-import { formatEngineLabel } from "../utils/formatters";
+import { computeBookOcrCoverage, formatEngineLabel } from "../utils/formatters";
 
 interface OcrRunnerDrawerProps {
   open: boolean;
@@ -24,7 +24,7 @@ interface OcrRunnerDrawerProps {
   onRenderDpiChange: (v: number) => void;
   onForceRerunChange: (v: boolean) => void;
   onIncludeDigitalChange: (v: boolean) => void;
-  onStartOcr: (preset?: "sample_5" | "full" | "quick_tesseract") => Promise<void>;
+  onStartOcr: (preset?: "sample_5" | "full" | "quick_tesseract" | "remaining") => Promise<void>;
   onResumeRun: (runId: string) => Promise<void>;
   onCancelRun: (runId: string) => Promise<void>;
   onClose: () => void;
@@ -66,6 +66,7 @@ export function OcrRunnerDrawer({
   const activeRuns = runs.filter((r) => r.status === "running" || r.status === "queued");
   const resumableRuns = runs.filter((r) => r.status === "partial" || r.status === "failed");
   const completedRuns = runs.filter((r) => r.status === "completed");
+  const coverage = computeBookOcrCoverage(book, runs);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -190,6 +191,27 @@ export function OcrRunnerDrawer({
         <section className="drawer-section" aria-label="Quick OCR presets">
           <h2 className="drawer-section-title">Quick Presets</h2>
           <div className="preset-grid">
+            {coverage.isPartialCoverage && (
+              <button
+                type="button"
+                className="preset-card preset-card-highlight"
+                disabled={isOcrRunning || (!usePaddle && !useTesseract)}
+                onClick={async () => {
+                  await onStartOcr("remaining");
+                  onClose();
+                }}
+              >
+                <strong>
+                  ▶ Continue Remaining Pages ({coverage.nextStartPage}–{coverage.nextEndPage})
+                </strong>
+                <span className="hint-text">
+                  Process the remaining {coverage.remainingPagesCount} page(s) with your selected
+                  engines. Approved edits on Pages {coverage.coveredRangeLabel} are preserved for
+                  review and export.
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               className="preset-card"
@@ -199,9 +221,18 @@ export function OcrRunnerDrawer({
                 onClose();
               }}
             >
-              <strong>⚡ Quick Full-Book Draft</strong>
+              <strong>
+                ⚡{" "}
+                {coverage.isPartialCoverage
+                  ? `Fast Draft Remaining (${coverage.nextStartPage}–${coverage.nextEndPage})`
+                  : "Quick Full-Book Draft"}
+              </strong>
               <span className="hint-text">
-                Tesseract 5 Telugu (~0.4s/page CPU) across all {book.page_count} pages for fast proofreading.
+                Tesseract 5 Telugu (~0.4s/page CPU) across{" "}
+                {coverage.isPartialCoverage
+                  ? `remaining ${coverage.remainingPagesCount} pages`
+                  : `all ${book.page_count} pages`}{" "}
+                for fast proofreading.
               </span>
             </button>
 
@@ -293,6 +324,18 @@ export function OcrRunnerDrawer({
               </label>
             </div>
             <div className="badge-row" style={{ marginTop: "0.45rem" }}>
+              {coverage.isPartialCoverage && (
+                <button
+                  type="button"
+                  className="btn-compact"
+                  onClick={() => {
+                    onStartPageChange(String(coverage.nextStartPage));
+                    onEndPageChange(String(coverage.nextEndPage));
+                  }}
+                >
+                  Remaining ({coverage.nextStartPage}–{coverage.nextEndPage})
+                </button>
+              )}
               <button
                 type="button"
                 className="btn-compact"

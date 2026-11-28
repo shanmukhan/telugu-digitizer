@@ -4,7 +4,8 @@ import { PageRail } from "./PageRail";
 import { ReviewEditorPanel } from "./ReviewEditorPanel";
 import { SourcePageViewer } from "./SourcePageViewer";
 import { TopNavBar } from "./TopNavBar";
-import type { BookSummary, PageReviewPayload, PageSummary, ReviewBlock } from "../types/api";
+import type { BookOCRRunSummary, BookSummary, PageReviewPayload, PageSummary, ReviewBlock } from "../types/api";
+import { computeBookOcrCoverage } from "../utils/formatters";
 import { diffComparatorWords, diffTeluguGraphemes } from "../utils/teluguDiff";
 
 function makeBook(id: string, title: string, pages = 120): BookSummary {
@@ -292,5 +293,85 @@ describe("SourcePageViewer accessible single-tab-stop SVG listbox", () => {
 
     fireEvent.keyDown(svg, { key: "ArrowDown" });
     expect(onSelectBlock).toHaveBeenCalledWith("blk-2");
+  });
+});
+
+describe("Partial-book OCR continuation UX", () => {
+  it("computes remaining range 6–406 after a 1–5 sample run and shows direct continuation actions on Page 6", () => {
+    const book = makeBook("b-406", "ఆముక్తమాల్యద", 406);
+    const sampleRun: BookOCRRunSummary = {
+      ocr_run_id: "run-1-5",
+      engine: "paddleocr",
+      model_id: "PP-OCRv5",
+      status: "completed",
+      progress_current: 5,
+      progress_total: 5,
+      config: { start_page: 1, end_page: 5 },
+      created_at: "2026-11-28T00:00:00Z",
+      completed_at: "2026-11-28T00:05:00Z",
+    };
+
+    const coverage = computeBookOcrCoverage(book, [sampleRun]);
+    expect(coverage.isPartialCoverage).toBe(true);
+    expect(coverage.coveredPagesCount).toBe(5);
+    expect(coverage.nextStartPage).toBe(6);
+    expect(coverage.nextEndPage).toBe(406);
+    expect(coverage.isPageCovered(5)).toBe(true);
+    expect(coverage.isPageCovered(6)).toBe(false);
+
+    // TopNavBar must show "OCR 5/406p · Continue" instead of "OCR Ready"
+    const { unmount } = render(
+      <TopNavBar
+        books={[book]}
+        selectedBook={book}
+        runs={[sampleRun]}
+        activeView="review"
+        keyboardOpen={false}
+        onSelectBook={vi.fn()}
+        onSelectView={vi.fn()}
+        onOpenImport={vi.fn()}
+        onOpenOcrDrawer={vi.fn()}
+        onToggleKeyboard={vi.fn()}
+        onOpenShortcuts={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /OCR 5\/406p · Continue/i })).toBeTruthy();
+    unmount();
+
+    // Uncovered Page 6 shows direct "Continue Remaining Pages (6–406)" and "OCR Page 6 Only"
+    const onContinue = vi.fn().mockResolvedValue(undefined);
+    const onRunCurrent = vi.fn().mockResolvedValue(undefined);
+    const page6Review: PageReviewPayload = {
+      ...makeReview([]),
+      page_number: 6,
+      page_count: 406,
+      available_runs: [sampleRun],
+      primary_run_id: sampleRun.ocr_run_id,
+    };
+
+    render(
+      <ReviewEditorPanel
+        review={page6Review}
+        selectedBlockId={null}
+        busyBlockId={null}
+        ocrCoverage={coverage}
+        onContinueRemainingOcr={onContinue}
+        onRunCurrentPageOcr={onRunCurrent}
+        onQuickStartOcr={vi.fn().mockResolvedValue(undefined)}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByText("Page 6 has not been OCR'd yet.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Continue Remaining Pages \(6–406\)/i }));
+    expect(onContinue).toHaveBeenCalledWith(6, 406);
+
+    fireEvent.click(screen.getByRole("button", { name: /OCR Page 6 Only/i }));
+    expect(onRunCurrent).toHaveBeenCalledWith(6);
   });
 });

@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { BookOCRRunSummary, BookSummary, OCRRunStatus, PageSummary } from "../types/api";
-import { buildRunTelemetry, formatDuration, formatEngineLabel } from "../utils/formatters";
+import {
+  buildRunTelemetry,
+  computeBookOcrCoverage,
+  formatDuration,
+  formatEngineLabel,
+} from "../utils/formatters";
 
 export function mergeBookRunsWithLiveStatuses(
   runs: BookOCRRunSummary[],
@@ -64,9 +69,9 @@ export function HeaderOcrStatusPill({ book, runs }: HeaderOcrStatusPillProps) {
 
   const running = runs.find((r) => r.status === "running");
   const queued = runs.find((r) => r.status === "queued");
-  const completedRuns = runs.filter((r) => r.status === "completed");
   const partialOrFailed = runs.filter((r) => r.status === "partial" || r.status === "failed");
   const needsScanOcr = book.scanned_pages_count + book.mixed_pages_count > 0;
+  const coverage = computeBookOcrCoverage(book, runs);
 
   if (running) {
     const telemetry = buildRunTelemetry(running, book, Date.now());
@@ -92,11 +97,22 @@ export function HeaderOcrStatusPill({ book, runs }: HeaderOcrStatusPillProps) {
     );
   }
 
-  if (completedRuns.length > 0 || !needsScanOcr) {
+  if (!needsScanOcr || coverage.isFullyCovered) {
     return (
       <div className="header-status-pill ready" role="status" aria-live="polite">
         <span aria-hidden="true">✓</span>
         <span>{needsScanOcr ? "OCR Ready" : "Digital Text Ready"}</span>
+      </div>
+    );
+  }
+
+  if (coverage.isPartialCoverage) {
+    return (
+      <div className="header-status-pill warn" role="status" aria-live="polite">
+        <span aria-hidden="true">⏳</span>
+        <span>
+          OCR {coverage.coveredPagesCount}/{coverage.totalPages} Pages · Continue
+        </span>
       </div>
     );
   }
@@ -123,10 +139,16 @@ interface OcrProgressStripProps {
   runs: BookOCRRunSummary[];
   pages: PageSummary[];
   activeView: "review" | "memory" | "export";
-  /** When true, hide the static green Ready banner once OCR is complete to maximize workspace height. */
+  /** When true, hide the static green Ready banner once the entire book is OCR'd to maximize workspace height. */
   hideWhenReady?: boolean;
   onQuickStartSample: () => Promise<void>;
   onQuickStartFull: () => Promise<void>;
+  onContinueRemaining?: (
+    startPage: number,
+    endPage: number,
+    quickTesseract?: boolean,
+  ) => Promise<void>;
+  onOpenOcrDrawer?: () => void;
   onResumeRun: (runId: string) => Promise<void>;
   onCancelRun?: (runId: string) => Promise<void>;
   onGoToExport: () => void;
@@ -141,6 +163,8 @@ export function OcrProgressStrip({
   hideWhenReady = false,
   onQuickStartSample,
   onQuickStartFull,
+  onContinueRemaining,
+  onOpenOcrDrawer,
   onResumeRun,
   onCancelRun,
   onGoToExport,
@@ -310,7 +334,75 @@ export function OcrProgressStrip({
     );
   }
 
-  // Ready state (at least one completed run or digital-only book)
+  // Partial-book coverage (e.g., user tested Pages 1–5 of 406 and is ready to continue Pages 6–406)
+  const coverage = computeBookOcrCoverage(book, runs);
+  if (coverage.isPartialCoverage && needsScanOcr) {
+    const sampleReviewed = approvedCount >= coverage.coveredPagesCount;
+    const rangeStr = `${coverage.nextStartPage}–${coverage.nextEndPage}`;
+    return (
+      <section className="ocr-strip warn" aria-label="Continue OCR on remaining book pages">
+        <div className="ocr-strip-top">
+          <div>
+            <div className="badge-row" style={{ marginBottom: "0.18rem" }}>
+              <span className="pill-tag info">
+                ✓ Pages {coverage.coveredRangeLabel} OCR&apos;d ({coverage.coveredPagesCount}/
+                {coverage.totalPages})
+              </span>
+              <span className="metric-chip">
+                <strong>{coverage.remainingPagesCount}</strong> remaining
+              </span>
+              {approvedCount > 0 && (
+                <span className="metric-chip">
+                  <strong>{approvedCount}</strong> approved
+                </span>
+              )}
+            </div>
+            <p className="hint-text" style={{ margin: 0 }}>
+              {sampleReviewed
+                ? `Test pages approved! Continue OCR on Pages ${rangeStr} — your approved edits on Pages ${coverage.coveredRangeLabel} are preserved for review & export.`
+                : `Only Pages ${coverage.coveredRangeLabel} have been OCR'd so far. Continue OCR on Pages ${rangeStr} whenever you're ready — your edits on Pages ${coverage.coveredRangeLabel} are preserved.`}
+            </p>
+          </div>
+          <div className="badge-row">
+            {onContinueRemaining ? (
+              <>
+                <button
+                  type="button"
+                  className="primary btn-compact"
+                  onClick={() =>
+                    void onContinueRemaining(coverage.nextStartPage, coverage.nextEndPage, false)
+                  }
+                >
+                  ▶ Continue Remaining (Pages {rangeStr})
+                </button>
+                <button
+                  type="button"
+                  className="btn-compact"
+                  title="Run fast Tesseract 5 Telugu draft (~0.4s/page) on remaining pages"
+                  onClick={() =>
+                    void onContinueRemaining(coverage.nextStartPage, coverage.nextEndPage, true)
+                  }
+                >
+                  ⚡ Fast Draft ({rangeStr})
+                </button>
+              </>
+            ) : (
+              <button type="button" className="primary btn-compact" onClick={() => void onQuickStartFull()}>
+                Run Full Book OCR
+              </button>
+            )}
+            {onOpenOcrDrawer && (
+              <button type="button" className="btn-compact" onClick={onOpenOcrDrawer}>
+                OCR Options…
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // Ready state (full book OCR completed or digital-only book)
   if (hideWhenReady) {
     return null;
   }

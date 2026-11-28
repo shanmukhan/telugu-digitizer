@@ -369,3 +369,68 @@ def test_phase5_heading_roles_ignored_blocks_manual_line_and_training_crop(phase
     assert manual_text in all_texts
     assert rev_p2["blocks"][0]["current_text"] not in all_texts
 
+
+def test_phase5_export_stitches_multi_range_ocr_runs_and_preserves_approved_edits(
+    phase5_client,
+) -> None:
+    """Running a sample range (Page 1), approving edits, then continuing Page 2 exports both seamlessly."""
+    client, app, settings = phase5_client
+    if not (settings.tessdata_dir / "tel.traineddata").is_file():
+        pytest.skip("tel.traineddata missing.")
+
+    pdf_bytes = _build_two_page_scanned_pdf()
+    book_id = client.post(
+        "/api/v1/books",
+        files={"file": ("stitched_book.pdf", pdf_bytes, "application/pdf")},
+        data={"title": "బహుళ శ్రేణి పుస్తకం"},
+    ).json()["book_id"]
+
+    # 1. Run OCR on Page 1 only (sample test run)
+    run1 = client.post(
+        f"/api/v1/books/{book_id}/ocr-runs",
+        json={"engines": ["tesseract_tel_best"], "page_range": {"start": 1, "end": 1}},
+    ).json()
+    app.state.ocr_executor.wait_for_run(UUID(run1["ocr_run_id"]), timeout=30.0)
+
+    # Human-edit and approve Page 1
+    rev_p1 = client.get(f"/api/v1/books/{book_id}/pages/1/review").json()
+    assert len(rev_p1["blocks"]) >= 1
+    approved_p1_text = "ప్రథమభాగం - ఆమోదించిన పాఠ్యం"
+    edit_resp = client.post(
+        f"/api/v1/ocr-blocks/{rev_p1['blocks'][0]['block_id']}/edits",
+        json={"edited_text": approved_p1_text, "action": "corrected"},
+    )
+    assert edit_resp.status_code == 201
+    assert (
+        client.patch(
+            f"/api/v1/books/{book_id}/pages/1/review-status",
+            json={"review_status": "approved", "primary_run_id": rev_p1["primary_run_id"]},
+        ).status_code
+        == 200
+    )
+
+    # 2. Continue OCR on remaining Page 2 in a separate run
+    run2 = client.post(
+        f"/api/v1/books/{book_id}/ocr-runs",
+        json={"engines": ["tesseract_tel_best"], "page_range": {"start": 2, "end": 2}},
+    ).json()
+    app.state.ocr_executor.wait_for_run(UUID(run2["ocr_run_id"]), timeout=30.0)
+    rev_p2 = client.get(f"/api/v1/books/{book_id}/pages/2/review").json()
+    assert len(rev_p2["blocks"]) >= 1
+    p2_text = rev_p2["blocks"][0]["current_text"]
+
+    # 3. Export with primary_run_id=None -> must stitch Page 1 (approved edit) + Page 2 (run 2)!
+    exp_txt = client.post(
+        f"/api/v1/books/{book_id}/exports",
+        json={
+            "format": "txt",
+            "layout_mode": "page_preserving",
+            "text_version": "human_approved",
+        },
+    )
+    assert exp_txt.status_code == 201
+    txt_body = client.get(exp_txt.json()["download_url"]).content.decode("utf-8")
+    assert approved_p1_text in txt_body
+    assert p2_text in txt_body
+
+

@@ -188,7 +188,8 @@ cd frontend && npm test
 ## 6. Phase 4 — Correction Memory & Contextual Suggestions
 
 Phase 4 endpoints under `/api/v1`:
-- `POST /api/v1/ocr-blocks/{block_id}/edits` (`add_to_correction_memory`, `memory_scope`: `book_only` or `global_suggestion`, `correction_type`)
+- `POST /api/v1/ocr-blocks/{block_id}/edits` (`add_to_correction_memory`, `memory_scope`: `global_suggestion` by default or `book_only`, `correction_type`)
+- `POST /api/v1/books/{book_id}/pages/{page_number}/autocorrect` (non-destructive opt-in suggestions combining active correction memory, 186k-word Telugu lexicon with *vattu*-stripped skeleton & visual-confusion matching, and book bigram context)
 - `GET /api/v1/corrections/search` (context-aware suggestion lookup with conflict detection)
 - `GET /api/v1/corrections` (browse and filter active/disabled/rejected records)
 - `POST /api/v1/corrections/{correction_id}/approve` / `/reject`
@@ -199,7 +200,7 @@ Phase 4 endpoints under `/api/v1`:
 ## 7. Phase 5 — DOCX and TXT Export
 
 Phase 5 endpoints under `/api/v1`:
-- `POST /api/v1/books/{book_id}/exports` (`format`: `docx` or `txt`, `layout_mode`: `editable_flow` or `page_preserving`, `text_version`: `human_approved` or `raw_ocr`)
+- `POST /api/v1/books/{book_id}/exports` (`format`: `docx` or `txt`, `layout_mode`: `editable_flow` or `page_preserving`, `text_version`: `human_approved` or `raw_ocr`; default auto-select stitches multi-range OCR runs such as Pages `1–5` + `6–406` while preserving human-approved edits per page)
 - `GET /api/v1/books/{book_id}/exports`
 - `GET /api/v1/exports/{export_id}` / `/download` / `/manifest`
 

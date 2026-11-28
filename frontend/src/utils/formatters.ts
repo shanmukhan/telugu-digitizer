@@ -177,3 +177,146 @@ export function buildRunTelemetry(
     pageRangeLabel: parseRangeLabel(cfg),
   };
 }
+
+export interface BookOcrCoverage {
+  totalPages: number;
+  totalScanned: number;
+  coveredPagesCount: number;
+  remainingPagesCount: number;
+  hasAnyOcr: boolean;
+  isFullyCovered: boolean;
+  isPartialCoverage: boolean;
+  coveredRangeLabel: string | null;
+  nextStartPage: number;
+  nextEndPage: number;
+  isPageCovered: (pageNumber: number) => boolean;
+}
+
+/**
+ * Computes exact page-range OCR coverage across all completed/partial runs for a book.
+ * Distinguishes sample runs (e.g., Pages 1–5 of 406) from full-book completion so the UI
+ * can surface direct "Continue Remaining Pages (6–406)" prompts instead of "OCR Ready".
+ */
+export function computeBookOcrCoverage(
+  book: BookSummary,
+  runs: BookOCRRunSummary[],
+): BookOcrCoverage {
+  const totalPages = Math.max(0, book.page_count);
+  const totalScanned = Math.max(0, book.scanned_pages_count + book.mixed_pages_count);
+
+  if (totalPages === 0 || totalScanned === 0) {
+    return {
+      totalPages,
+      totalScanned,
+      coveredPagesCount: totalPages,
+      remainingPagesCount: 0,
+      hasAnyOcr: true,
+      isFullyCovered: true,
+      isPartialCoverage: false,
+      coveredRangeLabel: totalPages > 0 ? `1–${totalPages}` : null,
+      nextStartPage: 1,
+      nextEndPage: Math.max(1, totalPages),
+      isPageCovered: () => true,
+    };
+  }
+
+  const intervals: Array<[number, number]> = [];
+  for (const run of runs) {
+    if (run.status !== "completed" && run.status !== "partial") continue;
+    const progress = run.progress_current ?? 0;
+    if (run.status === "partial" && progress <= 0) continue;
+
+    const cfg = run.config ?? {};
+    const cfgStart = typeof cfg.start_page === "number" ? Math.max(1, Math.floor(cfg.start_page)) : null;
+    const cfgEnd =
+      typeof cfg.end_page === "number" ? Math.min(totalPages, Math.floor(cfg.end_page)) : null;
+
+    if (cfgStart !== null && cfgEnd !== null && cfgEnd >= cfgStart) {
+      if (run.status === "completed") {
+        intervals.push([cfgStart, cfgEnd]);
+      } else {
+        const partialEnd = Math.min(cfgEnd, cfgStart + Math.max(0, progress - 1));
+        if (partialEnd >= cfgStart) {
+          intervals.push([cfgStart, partialEnd]);
+        }
+      }
+    } else if (run.status === "completed") {
+      const total = run.progress_total ?? 0;
+      if (total === 0 || total >= totalScanned || progress >= totalScanned) {
+        intervals.push([1, totalPages]);
+      } else if (progress > 0) {
+        intervals.push([1, Math.min(totalPages, progress)]);
+      } else {
+        intervals.push([1, totalPages]);
+      }
+    } else if (progress > 0) {
+      intervals.push([1, Math.min(totalPages, progress)]);
+    }
+  }
+
+  if (intervals.length === 0) {
+    return {
+      totalPages,
+      totalScanned,
+      coveredPagesCount: 0,
+      remainingPagesCount: totalScanned,
+      hasAnyOcr: false,
+      isFullyCovered: false,
+      isPartialCoverage: false,
+      coveredRangeLabel: null,
+      nextStartPage: 1,
+      nextEndPage: totalPages,
+      isPageCovered: () => false,
+    };
+  }
+
+  intervals.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [s, e] of intervals) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1] + 1) {
+      last[1] = Math.max(last[1], e);
+    } else {
+      merged.push([s, e]);
+    }
+  }
+
+  let coveredPagesCount = 0;
+  for (const [s, e] of merged) {
+    coveredPagesCount += e - s + 1;
+  }
+  coveredPagesCount = Math.min(totalPages, coveredPagesCount);
+
+  // Locate first uncovered page (e.g., 6 after Pages 1–5)
+  let nextStartPage = 1;
+  for (const [s, e] of merged) {
+    if (nextStartPage < s) {
+      break;
+    }
+    if (nextStartPage >= s && nextStartPage <= e) {
+      nextStartPage = e + 1;
+    }
+  }
+
+  const isFullyCovered = nextStartPage > totalPages || coveredPagesCount >= totalPages;
+  const remainingPagesCount = isFullyCovered ? 0 : Math.max(1, totalPages - coveredPagesCount);
+  const clampedStart = isFullyCovered ? 1 : Math.min(totalPages, nextStartPage);
+  const coveredRangeLabel = merged
+    .map(([s, e]) => (s === e ? `${s}` : `${s}–${e}`))
+    .join(", ");
+
+  return {
+    totalPages,
+    totalScanned,
+    coveredPagesCount,
+    remainingPagesCount,
+    hasAnyOcr: true,
+    isFullyCovered,
+    isPartialCoverage: !isFullyCovered,
+    coveredRangeLabel,
+    nextStartPage: clampedStart,
+    nextEndPage: totalPages,
+    isPageCovered: (pageNumber: number) =>
+      merged.some(([s, e]) => pageNumber >= s && pageNumber <= e),
+  };
+}

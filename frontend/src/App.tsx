@@ -52,7 +52,11 @@ import type {
   PageSummary,
   ReviewBlock,
 } from "./types/api";
-import { formatEngineLabel, formatReviewStatus } from "./utils/formatters";
+import {
+  computeBookOcrCoverage,
+  formatEngineLabel,
+  formatReviewStatus,
+} from "./utils/formatters";
 import {
   type EditableTextElement,
   backspaceAtCursor,
@@ -221,18 +225,39 @@ export function App() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirtyBlockCount]);
 
-  // Sync default OCR page range when book changes
+  // Sync default OCR page range when book or coverage changes
   const reviewBookId = review?.book_id;
   const reviewPageCount = review?.page_count ?? selectedBook?.page_count;
+  const mergedRuns = useMemo(
+    () => mergeBookRunsWithLiveStatuses(runs, liveStatuses),
+    [runs, liveStatuses],
+  );
+  const bookOcrCoverage = useMemo(
+    () => (selectedBook ? computeBookOcrCoverage(selectedBook, mergedRuns) : null),
+    [selectedBook, mergedRuns],
+  );
+
   useEffect(() => {
     if (selectedBookId && reviewPageCount) {
-      setOcrStartPage("1");
-      setOcrEndPage(String(reviewPageCount));
+      if (bookOcrCoverage?.isPartialCoverage) {
+        setOcrStartPage(String(bookOcrCoverage.nextStartPage));
+        setOcrEndPage(String(bookOcrCoverage.nextEndPage));
+      } else {
+        setOcrStartPage("1");
+        setOcrEndPage(String(reviewPageCount));
+      }
     } else {
       setOcrStartPage("1");
       setOcrEndPage("");
     }
-  }, [selectedBookId, reviewBookId, reviewPageCount]);
+  }, [
+    selectedBookId,
+    reviewBookId,
+    reviewPageCount,
+    bookOcrCoverage?.isPartialCoverage,
+    bookOcrCoverage?.nextStartPage,
+    bookOcrCoverage?.nextEndPage,
+  ]);
 
   useEffect(() => {
     setLiveStatuses({});
@@ -407,11 +432,6 @@ export function App() {
     });
   }, [selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshReview, handleStatusBanner]);
 
-  const mergedRuns = useMemo(
-    () => mergeBookRunsWithLiveStatuses(runs, liveStatuses),
-    [runs, liveStatuses],
-  );
-
   const activeRunIds = useMemo(
     () =>
       mergedRuns
@@ -542,7 +562,10 @@ export function App() {
     }
   }
 
-  async function handleStartOcr(preset?: "sample_5" | "full" | "quick_tesseract") {
+  async function handleStartOcr(
+    preset?: "sample_5" | "full" | "quick_tesseract" | "remaining",
+    explicitRange?: { start: number; end: number },
+  ) {
     if (!selectedBookId) return;
     const engines: string[] = [];
     if (preset === "quick_tesseract") {
@@ -559,12 +582,42 @@ export function App() {
     const totalPages = selectedBook?.page_count ?? review?.page_count ?? 0;
     let pageRange: { start: number; end: number } | null = null;
 
-    if (preset === "sample_5") {
+    if (explicitRange) {
+      setOcrStartPage(String(explicitRange.start));
+      setOcrEndPage(String(explicitRange.end));
+      pageRange =
+        totalPages > 0 && explicitRange.start === 1 && explicitRange.end === totalPages
+          ? null
+          : explicitRange;
+    } else if (preset === "sample_5") {
       const endSample = Math.min(5, totalPages || 5);
       setOcrStartPage("1");
       setOcrEndPage(String(endSample));
       pageRange = totalPages > 0 && endSample === totalPages ? null : { start: 1, end: endSample };
-    } else if (preset === "full" || preset === "quick_tesseract") {
+    } else if (preset === "remaining") {
+      const nextStart = bookOcrCoverage?.isPartialCoverage ? bookOcrCoverage.nextStartPage : 1;
+      const nextEnd = bookOcrCoverage?.isPartialCoverage
+        ? bookOcrCoverage.nextEndPage
+        : totalPages || nextStart;
+      setOcrStartPage(String(nextStart));
+      setOcrEndPage(String(nextEnd));
+      pageRange =
+        totalPages > 0 && nextStart === 1 && nextEnd === totalPages
+          ? null
+          : { start: nextStart, end: nextEnd };
+    } else if (preset === "quick_tesseract") {
+      if (bookOcrCoverage?.isPartialCoverage) {
+        const nextStart = bookOcrCoverage.nextStartPage;
+        const nextEnd = bookOcrCoverage.nextEndPage;
+        setOcrStartPage(String(nextStart));
+        setOcrEndPage(String(nextEnd));
+        pageRange = { start: nextStart, end: nextEnd };
+      } else {
+        setOcrStartPage("1");
+        if (totalPages > 0) setOcrEndPage(String(totalPages));
+        pageRange = null;
+      }
+    } else if (preset === "full") {
       setOcrStartPage("1");
       if (totalPages > 0) setOcrEndPage(String(totalPages));
       pageRange = null;
@@ -601,6 +654,8 @@ export function App() {
         forceRerun: ocrForceRerun || undefined,
         includeDigitalTextPages: ocrIncludeDigital ? true : undefined,
       });
+      // Reset explicit primary run selection so every page automatically displays its populated run.
+      setSelectedPrimaryRunId(null);
       const runIdsToFetch =
         created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
       const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
@@ -613,7 +668,7 @@ export function App() {
       });
       await refreshBookDetail(selectedBookId);
       if (created.reused_existing) {
-        await refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
+        await refreshReview(selectedBookId, selectedPageNumber, null);
         handleStatusBanner("info", "Reused existing completed OCR run.");
       } else {
         const engineNames = engines.map((e) => formatEngineLabel(e)).join(" + ");
@@ -1191,6 +1246,13 @@ export function App() {
             hideWhenReady
             onQuickStartSample={() => handleStartOcr("sample_5")}
             onQuickStartFull={() => handleStartOcr("full")}
+            onContinueRemaining={(startPage, endPage, quickTesseract) =>
+              handleStartOcr(quickTesseract ? "quick_tesseract" : "remaining", {
+                start: startPage,
+                end: endPage,
+              })
+            }
+            onOpenOcrDrawer={() => setOcrDrawerOpen(true)}
             onResumeRun={handleResumeRun}
             onCancelRun={handleCancelRun}
             onGoToExport={() => handleSelectView("export")}
@@ -1400,6 +1462,13 @@ export function App() {
                   onQuickStartOcr={async () => {
                     setOcrDrawerOpen(true);
                   }}
+                  ocrCoverage={bookOcrCoverage}
+                  onContinueRemainingOcr={(startPage, endPage) =>
+                    handleStartOcr("remaining", { start: startPage, end: endPage })
+                  }
+                  onRunCurrentPageOcr={(pageNum) =>
+                    handleStartOcr(undefined, { start: pageNum, end: pageNum })
+                  }
                   onOpenFullScanMobile={() => setMobilePane("scan")}
                   onDirtyCountChange={setDirtyBlockCount}
                   onSelectBlock={handleSelectFromEditor}

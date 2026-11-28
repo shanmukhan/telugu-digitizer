@@ -138,6 +138,34 @@ def _append_field(paragraph: Any, instruction: str) -> None:
     run._r.append(fld_end)
 
 
+def _list_ranked_usable_ocr_runs(
+    db: Session,
+    book_id: uuid.UUID,
+) -> list[OCRRun]:
+    """Return all completed/partial OCR runs for a book ordered from highest to lowest priority."""
+    rows = db.execute(
+        select(OCRRun, ModelRegistry, ProcessingJob)
+        .outerjoin(ModelRegistry, OCRRun.model_registry_id == ModelRegistry.id)
+        .outerjoin(ProcessingJob, OCRRun.processing_job_id == ProcessingJob.id)
+        .where(OCRRun.book_id == book_id, OCRRun.status.in_(["completed", "partial"]))
+        .order_by(OCRRun.created_at.desc())
+    ).all()
+    if not rows:
+        return []
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            (row[2].progress_current if row[2] else 0) > 0 or row[0].status == "completed",
+            row[0].status == "completed",
+            bool(row[1] and row[1].engine_name == "paddleocr"),
+            row[2].progress_current if row[2] else 0,
+            row[0].created_at,
+        ),
+        reverse=True,
+    )
+    return [row[0] for row in ranked]
+
+
 def _select_ocr_run(
     db: Session,
     book_id: uuid.UUID,
@@ -153,25 +181,8 @@ def _select_ocr_run(
             )
         return run
 
-    rows = db.execute(
-        select(OCRRun, ModelRegistry, ProcessingJob)
-        .outerjoin(ModelRegistry, OCRRun.model_registry_id == ModelRegistry.id)
-        .outerjoin(ProcessingJob, OCRRun.processing_job_id == ProcessingJob.id)
-        .where(OCRRun.book_id == book_id, OCRRun.status.in_(["completed", "partial"]))
-        .order_by(OCRRun.created_at.desc())
-    ).all()
-    if not rows:
-        return None
-    best_run, _, _ = max(
-        rows,
-        key=lambda row: (
-            (row[2].progress_current if row[2] else 0) > 0 or row[0].status == "completed",
-            row[0].status == "completed",
-            bool(row[1] and row[1].engine_name == "paddleocr"),
-            row[2].progress_current if row[2] else 0,
-        ),
-    )
-    return best_run
+    ranked = _list_ranked_usable_ocr_runs(db, book_id)
+    return ranked[0] if ranked else None
 
 
 def _resolve_page_pt_dims(
@@ -201,7 +212,14 @@ def _collect_export_pages(
             select(BookPage).where(BookPage.book_id == book.id).order_by(BookPage.page_number)
         ).all()
     )
-    selected_run = _select_ocr_run(db, book.id, primary_run_id)
+    if primary_run_id is not None:
+        explicit_run = _select_ocr_run(db, book.id, primary_run_id)
+        candidate_runs = [explicit_run] if explicit_run is not None else []
+    else:
+        candidate_runs = _list_ranked_usable_ocr_runs(db, book.id)
+    selected_run = candidate_runs[0] if candidate_runs else None
+    candidate_run_ids = [r.id for r in candidate_runs]
+    run_priority = {r.id: idx for idx, r in enumerate(candidate_runs)}
     version_row = (
         db.scalars(
             select(DocumentTextVersion)
@@ -225,31 +243,36 @@ def _collect_export_pages(
                     fallback_first_page_dims = (float(rect.width), float(rect.height))
 
     # Project only needed scalar columns (never hydrating raw_engine_payload / polygon JSONB blobs).
-    blocks_by_page: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, str, str]]] = {}
+    # Group by (page_id, run_id) so auto-export seamlessly stitches multi-range runs (e.g., 1-5 + 6-406)
+    # and preserves human-reviewed blocks from whichever run the user approved on each page.
+    blocks_by_page_and_run: dict[uuid.UUID, dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, str, str]]]] = {}
     latest_edit_by_block: dict[uuid.UUID, str] = {}
     latest_action_by_block: dict[uuid.UUID, str] = {}
     doc_block_by_ocr_id: dict[uuid.UUID, tuple[str, str]] = {}
 
-    if selected_run is not None:
+    if candidate_run_ids:
         raw_block_rows = db.execute(
             select(
                 OCRBlock.id,
+                OCRBlock.ocr_run_id,
                 OCRBlock.book_page_id,
                 OCRBlock.block_type,
                 OCRBlock.raw_text,
             )
-            .where(OCRBlock.ocr_run_id == selected_run.id)
+            .where(OCRBlock.ocr_run_id.in_(candidate_run_ids))
             .order_by(OCRBlock.book_page_id, OCRBlock.reading_order, OCRBlock.block_index)
         ).all()
-        for blk_id, blk_page_id, blk_type, blk_raw_text in raw_block_rows:
-            blocks_by_page.setdefault(blk_page_id, []).append((blk_id, blk_page_id, blk_type, blk_raw_text))
+        for blk_id, blk_run_id, blk_page_id, blk_type, blk_raw_text in raw_block_rows:
+            blocks_by_page_and_run.setdefault(blk_page_id, {}).setdefault(blk_run_id, []).append(
+                (blk_id, blk_page_id, blk_type, blk_raw_text)
+            )
 
         if text_version != "raw_ocr" and raw_block_rows:
-            # Fetch ONLY the latest ReviewEdit per block in SQL (eliminates full-history hydration & huge IN lists).
+            # Fetch ONLY the latest ReviewEdit per block in SQL across candidate runs.
             latest_edit_rows = db.execute(
                 select(ReviewEdit.ocr_block_id, ReviewEdit.edited_text, ReviewEdit.action)
                 .join(OCRBlock, ReviewEdit.ocr_block_id == OCRBlock.id)
-                .where(OCRBlock.ocr_run_id == selected_run.id)
+                .where(OCRBlock.ocr_run_id.in_(candidate_run_ids))
                 .distinct(ReviewEdit.ocr_block_id)
                 .order_by(ReviewEdit.ocr_block_id, ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
             ).all()
@@ -271,6 +294,27 @@ def _collect_export_pages(
                 for d_ocr_id, d_final_text, d_role in doc_rows:
                     if d_ocr_id is not None:
                         doc_block_by_ocr_id[d_ocr_id] = (d_final_text, d_role)
+
+    # Resolve the best single run per page so multi-range runs stitch cleanly without duplicating lines.
+    blocks_by_page: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, str, str]]] = {}
+    for page_id, per_run in blocks_by_page_and_run.items():
+        if len(per_run) == 1:
+            blocks_by_page[page_id] = next(iter(per_run.values()))
+            continue
+
+        def _page_run_sort_key(item: tuple[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID, str, str]]]) -> tuple[int, int, int]:
+            rid, blks = item
+            if text_version != "raw_ocr":
+                reviewed_hits = sum(
+                    1 for b_id, _, _, _ in blks if b_id in doc_block_by_ocr_id or b_id in latest_edit_by_block
+                )
+            else:
+                reviewed_hits = 0
+            # Prefer runs with human-approved/edited blocks on this page, then overall run priority.
+            return (1 if reviewed_hits > 0 else 0, reviewed_hits, -run_priority.get(rid, 9999))
+
+        _best_rid, best_blocks = max(per_run.items(), key=_page_run_sort_key)
+        blocks_by_page[page_id] = best_blocks
 
     collected: list[PageExportContent] = []
     reviewed_pages: list[int] = []

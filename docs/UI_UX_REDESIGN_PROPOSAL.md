@@ -1,8 +1,9 @@
 # Browser UI/UX Redesign Proposal — Telugu Book Digitizer
 
-**Assessment Type:** Read-Only Product & Frontend UI/UX Audit and Redesign Architecture  
+**Assessment Type:** Product & Frontend UI/UX Audit and Redesign Architecture  
 **Evaluated Frontend Version:** `telugu-digitizer-ui@0.3.0` (`frontend/`)  
 **Date:** 2026-11-28  
+**Implementation Status:** Implemented across all 4 phases on 2026-11-28 (`TopNavBar`, `PageRail`, Two-Density `ReviewEditorPanel` with Telugu grapheme diff & noisy-comparator collapse, `ImportBookDialog`, `OcrRunnerDrawer`, `ShortcutsDialog`, `ToastRegion`, `PinnedLineCrop`, `@layer` CSS), plus partial-book OCR continuation UX (`computeBookOcrCoverage`, continuation banner after sample runs, direct `Continue Remaining Pages` actions on uncovered pages, and multi-run export stitching).
 
 ---
 
