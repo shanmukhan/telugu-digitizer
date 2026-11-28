@@ -47,7 +47,10 @@ _DEFAULT_LEXICON_PATH = Path(__file__).resolve().parents[2] / "models" / "lexico
 _EDGE_PUNCT = ".,!?;:\"'()[]{}—–-।॥“”‘’/\\|•*"
 _TELUGU_WORD_RE = re.compile(r"^[\u0C00-\u0C63\u0C78-\u0C7F\u200C\u200D]+$")
 _TELUGU_LETTER_RE = re.compile(r"[\u0C05-\u0C39\u0C58-\u0C61]")
+_TELUGU_CONSONANT_RE = re.compile(r"[\u0C15-\u0C39]")
+_TELUGU_VATTU_RE = re.compile(r"\u0C4D[\u0C15-\u0C39]")
 _SPLIT_KEEP_WS_RE = re.compile(r"(\s+)")
+_COMMON_VATTU_CONSONANTS = frozenset(("ర", "య", "వ", "త", "న", "మ", "ల", "క", "ప", "ట", "ద", "స"))
 
 
 def strip_telugu_joiners(token: str) -> str:
@@ -107,14 +110,14 @@ _TELUGU_SUFFIXES = (
 
 # Visually confusable Telugu OCR character groups.
 _CONFUSION_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("ధ", "ణ", "భ", "ద"),
-    ("స", "న", "త", "ష", "శ"),
-    ("ప", "వ"),
-    ("ట", "ల", "ళ"),
-    ("క", "ర", "గ", "ఖ", "ఱ"),
+    ("ధ", "ణ", "భ", "ద", "బ"),
+    ("స", "న", "త", "థ", "ష", "శ"),
+    ("ప", "వ", "ఫ"),
+    ("ట", "ఠ", "ల", "ళ"),
+    ("క", "ర", "గ", "ఘ", "ఖ", "థ", "ఱ"),
     ("మ", "య"),
-    ("చ", "ద", "డ", "జ"),
-    ("బ", "ఓ", "ఒ"),
+    ("చ", "ఛ", "ద", "డ", "ఢ", "జ"),
+    ("బ", "భ", "ఓ", "ఒ"),
     ("ె", "ే", "ై"),
     ("ొ", "ో", "ా", "ౌ"),
     ("ి", "ీ"),
@@ -127,6 +130,17 @@ for _a, _b in (
     ("ధ", "ణ"),
     ("ధ", "భ"),
     ("ధ", "ద"),
+    ("బ", "భ"),
+    ("థ", "గ"),
+    ("థ", "ధ"),
+    ("థ", "ఠ"),
+    ("త", "థ"),
+    ("క", "ఖ"),
+    ("గ", "ఘ"),
+    ("ప", "ఫ"),
+    ("ట", "ఠ"),
+    ("డ", "ఢ"),
+    ("చ", "ఛ"),
     ("స", "న"),
     ("త", "న"),
     ("స", "ష"),
@@ -165,20 +179,27 @@ for _grp in _CONFUSION_GROUPS:
 _SKELETON_MAP: dict[str, str] = {
     "ధ": "ణ",
     "భ": "ణ",
+    "బ": "ణ",
     "స": "న",
     "త": "న",
     "ష": "న",
     "శ": "న",
     "ప": "వ",
+    "ఫ": "వ",
     "ట": "ల",
+    "ఠ": "ల",
     "ళ": "ల",
     "క": "ర",
     "గ": "ర",
+    "ఘ": "ర",
     "ఖ": "ర",
+    "థ": "ర",
     "ఱ": "ర",
     "మ": "య",
     "చ": "ద",
+    "ఛ": "ద",
     "డ": "ద",
+    "ఢ": "ద",
     "ే": "ె",
     "ై": "ె",
     "ో": "ొ",
@@ -194,6 +215,11 @@ _SKELETON_TABLE = str.maketrans(_SKELETON_MAP)
 def visual_skeleton(word: str) -> str:
     """Collapse common Telugu OCR visual confusions into a canonical lookup key."""
     return word.translate(_SKELETON_TABLE)
+
+
+def vattu_stripped_skeleton(word: str) -> str:
+    """Strip subjoined Telugu conjuncts (్ + consonant) before computing visual skeleton."""
+    return _TELUGU_VATTU_RE.sub("", word).translate(_SKELETON_TABLE)
 
 
 def _strip_edge_punct(token: str) -> tuple[str, str, str]:
@@ -250,6 +276,13 @@ def telugu_ocr_edit_distance(src: str, dst: str) -> float:
             )
             if i > 1 and j > 1 and ca == dst[j - 2] and src[i - 2] == cb:
                 best = min(best, dp[i - 2][j - 2] + 0.55)
+            # Treat a missing/spurious 2-codepoint Telugu vattu (్ + consonant) as a single visual OCR miss.
+            if j > 1 and dst[j - 2] == "\u0c4d" and "\u0c15" <= cb <= "\u0c39":
+                vattu_cost = 0.40 if cb in _COMMON_VATTU_CONSONANTS else 0.60
+                best = min(best, dp[i][j - 2] + vattu_cost)
+            if i > 1 and src[i - 2] == "\u0c4d" and "\u0c15" <= ca <= "\u0c39":
+                vattu_cost = 0.40 if ca in _COMMON_VATTU_CONSONANTS else 0.60
+                best = min(best, dp[i - 2][j] + vattu_cost)
             dp[i][j] = best
     return dp[m][n]
 
@@ -328,6 +361,7 @@ class TeluguLexicon:
         self.words: dict[str, int] = {}
         self.curated: set[str] = set()
         self.skeleton_index: dict[str, list[str]] = defaultdict(list)
+        self.vattu_skeleton_index: dict[str, list[str]] = defaultdict(list)
         self.delete1_index: dict[str, list[str]] = defaultdict(list)
         if entries:
             self._populate(entries)
@@ -347,6 +381,14 @@ class TeluguLexicon:
             cap = 48 if w in self.curated else 32
             if len(bucket) < cap:
                 bucket.append(w)
+
+            # Secondary vattu-stripped skeleton index catches dropped conjuncts (e.g., ప్ర -> ప in ప్రథమభాగం).
+            if "\u0c4d" in w and len(w) >= 5:
+                vskel = vattu_stripped_skeleton(w)
+                if vskel != skel and len(vskel) >= 3:
+                    vbucket = self.vattu_skeleton_index[vskel]
+                    if len(vbucket) < 24:
+                        vbucket.append(w)
 
             # Index 1-char deletes for top 100k words (low RAM, catches missing/extra chars in literary Telugu).
             if idx < 100_000 and 4 <= len(w) <= 22:
@@ -430,6 +472,11 @@ class TeluguLexicon:
         for cand in self.skeleton_index.get(skel, ()):
             if abs(len(cand) - len(unit)) <= 2:
                 cands.add(cand)
+        if len(unit) >= 4:
+            vskel = vattu_stripped_skeleton(unit)
+            for cand in self.vattu_skeleton_index.get(vskel, ()):
+                if abs(len(cand) - len(unit)) <= 4:
+                    cands.add(cand)
         if context is not None:
             for cand in context.extra_skeleton_index.get(skel, ()):
                 if abs(len(cand) - len(unit)) <= 2:
@@ -556,7 +603,7 @@ class TeluguLexicon:
                 continue
 
             # Base similarity from OCR distance.
-            denom = max(2.2, len(work_token) * 0.42)
+            denom = max(2.2, len(work_token) * (0.48 if len(work_token) >= 7 else 0.42))
             base_conf = max(0.0, 1.0 - (dist / denom))
 
             # Lexicon prior.
@@ -855,8 +902,53 @@ def _autocorrect_single_block(
                     use_sentence_context=use_sentence_context,
                     min_confidence=min_confidence,
                 )
+                # Recover broken leading rakara-vattu misread as unmatched '(' (e.g., '(పగమబాగం-' -> 'ప్రథమభాగం-').
+                consumed_leading_paren = False
+                if (
+                    lead.endswith("(")
+                    and ")" not in trail
+                    and ")" not in working_text
+                    and len(core) >= 3
+                    and _TELUGU_CONSONANT_RE.fullmatch(core[0])
+                    and not lexicon.is_known_word(core, context_model)
+                ):
+                    rakara_probe = f"{core[0]}\u0c4dర{core[1:]}"
+                    if lexicon.is_known_word(rakara_probe, context_model):
+                        rakara_prop: dict[str, Any] | None = {
+                            "original": f"({core}",
+                            "replacement": rakara_probe,
+                            "source": "dictionary",
+                            "confidence": 0.93,
+                            "reason": "Recovered broken leading rakāra vattu ('(' → ్ర)",
+                        }
+                    else:
+                        rakara_prop = lexicon.suggest_word(
+                            rakara_probe,
+                            prev_word=prev_core,
+                            next_word=next_core,
+                            context=context_model,
+                            use_sentence_context=use_sentence_context,
+                            min_confidence=min_confidence,
+                        )
+                        if rakara_prop is not None and rakara_prop["replacement"].startswith(
+                            f"{core[0]}\u0c4dర"
+                        ):
+                            rakara_prop = {
+                                **rakara_prop,
+                                "original": f"({core}",
+                                "reason": f"{rakara_prop['reason']} + recovered leading '(' → ్ర",
+                            }
+                        else:
+                            rakara_prop = None
+                    if rakara_prop is not None and (
+                        proposal is None or rakara_prop["confidence"] >= proposal["confidence"]
+                    ):
+                        proposal = rakara_prop
+                        consumed_leading_paren = True
+
                 if proposal is not None:
-                    parts[part_pos] = f"{lead}{proposal['replacement']}{trail}"
+                    eff_lead = lead[:-1] if consumed_leading_paren else lead
+                    parts[part_pos] = f"{eff_lead}{proposal['replacement']}{trail}"
                     cores[word_idx] = proposal["replacement"]
                     changes.append(proposal)
             working_text = "".join(parts)

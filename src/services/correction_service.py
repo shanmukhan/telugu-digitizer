@@ -204,7 +204,7 @@ def create_correction_memory_entry(
     left_context: str | None = None,
     right_context: str | None = None,
     correction_type: str | None = None,
-    scope: str = "book_only",
+    scope: str = "global_suggestion",
     book_id: uuid.UUID | None = None,
     source_ocr_block_id: uuid.UUID | None = None,
     language_code: str = "te",

@@ -364,64 +364,81 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         </div>
       )}
 
-      {block.disagreement_flag && block.comparator_text !== null && (
-        <div className="comparator-box">
-          <div className="comparator-row">
-            <div>
-              <span className="hint-text">{formatEngineLabel(comparatorEngine)} comparator: </span>
-              {comparatorTokens ? (
-                <span className="telugu-text" lang="te">
-                  {comparatorTokens.map((tok, idx) =>
-                    tok.changed ? (
-                      <span key={idx}>
-                        <button
-                          type="button"
-                          className="comparator-word-chip"
-                          title={`Click to insert "${tok.word}" into draft`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const textarea = document.getElementById(
-                              `block-input-${block.block_id}`,
-                            ) as HTMLTextAreaElement | null;
-                            if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
-                              const next =
-                                draftText.slice(0, textarea.selectionStart) +
-                                tok.word +
-                                draftText.slice(textarea.selectionEnd);
-                              onDraftChange(block.block_id, next);
-                            } else {
-                              onDraftChange(block.block_id, block.comparator_text ?? "");
-                            }
-                          }}
-                        >
+      {block.disagreement_flag && block.comparator_text !== null && (() => {
+        const changedCount = comparatorTokens
+          ? comparatorTokens.filter((t) => t.changed).length
+          : 0;
+        const isNoisyComparator =
+          Boolean(comparatorTokens) &&
+          (changedCount > 18 || (comparatorTokens?.length ?? 0) > 28);
+        return (
+          <div className="comparator-box">
+            <div className="comparator-row">
+              <div className="comparator-content">
+                <span className="hint-text">{formatEngineLabel(comparatorEngine)} comparator: </span>
+                {isNoisyComparator ? (
+                  <details className="comparator-noisy-details">
+                    <summary className="hint-text">
+                      Noisy mismatch ({comparatorTokens?.length ?? 0} tokens — click to inspect)
+                    </summary>
+                    <p className="telugu-text comparator-raw-preview" lang="te">
+                      {block.comparator_text}
+                    </p>
+                  </details>
+                ) : comparatorTokens && changedCount > 0 ? (
+                  <span className="telugu-text" lang="te">
+                    {comparatorTokens.map((tok, idx) =>
+                      tok.changed ? (
+                        <span key={idx}>
+                          <button
+                            type="button"
+                            className="comparator-word-chip"
+                            title={`Click to insert "${tok.word}" into draft`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const textarea = document.getElementById(
+                                `block-input-${block.block_id}`,
+                              ) as HTMLTextAreaElement | null;
+                              if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+                                const next =
+                                  draftText.slice(0, textarea.selectionStart) +
+                                  tok.word +
+                                  draftText.slice(textarea.selectionEnd);
+                                onDraftChange(block.block_id, next);
+                              } else {
+                                onDraftChange(block.block_id, block.comparator_text ?? "");
+                              }
+                            }}
+                          >
+                            {tok.word}
+                          </button>
+                          {tok.trailingSpace}
+                        </span>
+                      ) : (
+                        <span key={idx}>
                           {tok.word}
-                        </button>
-                        {tok.trailingSpace}
-                      </span>
-                    ) : (
-                      <span key={idx}>
-                        {tok.word}
-                        {tok.trailingSpace}
-                      </span>
-                    ),
-                  )}
-                </span>
-              ) : (
-                <span className="telugu-text" lang="te">
-                  {block.comparator_text}
-                </span>
-              )}
+                          {tok.trailingSpace}
+                        </span>
+                      ),
+                    )}
+                  </span>
+                ) : (
+                  <span className="telugu-text" lang="te">
+                    {block.comparator_text}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn-compact"
+                onClick={() => onDraftChange(block.block_id, block.comparator_text ?? "")}
+              >
+                Use Comparator
+              </button>
             </div>
-            <button
-              type="button"
-              className="btn-compact"
-              onClick={() => onDraftChange(block.block_id, block.comparator_text ?? "")}
-            >
-              Use Comparator
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {block.suggestions.length > 0 && (
         <div className="suggestions-box">
@@ -524,8 +541,8 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
                   )
                 }
               >
-                <option value="book_only">This book only</option>
                 <option value="global_suggestion">Global suggestion</option>
+                <option value="book_only">This book only</option>
               </select>
               <select
                 aria-label="Correction error type"
@@ -844,7 +861,7 @@ export function ReviewEditorPanel({
     ) => {
       const prevText = block.current_text;
       const addMem = action === "corrected" && (rememberByBlock[block.block_id] ?? true);
-      const scope = scopeByBlock[block.block_id] ?? "book_only";
+      const scope = scopeByBlock[block.block_id] ?? "global_suggestion";
       const cType = typeByBlock[block.block_id] || undefined;
       const effectiveRole = overrideRole ?? roleByBlock[block.block_id] ?? block.block_role;
       const opts: SaveEditOptions = {
@@ -886,7 +903,7 @@ export function ReviewEditorPanel({
         action: roleVal === "ignore" ? "ignored" : isTextChanged ? "corrected" : "approved",
         block_role: roleVal,
         add_to_correction_memory: isTextChanged ? (rememberByBlock[b.block_id] ?? true) : false,
-        memory_scope: scopeByBlock[b.block_id] ?? "book_only",
+        memory_scope: scopeByBlock[b.block_id] ?? "global_suggestion",
         correction_type: typeByBlock[b.block_id] || undefined,
         review_note: hasAutoChanges ? "Auto-correct reviewed & batch-approved" : undefined,
       };
@@ -1515,7 +1532,7 @@ export function ReviewEditorPanel({
               isFlashing={block.block_id === flashingBlockId}
               isBusy={busyBlockId === block.block_id || busyBatchApprove}
               remember={rememberByBlock[block.block_id] ?? true}
-              scope={scopeByBlock[block.block_id] ?? "book_only"}
+              scope={scopeByBlock[block.block_id] ?? "global_suggestion"}
               correctionType={typeByBlock[block.block_id] ?? ""}
               autoCorrectChanges={autoCorrectByBlock[block.block_id]}
               primaryEngine={review.primary_engine}

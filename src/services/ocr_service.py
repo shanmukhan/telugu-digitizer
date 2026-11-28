@@ -45,7 +45,7 @@ ENGINE_ALIASES: dict[str, str] = {
     "tesseract_tel_best": "tesseract_tel_best",
 }
 
-ALLOWED_PREPROCESSING_PROFILES = {"none", "deskew", "contrast_clahe"}
+ALLOWED_PREPROCESSING_PROFILES = {"none", "deskew", "contrast_clahe", "textured_bold"}
 
 
 def _peak_rss_mb() -> float:
@@ -421,6 +421,55 @@ class OCRJobExecutor:
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             out_img = clahe.apply(gray)
+        elif profile == "textured_bold":
+            # Designed for bold halftone/stippled display headings and degraded book scans:
+            # 1) Mild auto-deskew on inner margin, 2) CLAHE contrast normalization,
+            # 3) 2x2 morphological opening to fill white stippling inside dark strokes,
+            # 4) Gentle unsharp mask to keep Telugu vattus and vowel ticks crisp.
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            h_img, w_img = gray.shape[:2]
+            margin_y = max(0, int(h_img * 0.05))
+            margin_x = max(0, int(w_img * 0.05))
+            roi = gray[margin_y : h_img - margin_y, margin_x : w_img - margin_x]
+            if roi.size == 0:
+                roi = gray
+            inv = cv2.bitwise_not(roi)
+            thresh = cv2.threshold(inv, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+            dil_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
+            dilated = cv2.dilate(thresh, dil_kernel, iterations=1)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            angles: list[float] = []
+            for cnt in contours:
+                x_c, y_c, w_c, h_c = cv2.boundingRect(cnt)
+                if w_c < 40 or h_c < 8 or w_c > roi.shape[1] * 0.95 or h_c > roi.shape[0] * 0.30:
+                    continue
+                rect_angle = float(cv2.minAreaRect(cnt)[-1])
+                if rect_angle < -45:
+                    cand_angle = -(90 + rect_angle)
+                elif rect_angle > 45:
+                    cand_angle = 90 - rect_angle
+                else:
+                    cand_angle = -rect_angle
+                if abs(cand_angle) <= 12.0:
+                    angles.append(cand_angle)
+            angle = float(np.median(angles)) if angles else 0.0
+            work_gray = gray
+            if 0.4 <= abs(angle) <= 12.0:
+                center = (w_img // 2, h_img // 2)
+                rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+                work_gray = cv2.warpAffine(
+                    gray,
+                    rot_mat,
+                    (w_img, h_img),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE,
+                )
+            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+            norm_gray = clahe.apply(work_gray)
+            stipple_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            solid_ink = cv2.morphologyEx(norm_gray, cv2.MORPH_OPEN, stipple_kernel)
+            blurred = cv2.GaussianBlur(solid_ink, (0, 0), sigmaX=1.0)
+            out_img = cv2.addWeighted(solid_ink, 1.35, blurred, -0.35, 0)
         elif profile == "deskew":
             # Focus on the inner 90% margin and horizontally dilate text glyphs into line bars
             # so dark scanner borders / spine shadows do not dominate minAreaRect.

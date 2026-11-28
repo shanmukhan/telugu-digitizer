@@ -1460,11 +1460,39 @@
     border: 1px solid var(--warn-border);
     border-radius: 0.4rem;
     font-size: 0.88rem;
+  }
+
+  .comparator-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
+  }
+
+  .comparator-content {
+    flex: 1 1 16rem;
+    min-inline-size: 0;
+  }
+
+  .comparator-noisy-details {
+    display: inline-block;
+  }
+
+  .comparator-noisy-details > summary {
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+  }
+
+  .comparator-raw-preview {
+    margin: 0.35rem 0 0;
+    max-block-size: 6rem;
+    overflow-y: auto;
+    padding: 0.3rem 0.45rem;
+    border-radius: 0.35rem;
+    background: rgb(255 255 255 / 0.72);
+    font-size: 0.88rem;
   }
 
   .comparator-line {

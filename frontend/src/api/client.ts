@@ -105,7 +105,7 @@ export async function startOcrRun(
     forceRerun?: boolean;
     pageRange?: { start: number; end: number } | null;
     renderDpi?: number;
-    preprocessingProfile?: "none" | "deskew" | "contrast_clahe";
+    preprocessingProfile?: "none" | "deskew" | "contrast_clahe" | "textured_bold";
     tesseractPsm?: number;
     includeDigitalTextPages?: boolean;
   },

@@ -262,7 +262,7 @@ class BlockEditRequest(BaseModel):
     review_note: str | None = Field(default=None, max_length=1_000)
     reviewer_id: str | None = Field(default=None, max_length=100)
     add_to_correction_memory: bool = False
-    memory_scope: str = Field(default="book_only", max_length=32)
+    memory_scope: str = Field(default="global_suggestion", max_length=32)
     correction_type: str | None = Field(default=None, max_length=32)
     incorrect_span: str | None = Field(default=None, max_length=500)
     corrected_span: str | None = Field(default=None, max_length=500)
@@ -312,7 +312,7 @@ class BatchBlockEditItem(BaseModel):
     review_note: str | None = Field(default=None, max_length=1_000)
     reviewer_id: str | None = Field(default=None, max_length=100)
     add_to_correction_memory: bool = True
-    memory_scope: str = Field(default="book_only", max_length=32)
+    memory_scope: str = Field(default="global_suggestion", max_length=32)
     correction_type: str | None = Field(default=None, max_length=32)
 
 

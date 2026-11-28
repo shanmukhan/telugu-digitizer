@@ -12,7 +12,7 @@ interface OcrRunnerDrawerProps {
   useTesseract: boolean;
   ocrStartPage: string;
   ocrEndPage: string;
-  ocrPreprocessing: "none" | "deskew" | "contrast_clahe";
+  ocrPreprocessing: "none" | "deskew" | "contrast_clahe" | "textured_bold";
   ocrRenderDpi: number;
   ocrForceRerun: boolean;
   ocrIncludeDigital: boolean;
@@ -20,7 +20,7 @@ interface OcrRunnerDrawerProps {
   onUseTesseractChange: (v: boolean) => void;
   onStartPageChange: (v: string) => void;
   onEndPageChange: (v: string) => void;
-  onPreprocessingChange: (v: "none" | "deskew" | "contrast_clahe") => void;
+  onPreprocessingChange: (v: "none" | "deskew" | "contrast_clahe" | "textured_bold") => void;
   onRenderDpiChange: (v: number) => void;
   onForceRerunChange: (v: boolean) => void;
   onIncludeDigitalChange: (v: boolean) => void;
@@ -325,12 +325,15 @@ export function OcrRunnerDrawer({
                   aria-label="OCR preprocessing profile"
                   value={ocrPreprocessing}
                   onChange={(e) =>
-                    onPreprocessingChange(e.target.value as "none" | "deskew" | "contrast_clahe")
+                    onPreprocessingChange(
+                      e.target.value as "none" | "deskew" | "contrast_clahe" | "textured_bold",
+                    )
                   }
                 >
                   <option value="none">None (Raw 300 DPI scan)</option>
                   <option value="deskew">Auto-Deskew + Contrast</option>
                   <option value="contrast_clahe">CLAHE Adaptive Contrast + Denoise</option>
+                  <option value="textured_bold">Textured / Bold Headings (Deskew + Solidify Ink)</option>
                 </select>
               </label>
               <label className="form-field">

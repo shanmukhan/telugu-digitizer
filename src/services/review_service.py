@@ -519,7 +519,7 @@ def submit_block_edit(
     review_note: str | None = None,
     reviewer_id: str | None = None,
     add_to_correction_memory: bool = False,
-    memory_scope: str = "book_only",
+    memory_scope: str = "global_suggestion",
     correction_type: str | None = None,
     incorrect_span: str | None = None,
     corrected_span: str | None = None,
@@ -1022,7 +1022,7 @@ def batch_save_and_approve_page(
         review_note = item.get("review_note")
         reviewer_id = item.get("reviewer_id")
         add_to_memory = bool(item.get("add_to_correction_memory", True))
-        memory_scope = str(item.get("memory_scope") or "book_only")
+        memory_scope = str(item.get("memory_scope") or "global_suggestion")
         correction_type = item.get("correction_type")
 
         if action not in ALLOWED_EDIT_ACTIONS:

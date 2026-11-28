@@ -232,6 +232,34 @@ describe("Two-Density ReviewEditorPanel & draft-safe Flag Page", () => {
       );
     });
   });
+
+  it("collapses noisy comparator output instead of rendering dozens of word chips", () => {
+    const noisyWords = Array.from({ length: 35 }, (_, i) => `ప${i}`).join(" ");
+    const b1 = makeBlock({
+      block_id: "blk-noisy",
+      block_index: 0,
+      disagreement_flag: true,
+      current_text: "తెలుగు దేశం",
+      comparator_text: noisyWords,
+    });
+
+    const { container } = render(
+      <ReviewEditorPanel
+        review={makeReview([b1])}
+        selectedBlockId="blk-noisy"
+        busyBlockId={null}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(container.querySelectorAll(".comparator-word-chip").length).toBe(0);
+    expect(screen.getByText(/Noisy mismatch \(35 tokens/i)).toBeTruthy();
+  });
 });
 
 describe("SourcePageViewer accessible single-tab-stop SVG listbox", () => {

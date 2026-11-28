@@ -126,7 +126,7 @@ describe("ReviewEditorPanel", () => {
     await waitFor(() => {
       expect(onSaveEdit).toHaveBeenCalledWith("blk-1", "తెలుగు పుస్తకం", "corrected", undefined, {
         addToMemory: true,
-        memoryScope: "book_only",
+        memoryScope: "global_suggestion",
         correctionType: undefined,
       });
     });
@@ -367,7 +367,7 @@ describe("ReviewEditorPanel", () => {
           edited_text: "తెలుగు పుస్తకం",
           action: "corrected",
           add_to_correction_memory: true,
-          memory_scope: "book_only",
+          memory_scope: "global_suggestion",
         }),
       ]);
     });

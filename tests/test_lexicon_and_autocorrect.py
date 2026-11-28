@@ -22,7 +22,13 @@ from src.core.config import AppSettings
 from src.db.models import Base, BookPage, ModelRegistry, OCRBlock, OCRRun
 from src.db.session import build_engine
 from src.services.correction_service import extract_word_level_corrections, is_safe_auto_memory_rule
-from src.services.lexicon_service import SentenceContextModel, TeluguLexicon, get_telugu_lexicon
+from src.services.lexicon_service import (
+    SentenceContextModel,
+    TeluguLexicon,
+    _autocorrect_single_block,
+    get_telugu_lexicon,
+)
+from src.services.ocr_service import ALLOWED_PREPROCESSING_PROFILES, OCRJobExecutor
 
 @compiles(postgresql.JSONB, "sqlite")
 def _compile_jsonb_sqlite(_type, _compiler, **_kw):
@@ -72,6 +78,84 @@ def test_real_telugu_lexicon_ocr_confusions_and_compounds() -> None:
     prop_matra = lex.suggest_word("పస్తకం")
     assert prop_matra is not None
     assert prop_matra["replacement"] == "పుస్తకం"
+
+    # Dropped rakara-vattu + బ↔భ + గ↔థ heading error: '(పగమబాగం- 1' -> 'ప్రథమభాగం- 1'
+    prop_vattu = lex.suggest_word("పగమబాగం")
+    assert prop_vattu is not None
+    assert prop_vattu["replacement"] == "ప్రథమభాగం"
+
+    fixed_line, line_changes = _autocorrect_single_block(
+        block_text="(పగమబాగం- 1",
+        book_id=UUID("00000000-0000-0000-0000-000000000001"),
+        by_incorrect={},
+        books_by_pair={},
+        lexicon=lex,
+        context_model=None,
+        use_correction_memory=False,
+        use_dictionary=True,
+        use_sentence_context=False,
+        min_confidence=0.78,
+    )
+    assert fixed_line == "ప్రథమభాగం- 1"
+    assert len(line_changes) == 1
+    assert line_changes[0]["confidence"] >= 0.90
+
+    # Balanced parentheses around a valid word must NEVER be stripped
+    balanced_line, balanced_changes = _autocorrect_single_block(
+        block_text="(ప్రథమభాగం) - 1",
+        book_id=UUID("00000000-0000-0000-0000-000000000001"),
+        by_incorrect={},
+        books_by_pair={},
+        lexicon=lex,
+        context_model=None,
+        use_correction_memory=False,
+        use_dictionary=True,
+        use_sentence_context=False,
+        min_confidence=0.78,
+    )
+    assert balanced_line == "(ప్రథమభాగం) - 1"
+    assert balanced_changes == []
+
+
+def test_textured_bold_preprocessing_profile_generates_clean_png(tmp_path: Path) -> None:
+    """textured_bold profile is registered and outputs a valid derived PNG without mutating source."""
+    assert "textured_bold" in ALLOWED_PREPROCESSING_PROFILES
+    from src.core.storage import LocalFilesystemStorage
+
+    storage = LocalFilesystemStorage(tmp_path)
+    img = Image.new("RGB", (320, 120), "white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([40, 30, 280, 90], fill="black")
+    # Simulate white halftone stippling inside bold strokes
+    for x in range(44, 276, 6):
+        draw.point((x, 60), fill="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    src_key = "pages/test/page-0001.png"
+    src_path = storage.write_bytes(src_key, buf.getvalue(), read_only=False)
+
+    executor = OCRJobExecutor(
+        session_factory=None,  # type: ignore[arg-type]
+        storage=storage,
+        settings=None,  # type: ignore[arg-type]
+    )
+    try:
+        out_path, out_key, _sha, out_w, out_h = executor._apply_preprocessing_profile(
+            img_path=src_path,
+            img_key=src_key,
+            img_sha="dummy",
+            img_w=320,
+            img_h=120,
+            book_id=UUID("00000000-0000-0000-0000-000000000002"),
+            page_number=1,
+            render_dpi=300,
+            profile="textured_bold",
+        )
+        assert out_path.is_file()
+        assert "pre-textured_bold-dpi-300" in out_key
+        assert out_w == 320 and out_h == 120
+    finally:
+        executor.shutdown(wait=False)
 
 
 def test_sentence_bigram_context_disambiguates_candidates() -> None:

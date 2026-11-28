@@ -133,7 +133,9 @@ export function App() {
   const [capabilities, setCapabilities] = useState<HostCapabilities | null>(null);
   const [ocrStartPage, setOcrStartPage] = useState("1");
   const [ocrEndPage, setOcrEndPage] = useState("");
-  const [ocrPreprocessing, setOcrPreprocessing] = useState<"none" | "deskew" | "contrast_clahe">("none");
+  const [ocrPreprocessing, setOcrPreprocessing] = useState<
+    "none" | "deskew" | "contrast_clahe" | "textured_bold"
+  >("none");
   const [ocrRenderDpi, setOcrRenderDpi] = useState<number>(300);
   const [ocrForceRerun, setOcrForceRerun] = useState<boolean>(false);
   const [ocrIncludeDigital, setOcrIncludeDigital] = useState<boolean>(false);
@@ -684,7 +686,7 @@ export function App() {
         block_role: options?.blockRole,
         review_note: reviewNote,
         add_to_correction_memory: options?.addToMemory ?? false,
-        memory_scope: options?.memoryScope ?? "book_only",
+        memory_scope: options?.memoryScope ?? "global_suggestion",
         correction_type: options?.correctionType,
         auto_filter_noise: true,
       });
