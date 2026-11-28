@@ -1,17 +1,25 @@
 import type {
   ApiErrorDetail,
+  BatchBlockEditPayload,
   BlockEditResult,
   BlockRole,
   BookOCRRunSummary,
   BookSummary,
   BookUploadResult,
   CorrectionMemoryRecord,
+  CustomDictionaryWordRecord,
+  DictionarySearchResponse,
+  DictionaryStats,
+  DictionaryTextCheckResponse,
+  DictionaryWordDetail,
   ExportCreatePayload,
   ExportRecord,
   HostCapabilities,
   ManualBlockCreateResult,
   OCRRunCreateResult,
   OCRRunStatus,
+  PageAutocorrectResponse,
+  PageBatchSaveResponse,
   PageReviewPayload,
   PageSummary,
 } from "../types/api";
@@ -160,6 +168,7 @@ export async function submitBlockEdit(
     add_to_correction_memory?: boolean;
     memory_scope?: "book_only" | "global_suggestion";
     correction_type?: string;
+    auto_filter_noise?: boolean;
   },
 ): Promise<BlockEditResult> {
   return requestJson<BlockEditResult>(`/api/v1/ocr-blocks/${blockId}/edits`, {
@@ -167,6 +176,60 @@ export async function submitBlockEdit(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+export async function autocorrectPage(
+  bookId: string,
+  pageNumber: number,
+  options?: {
+    primaryRunId?: string | null;
+    useCorrectionMemory?: boolean;
+    useDictionary?: boolean;
+    useSentenceContext?: boolean;
+    minConfidence?: number;
+    currentTexts?: Record<string, string>;
+  },
+): Promise<PageAutocorrectResponse> {
+  return requestJson<PageAutocorrectResponse>(
+    `/api/v1/books/${bookId}/pages/${pageNumber}/autocorrect`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        primary_run_id: options?.primaryRunId ?? null,
+        use_correction_memory: options?.useCorrectionMemory ?? true,
+        use_dictionary: options?.useDictionary ?? true,
+        use_sentence_context: options?.useSentenceContext ?? true,
+        min_confidence: options?.minConfidence ?? 0.78,
+        current_texts: options?.currentTexts ?? {},
+      }),
+    },
+  );
+}
+
+export async function batchSavePage(
+  bookId: string,
+  pageNumber: number,
+  payload: {
+    primaryRunId?: string | null;
+    edits: BatchBlockEditPayload[];
+    approveRemainingBlocks?: boolean;
+    markPageApproved?: boolean;
+  },
+): Promise<PageBatchSaveResponse> {
+  return requestJson<PageBatchSaveResponse>(
+    `/api/v1/books/${bookId}/pages/${pageNumber}/batch-save`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        primary_run_id: payload.primaryRunId ?? null,
+        edits: payload.edits,
+        approve_remaining_blocks: payload.approveRemainingBlocks ?? true,
+        mark_page_approved: payload.markPageApproved ?? true,
+      }),
+    },
+  );
 }
 
 export async function listCorrections(params?: {
@@ -275,4 +338,58 @@ export async function updatePageReviewStatus(
       primary_run_id: primaryRunId || null,
     }),
   });
+}
+
+export async function getDictionaryStats(): Promise<DictionaryStats> {
+  return requestJson<DictionaryStats>("/api/v1/dictionary/stats");
+}
+
+export async function searchDictionary(
+  query: string,
+  options?: { mode?: "auto" | "telugu" | "english"; limit?: number },
+): Promise<DictionarySearchResponse> {
+  const params = new URLSearchParams({ q: query });
+  if (options?.mode) params.set("mode", options.mode);
+  if (options?.limit) params.set("limit", String(options.limit));
+  return requestJson<DictionarySearchResponse>(`/api/v1/dictionary/search?${params.toString()}`);
+}
+
+export async function getDictionaryWord(word: string): Promise<DictionaryWordDetail> {
+  return requestJson<DictionaryWordDetail>(`/api/v1/dictionary/word/${encodeURIComponent(word)}`);
+}
+
+export async function checkTeluguText(text: string): Promise<DictionaryTextCheckResponse> {
+  return requestJson<DictionaryTextCheckResponse>("/api/v1/dictionary/check-text", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function listCustomDictionaryWords(
+  query?: string,
+): Promise<CustomDictionaryWordRecord[]> {
+  const qs = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+  const data = await requestJson<{ items: CustomDictionaryWordRecord[] }>(
+    `/api/v1/dictionary/custom${qs}`,
+  );
+  return data.items;
+}
+
+export async function createCustomDictionaryWord(payload: {
+  word: string;
+  translit?: string;
+  meaning_en?: string;
+  meaning_te?: string;
+  notes?: string;
+}): Promise<CustomDictionaryWordRecord> {
+  return requestJson<CustomDictionaryWordRecord>("/api/v1/dictionary/custom", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCustomDictionaryWord(wordId: string): Promise<void> {
+  await requestJson<void>(`/api/v1/dictionary/custom/${wordId}`, { method: "DELETE" });
 }

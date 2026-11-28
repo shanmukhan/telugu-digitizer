@@ -33,7 +33,9 @@ from src.services.correction_service import (
     build_suggestion_index,
     create_correction_memory_entry,
     extract_span_and_context,
+    extract_word_level_corrections,
     find_block_suggestions_from_index,
+    is_safe_auto_memory_rule,
 )
 
 LOGGER = logging.getLogger("telugu_digitizer.services.review")
@@ -483,6 +485,7 @@ def submit_block_edit(
     correction_type: str | None = None,
     incorrect_span: str | None = None,
     corrected_span: str | None = None,
+    auto_filter_noise: bool = False,
     storage: LocalFilesystemStorage | None = None,
 ) -> dict[str, Any]:
     """Persist an append-only review edit without ever overwriting ocr_blocks.raw_text."""
@@ -572,22 +575,52 @@ def submit_block_edit(
 
     correction_entry_id: uuid.UUID | None = None
     if add_to_correction_memory and action == "corrected" and previous_text.strip() != edited_text.strip():
-        inc, cor, left_ctx, right_ctx = extract_span_and_context(previous_text, edited_text)
         if incorrect_span and corrected_span:
-            inc = incorrect_span
-            cor = corrected_span
-        mem = create_correction_memory_entry(
-            db=db,
-            incorrect_text=inc,
-            corrected_text=cor,
-            left_context=left_ctx,
-            right_context=right_ctx,
-            correction_type=correction_type,
-            scope=memory_scope,
-            book_id=page.book_id,
-            source_ocr_block_id=blk.id,
-        )
-        correction_entry_id = mem.id
+            _, _, left_ctx, right_ctx = extract_span_and_context(previous_text, edited_text)
+            mem = create_correction_memory_entry(
+                db=db,
+                incorrect_text=incorrect_span,
+                corrected_text=corrected_span,
+                left_context=left_ctx,
+                right_context=right_ctx,
+                correction_type=correction_type,
+                scope=memory_scope,
+                book_id=page.book_id,
+                source_ocr_block_id=blk.id,
+            )
+            correction_entry_id = mem.id
+        elif auto_filter_noise:
+            for inc, cor, left_ctx, right_ctx in extract_word_level_corrections(previous_text, edited_text):
+                is_safe, _ = is_safe_auto_memory_rule(inc, cor)
+                if not is_safe:
+                    continue
+                mem = create_correction_memory_entry(
+                    db=db,
+                    incorrect_text=inc,
+                    corrected_text=cor,
+                    left_context=left_ctx,
+                    right_context=right_ctx,
+                    correction_type=correction_type,
+                    scope=memory_scope,
+                    book_id=page.book_id,
+                    source_ocr_block_id=blk.id,
+                )
+                if correction_entry_id is None:
+                    correction_entry_id = mem.id
+        else:
+            inc, cor, left_ctx, right_ctx = extract_span_and_context(previous_text, edited_text)
+            mem = create_correction_memory_entry(
+                db=db,
+                incorrect_text=inc,
+                corrected_text=cor,
+                left_context=left_ctx,
+                right_context=right_ctx,
+                correction_type=correction_type,
+                scope=memory_scope,
+                book_id=page.book_id,
+                source_ocr_block_id=blk.id,
+            )
+            correction_entry_id = mem.id
 
     db.commit()
     db.refresh(edit_row)
@@ -830,4 +863,258 @@ def update_page_review_status(
         "book_id": book_id,
         "page_number": page.page_number,
         "review_status": page.review_status,
+    }
+
+
+def batch_save_and_approve_page(
+    *,
+    db: Session,
+    storage: LocalFilesystemStorage | None,
+    book_id: uuid.UUID,
+    page_number: int,
+    primary_run_id: uuid.UUID | None = None,
+    edits: list[dict[str, Any]] | None = None,
+    approve_remaining_blocks: bool = True,
+    mark_page_approved: bool = True,
+) -> dict[str, Any]:
+    """Atomically persist all edited drafts, record filtered correction memory, and approve the page."""
+    if page_number < 1:
+        raise AppError("INVALID_PAGE_NUMBER", "page_number must be >= 1.", status_code=400)
+    book = db.get(Book, book_id)
+    if book is None:
+        raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
+
+    page = db.scalars(
+        select(BookPage).where(BookPage.book_id == book_id, BookPage.page_number == page_number)
+    ).first()
+    if page is None:
+        raise AppError(
+            "PAGE_NOT_FOUND",
+            f"Page {page_number} not found for book {book_id}.",
+            status_code=404,
+        )
+
+    version = _get_or_create_human_draft_version(db, book.id)
+    edits_list = edits or []
+    edited_block_ids: set[uuid.UUID] = set()
+    saved_edits_count = 0
+    approved_blocks_count = 0
+    memory_created_count = 0
+    memory_skipped_noise_count = 0
+
+    for item in edits_list:
+        blk_id = item["block_id"]
+        edited_text = str(item["edited_text"])
+        action = str(item.get("action") or "corrected")
+        block_role = item.get("block_role")
+        review_note = item.get("review_note")
+        reviewer_id = item.get("reviewer_id")
+        add_to_memory = bool(item.get("add_to_correction_memory", True))
+        memory_scope = str(item.get("memory_scope") or "book_only")
+        correction_type = item.get("correction_type")
+
+        if action not in ALLOWED_EDIT_ACTIONS:
+            raise AppError("INVALID_REVIEW_ACTION", f"Unsupported action {action!r}.", status_code=400)
+        if block_role is not None and block_role not in ALLOWED_BLOCK_ROLES:
+            raise AppError("INVALID_BLOCK_ROLE", f"Unsupported block_role {block_role!r}.", status_code=400)
+
+        blk = db.get(OCRBlock, blk_id)
+        if blk is None or blk.book_page_id != page.id:
+            raise AppError(
+                "OCR_BLOCK_NOT_FOUND",
+                f"OCR block {blk_id} not found on page {page_number}.",
+                status_code=404,
+            )
+
+        latest_edit = db.scalars(
+            select(ReviewEdit)
+            .where(ReviewEdit.ocr_block_id == blk.id)
+            .order_by(ReviewEdit.created_at.desc(), ReviewEdit.id.desc())
+        ).first()
+        previous_text = latest_edit.edited_text if latest_edit else blk.raw_text
+
+        db.add(
+            ReviewEdit(
+                ocr_block_id=blk.id,
+                previous_text=previous_text,
+                edited_text=edited_text,
+                action=action,
+                reviewer_id=reviewer_id,
+                review_note=review_note,
+            )
+        )
+
+        doc_block = db.scalars(
+            select(DocumentTextBlock).where(
+                DocumentTextBlock.version_id == version.id,
+                DocumentTextBlock.ocr_block_id == blk.id,
+            )
+        ).first()
+        effective_role = (
+            "ignore"
+            if action == "ignored"
+            else (block_role if block_role is not None else (doc_block.block_role if doc_block else "paragraph"))
+        )
+        if doc_block is None:
+            db.add(
+                DocumentTextBlock(
+                    version_id=version.id,
+                    book_page_id=page.id,
+                    ocr_block_id=blk.id,
+                    final_text=edited_text,
+                    reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
+                    block_role=effective_role,
+                )
+            )
+        else:
+            doc_block.final_text = edited_text
+            doc_block.block_role = effective_role
+
+        if action in ("corrected", "approved") and effective_role != "ignore":
+            _maybe_record_training_sample(
+                db=db,
+                storage=storage,
+                book=book,
+                page=page,
+                block=blk,
+                verified_text=edited_text,
+                reviewer_id=reviewer_id,
+            )
+
+        if add_to_memory and action == "corrected" and previous_text.strip() != edited_text.strip():
+            extracted_pairs = extract_word_level_corrections(previous_text, edited_text)
+            for inc, cor, left_ctx, right_ctx in extracted_pairs:
+                is_safe, _ = is_safe_auto_memory_rule(inc, cor)
+                if not is_safe:
+                    memory_skipped_noise_count += 1
+                    continue
+                create_correction_memory_entry(
+                    db=db,
+                    incorrect_text=inc,
+                    corrected_text=cor,
+                    left_context=left_ctx,
+                    right_context=right_ctx,
+                    correction_type=correction_type,
+                    scope=memory_scope,
+                    book_id=book.id,
+                    source_ocr_block_id=blk.id,
+                )
+                memory_created_count += 1
+
+        edited_block_ids.add(blk.id)
+        saved_edits_count += 1
+
+    # Resolve primary run if not supplied so remaining blocks can be snapshotted/approved.
+    resolved_run_id = primary_run_id
+    if resolved_run_id is None:
+        review_payload = get_page_review_payload(db=db, book_id=book.id, page_number=page_number)
+        resolved_run_id = review_payload["primary_run_id"]
+
+    if resolved_run_id is not None:
+        run_blocks = list(
+            db.scalars(
+                select(OCRBlock)
+                .where(
+                    OCRBlock.ocr_run_id == resolved_run_id,
+                    OCRBlock.book_page_id == page.id,
+                )
+                .order_by(OCRBlock.reading_order, OCRBlock.block_index)
+            ).all()
+        )
+        run_block_ids = [b.id for b in run_blocks]
+        doc_by_block: dict[uuid.UUID, DocumentTextBlock] = {}
+        latest_edit_by_block: dict[uuid.UUID, ReviewEdit] = {}
+        if run_block_ids:
+            for dblk in db.scalars(
+                select(DocumentTextBlock).where(
+                    DocumentTextBlock.version_id == version.id,
+                    DocumentTextBlock.ocr_block_id.in_(run_block_ids),
+                )
+            ).all():
+                if dblk.ocr_block_id is not None:
+                    doc_by_block[dblk.ocr_block_id] = dblk
+            for edit_row in db.scalars(
+                select(ReviewEdit)
+                .where(ReviewEdit.ocr_block_id.in_(run_block_ids))
+                .order_by(ReviewEdit.created_at.asc(), ReviewEdit.id.asc())
+            ).all():
+                latest_edit_by_block[edit_row.ocr_block_id] = edit_row
+
+        for blk in run_blocks:
+            if blk.id in edited_block_ids:
+                continue
+            latest_edit = latest_edit_by_block.get(blk.id)
+            doc_blk = doc_by_block.get(blk.id)
+            if (latest_edit and latest_edit.action == "ignored") or (doc_blk and doc_blk.block_role == "ignore"):
+                continue
+            current_txt = latest_edit.edited_text if latest_edit else blk.raw_text
+            if approve_remaining_blocks and (latest_edit is None or latest_edit.action != "approved"):
+                db.add(
+                    ReviewEdit(
+                        ocr_block_id=blk.id,
+                        previous_text=current_txt,
+                        edited_text=current_txt,
+                        action="approved",
+                        review_note="Batch page approval",
+                    )
+                )
+                approved_blocks_count += 1
+                _maybe_record_training_sample(
+                    db=db,
+                    storage=storage,
+                    book=book,
+                    page=page,
+                    block=blk,
+                    verified_text=current_txt,
+                    reviewer_id=None,
+                )
+            if doc_blk is None:
+                db.add(
+                    DocumentTextBlock(
+                        version_id=version.id,
+                        book_page_id=page.id,
+                        ocr_block_id=blk.id,
+                        final_text=current_txt,
+                        reading_order=blk.reading_order if blk.reading_order is not None else blk.block_index,
+                        block_role="paragraph",
+                    )
+                )
+
+    if mark_page_approved:
+        page.review_status = "approved"
+        db.flush()
+        remaining_unapproved = db.scalar(
+            select(func.count(BookPage.id)).where(
+                BookPage.book_id == book.id,
+                BookPage.page_kind != "digital_text",
+                BookPage.review_status != "approved",
+            )
+        )
+        if int(remaining_unapproved or 0) == 0:
+            version.status = "approved"
+    elif saved_edits_count > 0 and page.review_status == "not_started":
+        page.review_status = "in_review"
+
+    db.commit()
+    db.refresh(page)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Completed batch page save and approval",
+        book_id=str(book.id),
+        page_number=page_number,
+        saved_edits_count=saved_edits_count,
+        approved_blocks_count=approved_blocks_count,
+        correction_memory_created_count=memory_created_count,
+        correction_memory_skipped_noise_count=memory_skipped_noise_count,
+        page_review_status=page.review_status,
+    )
+    return {
+        "book_id": book.id,
+        "page_number": page.page_number,
+        "saved_edits_count": saved_edits_count,
+        "approved_blocks_count": approved_blocks_count,
+        "correction_memory_created_count": memory_created_count,
+        "correction_memory_skipped_noise_count": memory_skipped_noise_count,
+        "page_review_status": page.review_status,
     }

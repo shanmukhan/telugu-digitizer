@@ -30,6 +30,14 @@ from src.api.schemas import (
     CorrectionSearchResponse,
     CorrectionStatusRequest,
     CorrectionSuggestionItem,
+    CustomDictionaryWordCreateRequest,
+    CustomDictionaryWordListResponse,
+    CustomDictionaryWordRecord,
+    DictionarySearchResponse,
+    DictionaryStatsResponse,
+    DictionaryTextCheckRequest,
+    DictionaryTextCheckResponse,
+    DictionaryWordDetailResponse,
     DigitalTextPageResponse,
     DigitalTextUpdateRequest,
     ExportCreateRequest,
@@ -42,6 +50,10 @@ from src.api.schemas import (
     OCRRunCreateRequest,
     OCRRunCreateResponse,
     OCRRunStatusResponse,
+    PageAutocorrectRequest,
+    PageAutocorrectResponse,
+    PageBatchSaveRequest,
+    PageBatchSaveResponse,
     PageOCRResponse,
     PageReviewResponse,
     PageReviewStatusRequest,
@@ -64,7 +76,17 @@ from src.services.correction_service import (
     search_corrections,
     update_correction_status,
 )
+from src.services.dictionary_service import (
+    check_telugu_text,
+    create_custom_word,
+    delete_custom_word,
+    get_dictionary_stats,
+    get_dictionary_word,
+    list_custom_words,
+    search_dictionary,
+)
 from src.services.export_service import create_book_export, list_book_exports
+from src.services.lexicon_service import propose_page_autocorrections
 from src.services.ocr_service import (
     OCRJobExecutor,
     cancel_ocr_run,
@@ -73,6 +95,7 @@ from src.services.ocr_service import (
     resume_ocr_run,
 )
 from src.services.review_service import (
+    batch_save_and_approve_page,
     get_page_review_payload,
     insert_manual_review_block,
     list_book_ocr_runs,
@@ -520,9 +543,60 @@ def post_block_edit(
         correction_type=payload.correction_type,
         incorrect_span=payload.incorrect_span,
         corrected_span=payload.corrected_span,
+        auto_filter_noise=payload.auto_filter_noise,
         storage=storage,
     )
     return BlockEditResponse(**result)
+
+
+@router.post(
+    "/books/{book_id}/pages/{page_number}/autocorrect",
+    response_model=PageAutocorrectResponse,
+)
+def post_page_autocorrect(
+    book_id: uuid.UUID,
+    page_number: int,
+    payload: PageAutocorrectRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> PageAutocorrectResponse:
+    result = propose_page_autocorrections(
+        db=db,
+        book_id=book_id,
+        page_number=page_number,
+        primary_run_id=payload.primary_run_id,
+        use_correction_memory=payload.use_correction_memory,
+        use_dictionary=payload.use_dictionary,
+        use_sentence_context=payload.use_sentence_context,
+        min_confidence=payload.min_confidence,
+        current_texts=payload.current_texts,
+        lexicon_path=settings.lexicon_path,
+    )
+    return PageAutocorrectResponse(**result)
+
+
+@router.post(
+    "/books/{book_id}/pages/{page_number}/batch-save",
+    response_model=PageBatchSaveResponse,
+)
+def post_page_batch_save(
+    book_id: uuid.UUID,
+    page_number: int,
+    payload: PageBatchSaveRequest,
+    db: Annotated[Session, Depends(get_db)],
+    storage: Annotated[LocalFilesystemStorage, Depends(get_storage)],
+) -> PageBatchSaveResponse:
+    result = batch_save_and_approve_page(
+        db=db,
+        storage=storage,
+        book_id=book_id,
+        page_number=page_number,
+        primary_run_id=payload.primary_run_id,
+        edits=[e.model_dump() for e in payload.edits],
+        approve_remaining_blocks=payload.approve_remaining_blocks,
+        mark_page_approved=payload.mark_page_approved,
+    )
+    return PageBatchSaveResponse(**result)
 
 
 @router.post(
@@ -771,3 +845,120 @@ def get_export_manifest(
     if not storage.exists(row.manifest_storage_key):
         raise AppError("EXPORT_MANIFEST_MISSING", "Export manifest sidecar is missing.", status_code=404)
     return storage.read_json(row.manifest_storage_key)
+
+
+def _serialize_custom_word(row) -> CustomDictionaryWordRecord:
+    return CustomDictionaryWordRecord(
+        word_id=row.id,
+        language_code=row.language_code,
+        word=row.word,
+        translit=row.translit,
+        meaning_en=row.meaning_en,
+        meaning_te=row.meaning_te,
+        notes=row.notes,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/dictionary/stats", response_model=DictionaryStatsResponse)
+def get_telugu_dictionary_stats(
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> DictionaryStatsResponse:
+    return DictionaryStatsResponse(
+        **get_dictionary_stats(
+            db=db,
+            dictionary_db_path=settings.dictionary_db_path,
+            lexicon_path=settings.lexicon_path,
+        )
+    )
+
+
+@router.get("/dictionary/search", response_model=DictionarySearchResponse)
+def search_telugu_dictionary(
+    q: str,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+    mode: str = "auto",
+    limit: int = 25,
+) -> DictionarySearchResponse:
+    return DictionarySearchResponse(
+        **search_dictionary(
+            db=db,
+            query=q,
+            mode=mode,
+            limit=limit,
+            dictionary_db_path=settings.dictionary_db_path,
+            lexicon_path=settings.lexicon_path,
+        )
+    )
+
+
+@router.get("/dictionary/word/{word}", response_model=DictionaryWordDetailResponse)
+def get_telugu_dictionary_word(
+    word: str,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> DictionaryWordDetailResponse:
+    return DictionaryWordDetailResponse(
+        **get_dictionary_word(
+            db=db,
+            word=word,
+            dictionary_db_path=settings.dictionary_db_path,
+            lexicon_path=settings.lexicon_path,
+        )
+    )
+
+
+@router.post("/dictionary/check-text", response_model=DictionaryTextCheckResponse)
+def post_check_telugu_text(
+    payload: DictionaryTextCheckRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> DictionaryTextCheckResponse:
+    return DictionaryTextCheckResponse(
+        **check_telugu_text(
+            db=db,
+            text=payload.text,
+            lexicon_path=settings.lexicon_path,
+        )
+    )
+
+
+@router.get("/dictionary/custom", response_model=CustomDictionaryWordListResponse)
+def get_custom_dictionary_words(
+    db: Annotated[Session, Depends(get_db)],
+    q: str | None = None,
+) -> CustomDictionaryWordListResponse:
+    rows = list_custom_words(db, query=q)
+    return CustomDictionaryWordListResponse(items=[_serialize_custom_word(r) for r in rows])
+
+
+@router.post(
+    "/dictionary/custom",
+    response_model=CustomDictionaryWordRecord,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_custom_dictionary_word(
+    payload: CustomDictionaryWordCreateRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> CustomDictionaryWordRecord:
+    row = create_custom_word(
+        db=db,
+        word=payload.word,
+        translit=payload.translit,
+        meaning_en=payload.meaning_en,
+        meaning_te=payload.meaning_te,
+        notes=payload.notes,
+    )
+    return _serialize_custom_word(row)
+
+
+@router.delete("/dictionary/custom/{word_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_custom_dictionary_word_route(
+    word_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    delete_custom_word(db, word_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -19,6 +20,95 @@ LOGGER = logging.getLogger("telugu_digitizer.services.corrections")
 
 ALLOWED_SCOPES = {"book_only", "global_suggestion"}
 ALLOWED_STATUSES = {"active", "disabled", "superseded", "rejected"}
+
+_TELUGU_LETTER_RE = re.compile(r"[\u0C05-\u0C39\u0C58-\u0C61]")
+_DIGITS_AND_PUNCT_ONLY_RE = re.compile(r"^[\d\u0C66-\u0C6F\s\W_]+$")
+
+
+def is_safe_auto_memory_rule(incorrect_span: str, corrected_span: str) -> tuple[bool, str | None]:
+    """Filter out noisy/non-reusable spans (e.g., 'ర్మ -> 43' or full-line rewrites) during auto-capture."""
+    inc = normalize_nfc(incorrect_span).strip()
+    cor = normalize_nfc(corrected_span).strip()
+    if not inc or not cor:
+        return False, "empty_span"
+    if inc == cor:
+        return False, "identical_span"
+    if _DIGITS_AND_PUNCT_ONLY_RE.fullmatch(cor):
+        return False, "numeric_or_punctuation_target"
+    if not _TELUGU_LETTER_RE.search(cor) or not _TELUGU_LETTER_RE.search(inc):
+        return False, "non_telugu_span"
+    inc_tokens = inc.split()
+    cor_tokens = cor.split()
+    if len(inc_tokens) > 2 or len(cor_tokens) > 3:
+        return False, "span_too_wide"
+    if len(inc) > 45 or len(cor) > 45:
+        return False, "span_too_long"
+    if len(inc) == 1 and len(cor) >= 4:
+        return False, "single_char_expansion"
+    return True, None
+
+
+def extract_word_level_corrections(
+    previous_text: str,
+    edited_text: str,
+    context_window: int = 2,
+) -> list[tuple[str, str, str | None, str | None]]:
+    """Extract individual replacement spans + contexts from a line edit (separating distinct fixes)."""
+    prev_tokens = normalize_nfc(previous_text).split()
+    edit_tokens = normalize_nfc(edited_text).split()
+    if not prev_tokens or not edit_tokens:
+        return []
+    matcher = difflib.SequenceMatcher(None, prev_tokens, edit_tokens)
+    results: list[tuple[str, str, str | None, str | None]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        src_slice = prev_tokens[i1:i2]
+        dst_slice = edit_tokens[j1:j2]
+
+        # When an adjacent stray OCR token was deleted/inserted next to a single word fix
+        # (e.g., ['గ', 'అష్టాదశవర్ధనలు'] -> ['అష్టాదశవర్ణనలు']), isolate the closely matching word pair.
+        if len(src_slice) > 1 and len(dst_slice) == 1:
+            target_tok = dst_slice[0]
+            best_idx, best_ratio = max(
+                ((idx, difflib.SequenceMatcher(None, tok, target_tok).ratio()) for idx, tok in enumerate(src_slice)),
+                key=lambda pair: pair[1],
+            )
+            if best_ratio >= 0.65:
+                i1 = i1 + best_idx
+                i2 = i1 + 1
+                src_slice = [prev_tokens[i1]]
+        elif len(src_slice) == 1 and len(dst_slice) > 1:
+            source_tok = src_slice[0]
+            best_idx, best_ratio = max(
+                ((idx, difflib.SequenceMatcher(None, source_tok, tok).ratio()) for idx, tok in enumerate(dst_slice)),
+                key=lambda pair: pair[1],
+            )
+            if best_ratio >= 0.65:
+                j1 = j1 + best_idx
+                j2 = j1 + 1
+                dst_slice = [edit_tokens[j1]]
+
+        inc = " ".join(src_slice).strip()
+        cor = " ".join(dst_slice).strip()
+        if not inc or not cor or inc == cor:
+            continue
+        # Strip matching edge punctuation on single-token replacements for cleaner reusable rules.
+        if i2 - i1 == 1 and j2 - j1 == 1:
+            l1, c1, r1 = _strip_edge_punctuation(inc)
+            l2, c2, r2 = _strip_edge_punctuation(cor)
+            if l1 == l2 and r1 == r2 and c1 and c2:
+                inc, cor = c1, c2
+        left_tokens = prev_tokens[max(0, i1 - context_window) : i1]
+        right_tokens = prev_tokens[i2 : min(len(prev_tokens), i2 + context_window)]
+        left_ctx = " ".join(left_tokens) if left_tokens else None
+        right_ctx = " ".join(right_tokens) if right_tokens else None
+        results.append((inc, cor, left_ctx, right_ctx))
+    if not results:
+        inc, cor, left_ctx, right_ctx = extract_span_and_context(previous_text, edited_text, context_window)
+        if inc and cor and inc != cor:
+            results.append((inc, cor, left_ctx, right_ctx))
+    return results
 
 
 def extract_span_and_context(

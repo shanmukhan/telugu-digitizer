@@ -359,3 +359,25 @@ class DocumentExport(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )
+
+
+class CustomDictionaryWord(Base):
+    __tablename__ = "custom_dictionary_words"
+    __table_args__ = (
+        UniqueConstraint("language_code", "word", name="uq_custom_dict_lang_word"),
+        Index("ix_custom_dict_word", "word"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    language_code: Mapped[str] = mapped_column(String(16), nullable=False, default="te")
+    word: Mapped[str] = mapped_column(String(120), nullable=False)
+    translit: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    meaning_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meaning_te: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow, onupdate=_utcnow
+    )

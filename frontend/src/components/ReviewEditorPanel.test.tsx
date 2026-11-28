@@ -115,7 +115,9 @@ describe("ReviewEditorPanel", () => {
 
     const textarea = screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: "తెలుగు పుస్తకం" } });
-    fireEvent.click(screen.getByLabelText("Save to correction memory"));
+    // Save to correction memory is checked by default when a manual edit is made.
+    const rememberCheckbox = screen.getByLabelText("Save to correction memory") as HTMLInputElement;
+    expect(rememberCheckbox.checked).toBe(true);
 
     const saveBtn = screen.getByRole("button", { name: "Save Correction" });
     expect(saveBtn).toBeEnabled();
@@ -278,5 +280,83 @@ describe("ReviewEditorPanel", () => {
     const switchBtn = screen.getByRole("button", { name: "Switch to Tesseract 5 Telugu" });
     fireEvent.click(switchBtn);
     expect(onSelectPrimaryRun).toHaveBeenCalledWith("run-tess-done");
+  });
+
+  it("supports opt-in Auto-Correct Page preview, revert, and Save All & Approve Page", async () => {
+    const onAutocorrectPage = vi.fn().mockResolvedValue({
+      book_id: SAMPLE_REVIEW.book_id,
+      page_number: 1,
+      primary_run_id: "run-1",
+      lexicon_word_count: 139709,
+      total_blocks_scanned: 1,
+      changed_blocks_count: 1,
+      total_changes_count: 1,
+      blocks: [
+        {
+          block_id: "blk-1",
+          original_text: "తెలుగు పస్తకం",
+          proposed_text: "తెలుగు పుస్తకం",
+          changes: [
+            {
+              original: "పస్తకం",
+              replacement: "పుస్తకం",
+              source: "dictionary",
+              confidence: 0.89,
+              reason: "Telugu dictionary + OCR similarity match",
+            },
+          ],
+        },
+      ],
+    });
+    const onBatchSaveAndApprovePage = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <ReviewEditorPanel
+        review={SAMPLE_REVIEW}
+        selectedBlockId="blk-1"
+        busyBlockId={null}
+        onSelectBlock={vi.fn()}
+        onSelectPrimaryRun={vi.fn()}
+        onSaveEdit={vi.fn().mockResolvedValue(undefined)}
+        onAutocorrectPage={onAutocorrectPage}
+        onBatchSaveAndApprovePage={onBatchSaveAndApprovePage}
+        onAcceptSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onRejectSuggestion={vi.fn().mockResolvedValue(undefined)}
+        onChangePageStatus={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "✨ Auto-Correct Page" }));
+    await waitFor(() => {
+      expect(onAutocorrectPage).toHaveBeenCalledTimes(1);
+    });
+
+    const textarea = screen.getByLabelText("Edit Telugu text for line 1") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("తెలుగు పుస్తకం");
+    expect(screen.getByText(/Auto-Correct Draft Preview/)).toBeInTheDocument();
+
+    // Test one-click Revert Auto-Correct restores original draft.
+    fireEvent.click(screen.getByRole("button", { name: "↩ Revert Auto-Correct" }));
+    expect(textarea.value).toBe("తెలుగు పస్తకం");
+
+    // Re-run auto-correct and commit entire page in one click.
+    fireEvent.click(screen.getByRole("button", { name: "✨ Auto-Correct Page" }));
+    await waitFor(() => {
+      expect(textarea.value).toBe("తెలుగు పుస్తకం");
+    });
+
+    const batchApproveBtn = screen.getByRole("button", { name: "Save All (1) & Approve Page" });
+    fireEvent.click(batchApproveBtn);
+    await waitFor(() => {
+      expect(onBatchSaveAndApprovePage).toHaveBeenCalledWith([
+        expect.objectContaining({
+          block_id: "blk-1",
+          edited_text: "తెలుగు పుస్తకం",
+          action: "corrected",
+          add_to_correction_memory: true,
+          memory_scope: "book_only",
+        }),
+      ]);
+    });
   });
 });

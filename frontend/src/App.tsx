@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiClientError,
   approveCorrection,
+  autocorrectPage,
+  batchSavePage,
   cancelOcrRun,
   createManualPageBlock,
   deleteBook,
@@ -22,6 +24,7 @@ import {
 import { BookUploadForm } from "./components/BookUploadForm";
 import { CorrectionMemoryPanel } from "./components/CorrectionMemoryPanel";
 import { DeleteConfirmDialog } from "./components/DeleteConfirmDialog";
+import { DictionaryPanel } from "./components/DictionaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
 import {
   HeaderOcrStatusPill,
@@ -37,12 +40,14 @@ import {
 } from "./components/StudioChrome";
 import { TeluguKeyboard } from "./components/TeluguKeyboard";
 import type {
+  BatchBlockEditPayload,
   BlockRole,
   BookOCRRunSummary,
   BookSummary,
   CorrectionSuggestionItem,
   HostCapabilities,
   OCRRunStatus,
+  PageAutocorrectResponse,
   PageReviewPayload,
   PageSummary,
   ReviewBlock,
@@ -75,7 +80,35 @@ export function App() {
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const lastEditableRef = useRef<EditableTextElement | null>(null);
   const [keyboardTargetLabel, setKeyboardTargetLabel] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"review" | "memory" | "export">("review");
+  const [activeView, setActiveView] = useState<"review" | "dictionary" | "memory" | "export">(() => {
+    if (typeof window !== "undefined") {
+      const viewParam = new URLSearchParams(window.location.search).get("view");
+      if (viewParam === "dictionary" || viewParam === "memory" || viewParam === "export") {
+        return viewParam;
+      }
+    }
+    return "review";
+  });
+  const [dictionaryQuery, setDictionaryQuery] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      return new URLSearchParams(window.location.search).get("q");
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (activeView === "review") {
+      url.searchParams.delete("view");
+    } else {
+      url.searchParams.set("view", activeView);
+    }
+    if (activeView !== "dictionary") {
+      url.searchParams.delete("q");
+    }
+    window.history.replaceState({}, "", url.toString());
+  }, [activeView]);
 
   const [uploadExpanded, setUploadExpanded] = useState(true);
   const initializedCollapseRef = useRef(false);
@@ -468,6 +501,7 @@ export function App() {
         add_to_correction_memory: options?.addToMemory ?? false,
         memory_scope: options?.memoryScope ?? "book_only",
         correction_type: options?.correctionType,
+        auto_filter_noise: true,
       });
       await Promise.all([
         refreshBookDetail(selectedBookId),
@@ -601,6 +635,68 @@ export function App() {
       setBanner({
         kind: "error",
         text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to save digital text.",
+      });
+    }
+  }
+
+  async function handleAutocorrectPage(
+    currentTexts: Record<string, string>,
+  ): Promise<PageAutocorrectResponse | null> {
+    if (!selectedBookId || !review) return null;
+    try {
+      const res = await autocorrectPage(selectedBookId, selectedPageNumber, {
+        primaryRunId: review.primary_run_id,
+        useCorrectionMemory: true,
+        useDictionary: true,
+        useSentenceContext: true,
+        currentTexts,
+      });
+      if (res.changed_blocks_count === 0) {
+        setBanner({
+          kind: "info",
+          text: `No high-confidence auto-corrections found on Page ${selectedPageNumber} (scanned ${res.total_blocks_scanned} line(s) against ${res.lexicon_word_count.toLocaleString()} Telugu words & correction memory).`,
+        });
+      } else {
+        setBanner({
+          kind: "success",
+          text: `Auto-corrected ${res.changed_blocks_count} line(s) (${res.total_changes_count} fix(es)) into drafts. Review highlighted cards and click "Save All & Approve Page".`,
+        });
+      }
+      return res;
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Auto-correct failed.",
+      });
+      return null;
+    }
+  }
+
+  async function handleBatchSaveAndApprovePage(edits: BatchBlockEditPayload[]) {
+    if (!selectedBookId || !review) return;
+    try {
+      const res = await batchSavePage(selectedBookId, selectedPageNumber, {
+        primaryRunId: review.primary_run_id,
+        edits,
+        approveRemainingBlocks: true,
+        markPageApproved: true,
+      });
+      await Promise.all([
+        refreshBookDetail(selectedBookId),
+        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+      ]);
+      const memNote =
+        res.correction_memory_created_count > 0
+          ? `, added ${res.correction_memory_created_count} rule(s) to correction memory`
+          : "";
+      setBanner({
+        kind: "success",
+        text: `Page ${selectedPageNumber} approved: saved ${res.saved_edits_count} edit(s), approved ${res.approved_blocks_count} line(s)${memNote}.`,
+      });
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch save & approve failed.",
       });
     }
   }
@@ -839,6 +935,14 @@ export function App() {
               onClick={() => setActiveView("review")}
             >
               <span aria-hidden="true">📖</span> Page Review
+            </button>
+            <button
+              type="button"
+              className={activeView === "dictionary" ? "primary" : undefined}
+              aria-pressed={activeView === "dictionary"}
+              onClick={() => setActiveView("dictionary")}
+            >
+              <span aria-hidden="true">📚</span> Dictionary
             </button>
             <button
               type="button"
@@ -1198,7 +1302,7 @@ export function App() {
         </aside>
 
         <main id="main-review" className="main-stage" tabIndex={-1}>
-          {selectedBook && (
+          {selectedBook && activeView !== "dictionary" && (
             <OverviewPanel
               book={selectedBook}
               pages={pages}
@@ -1210,7 +1314,7 @@ export function App() {
             />
           )}
 
-          {selectedBook && (
+          {selectedBook && activeView !== "dictionary" && (
             <OcrProgressStrip
               book={selectedBook}
               runs={mergedRuns}
@@ -1245,7 +1349,14 @@ export function App() {
             </div>
           )}
 
-          {activeView === "memory" ? (
+          {activeView === "dictionary" ? (
+            <DictionaryPanel
+              initialQuery={dictionaryQuery}
+              keyboardOpen={keyboardOpen}
+              onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
+              onStatusBanner={handleStatusBanner}
+            />
+          ) : activeView === "memory" ? (
             <CorrectionMemoryPanel
               selectedBookId={selectedBookId}
               onStatusBanner={handleStatusBanner}
@@ -1306,6 +1417,10 @@ export function App() {
                   setSelectedBlockId(blockId);
                   triggerSync("scan", blockId);
                 }}
+                onLookupWord={(word) => {
+                  setDictionaryQuery(word);
+                  setActiveView("dictionary");
+                }}
                 onSyncToScan={() => {
                   if (selectedBlockId) {
                     triggerSync("scan", selectedBlockId);
@@ -1318,6 +1433,8 @@ export function App() {
                 onAddManualBlock={handleAddManualBlock}
                 onSaveDigitalText={handleSaveDigitalText}
                 onBatchApproveUnflagged={handleBatchApproveUnflagged}
+                onAutocorrectPage={handleAutocorrectPage}
+                onBatchSaveAndApprovePage={handleBatchSaveAndApprovePage}
                 onAcceptSuggestion={handleAcceptSuggestion}
                 onRejectSuggestion={handleRejectSuggestion}
                 onChangePageStatus={handlePageStatusChange}

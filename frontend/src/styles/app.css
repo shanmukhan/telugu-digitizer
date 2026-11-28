@@ -2028,3 +2028,243 @@ progress.stat-progress::-moz-progress-bar {
     transform: none;
   }
 }
+
+/* Auto-Correct preview & batch-save controls */
+.autocorr-btn {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-ink);
+  font-weight: 600;
+}
+
+.autocorr-badge {
+  background: var(--info-bg);
+  border-color: var(--info-border);
+  color: var(--info-ink);
+}
+
+.autocorrect-preview-box {
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--info-border);
+  border-radius: 0.45rem;
+  background: var(--info-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.autocorrect-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.82rem;
+}
+
+.autocorrect-meta {
+  font-size: 0.72rem;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+/* Standalone Telugu Dictionary */
+.dict-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.dict-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.dict-subnav {
+  border-block-end: 1px solid var(--border);
+  padding-block-end: 0.6rem;
+}
+
+.dict-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dict-search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.dict-search-input {
+  flex: 1 1 18rem;
+  min-inline-size: 14rem;
+  min-block-size: 40px;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-telugu);
+  font-size: 1rem;
+}
+
+.dict-examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dict-layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 22rem) minmax(0, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .dict-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dict-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-block-size: 62dvh;
+  overflow-y: auto;
+}
+
+.dict-result-btn {
+  inline-size: 100%;
+  text-align: start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.dict-result-btn.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 2px rgb(15 107 92 / 0.14);
+}
+
+.dict-preview-snippet {
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+  line-height: 1.35;
+}
+
+.dict-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dict-defs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.dict-def-block {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface-muted);
+}
+
+.dict-source-tag {
+  background: var(--info-bg);
+  border-color: var(--info-border);
+  color: var(--info-ink);
+  font-weight: 600;
+}
+
+.dict-def-text {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.94rem;
+  line-height: 1.55;
+}
+
+.dict-issues-list,
+.dict-custom-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dict-issue-item,
+.dict-custom-item {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+}
+
+.dict-custom-grid {
+  display: grid;
+  grid-template-columns: minmax(17rem, 24rem) minmax(0, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .dict-custom-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dict-custom-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.dict-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dict-field label {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.dict-field input,
+.dict-field textarea {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}

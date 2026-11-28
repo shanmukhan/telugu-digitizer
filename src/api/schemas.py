@@ -262,6 +262,71 @@ class BlockEditRequest(BaseModel):
     correction_type: str | None = None
     incorrect_span: str | None = None
     corrected_span: str | None = None
+    auto_filter_noise: bool = False
+
+
+class PageAutocorrectRequest(BaseModel):
+    primary_run_id: UUID | None = None
+    use_correction_memory: bool = True
+    use_dictionary: bool = True
+    use_sentence_context: bool = True
+    min_confidence: float = Field(default=0.78, ge=0.5, le=0.99)
+    current_texts: dict[str, str] = Field(default_factory=dict)
+
+
+class AutocorrectChangeItem(BaseModel):
+    original: str
+    replacement: str
+    source: str
+    confidence: float
+    reason: str
+
+
+class BlockAutocorrectProposal(BaseModel):
+    block_id: UUID
+    original_text: str
+    proposed_text: str
+    changes: list[AutocorrectChangeItem] = Field(default_factory=list)
+
+
+class PageAutocorrectResponse(BaseModel):
+    book_id: UUID
+    page_number: int
+    primary_run_id: UUID | None
+    lexicon_word_count: int
+    total_blocks_scanned: int
+    changed_blocks_count: int
+    total_changes_count: int
+    blocks: list[BlockAutocorrectProposal] = Field(default_factory=list)
+
+
+class BatchBlockEditItem(BaseModel):
+    block_id: UUID
+    edited_text: str
+    action: str = "corrected"
+    block_role: str | None = None
+    review_note: str | None = None
+    reviewer_id: str | None = None
+    add_to_correction_memory: bool = True
+    memory_scope: str = "book_only"
+    correction_type: str | None = None
+
+
+class PageBatchSaveRequest(BaseModel):
+    primary_run_id: UUID | None = None
+    edits: list[BatchBlockEditItem] = Field(default_factory=list)
+    approve_remaining_blocks: bool = True
+    mark_page_approved: bool = True
+
+
+class PageBatchSaveResponse(BaseModel):
+    book_id: UUID
+    page_number: int
+    saved_edits_count: int
+    approved_blocks_count: int
+    correction_memory_created_count: int
+    correction_memory_skipped_noise_count: int
+    page_review_status: str
 
 
 class BlockEditResponse(BaseModel):
@@ -374,3 +439,102 @@ class ExportRecordResponse(BaseModel):
 class ExportListResponse(BaseModel):
     book_id: UUID
     items: list[ExportRecordResponse]
+
+
+class DictionaryStatsResponse(BaseModel):
+    available: bool
+    has_definitions_db: bool
+    total_words: int
+    words_with_definitions: int
+    total_definitions: int
+    custom_words_count: int
+    source_definition_counts: dict[str, int] = Field(default_factory=dict)
+    built_at: str | None = None
+
+
+class DictionaryDefinitionItem(BaseModel):
+    source: str
+    lang: str
+    definition: str
+
+
+class DictionarySuggestionItem(BaseModel):
+    word: str
+    confidence: float
+    reason: str
+
+
+class DictionarySearchItem(BaseModel):
+    word: str
+    weight: int
+    sources: list[str] = Field(default_factory=list)
+    translit: str = ""
+    has_definition: bool = False
+    is_custom: bool = False
+    custom_word_id: UUID | None = None
+    definitions: list[DictionaryDefinitionItem] = Field(default_factory=list)
+
+
+class DictionarySearchResponse(BaseModel):
+    query: str
+    detected_mode: str
+    exact_match: bool
+    items: list[DictionarySearchItem] = Field(default_factory=list)
+    did_you_mean: list[DictionarySuggestionItem] = Field(default_factory=list)
+
+
+class DictionaryWordDetailResponse(BaseModel):
+    word: str
+    found: bool
+    is_valid_word: bool
+    weight: int
+    sources: list[str] = Field(default_factory=list)
+    translit: str = ""
+    is_custom: bool = False
+    custom_word_id: UUID | None = None
+    definitions: list[DictionaryDefinitionItem] = Field(default_factory=list)
+    did_you_mean: list[DictionarySuggestionItem] = Field(default_factory=list)
+
+
+class DictionaryTextCheckRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class DictionaryTextIssueItem(BaseModel):
+    token: str
+    token_index: int
+    best_replacement: str | None = None
+    confidence: float | None = None
+    reason: str
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class DictionaryTextCheckResponse(BaseModel):
+    total_telugu_words: int
+    known_words_count: int
+    unknown_words_count: int
+    issues: list[DictionaryTextIssueItem] = Field(default_factory=list)
+
+
+class CustomDictionaryWordCreateRequest(BaseModel):
+    word: str = Field(min_length=1, max_length=120)
+    translit: str | None = None
+    meaning_en: str | None = None
+    meaning_te: str | None = None
+    notes: str | None = None
+
+
+class CustomDictionaryWordRecord(BaseModel):
+    word_id: UUID
+    language_code: str
+    word: str
+    translit: str | None = None
+    meaning_en: str | None = None
+    meaning_te: str | None = None
+    notes: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CustomDictionaryWordListResponse(BaseModel):
+    items: list[CustomDictionaryWordRecord] = Field(default_factory=list)

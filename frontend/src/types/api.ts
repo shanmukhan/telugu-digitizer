@@ -239,3 +239,133 @@ export interface ExportRecord {
   manifest_url: string;
   created_at: string;
 }
+
+export interface AutocorrectChangeItem {
+  original: string;
+  replacement: string;
+  source: "correction_memory" | "dictionary" | "sentence_context" | string;
+  confidence: number;
+  reason: string;
+}
+
+export interface BlockAutocorrectProposal {
+  block_id: string;
+  original_text: string;
+  proposed_text: string;
+  changes: AutocorrectChangeItem[];
+}
+
+export interface PageAutocorrectResponse {
+  book_id: string;
+  page_number: number;
+  primary_run_id: string | null;
+  lexicon_word_count: number;
+  total_blocks_scanned: number;
+  changed_blocks_count: number;
+  total_changes_count: number;
+  blocks: BlockAutocorrectProposal[];
+}
+
+export interface BatchBlockEditPayload {
+  block_id: string;
+  edited_text: string;
+  action?: "corrected" | "approved" | "reverted" | "ignored";
+  block_role?: BlockRole;
+  review_note?: string;
+  add_to_correction_memory?: boolean;
+  memory_scope?: "book_only" | "global_suggestion";
+  correction_type?: string;
+}
+
+export interface PageBatchSaveResponse {
+  book_id: string;
+  page_number: number;
+  saved_edits_count: number;
+  approved_blocks_count: number;
+  correction_memory_created_count: number;
+  correction_memory_skipped_noise_count: number;
+  page_review_status: "not_started" | "in_review" | "approved" | "needs_attention";
+}
+
+export interface DictionaryStats {
+  available: boolean;
+  has_definitions_db: boolean;
+  total_words: number;
+  words_with_definitions: number;
+  total_definitions: number;
+  custom_words_count: number;
+  source_definition_counts: Record<string, number>;
+  built_at: string | null;
+}
+
+export interface DictionaryDefinitionItem {
+  source: string;
+  lang: string;
+  definition: string;
+}
+
+export interface DictionarySuggestionItem {
+  word: string;
+  confidence: number;
+  reason: string;
+}
+
+export interface DictionarySearchItem {
+  word: string;
+  weight: number;
+  sources: string[];
+  translit: string;
+  has_definition: boolean;
+  is_custom: boolean;
+  custom_word_id: string | null;
+  definitions: DictionaryDefinitionItem[];
+}
+
+export interface DictionarySearchResponse {
+  query: string;
+  detected_mode: "telugu" | "english" | string;
+  exact_match: boolean;
+  items: DictionarySearchItem[];
+  did_you_mean: DictionarySuggestionItem[];
+}
+
+export interface DictionaryWordDetail {
+  word: string;
+  found: boolean;
+  is_valid_word: boolean;
+  weight: number;
+  sources: string[];
+  translit: string;
+  is_custom: boolean;
+  custom_word_id: string | null;
+  definitions: DictionaryDefinitionItem[];
+  did_you_mean: DictionarySuggestionItem[];
+}
+
+export interface DictionaryTextIssueItem {
+  token: string;
+  token_index: number;
+  best_replacement: string | null;
+  confidence: number | null;
+  reason: string;
+  suggestions: string[];
+}
+
+export interface DictionaryTextCheckResponse {
+  total_telugu_words: number;
+  known_words_count: number;
+  unknown_words_count: number;
+  issues: DictionaryTextIssueItem[];
+}
+
+export interface CustomDictionaryWordRecord {
+  word_id: string;
+  language_code: string;
+  word: string;
+  translit: string | null;
+  meaning_en: string | null;
+  meaning_te: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}

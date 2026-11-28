@@ -40,6 +40,8 @@ class AppSettings:
     auth_username: str | None = None
     auth_password: str | None = None
     enable_paddle_ocr: bool = True
+    lexicon_path: Path | None = None
+    dictionary_db_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -47,6 +49,8 @@ class AppSettings:
         default_db = (
             "postgresql+psycopg://telugu_digitizer:telugu_digitizer@127.0.0.1:5432/telugu_digitizer"
         )
+        default_lexicon = repo_root / "models" / "lexicon" / "telugu_lexicon.tsv.gz"
+        default_dict_db = repo_root / "models" / "lexicon" / "telugu_dictionary.sqlite"
         return cls(
             database_url=os.environ.get("DATABASE_URL", default_db),
             workspace_dir=Path(os.environ.get("WORKSPACE_DIR", str(repo_root / "workspace"))).resolve(),
@@ -69,4 +73,8 @@ class AppSettings:
             auth_username=os.environ.get("APP_AUTH_USERNAME") or None,
             auth_password=os.environ.get("APP_AUTH_PASSWORD") or None,
             enable_paddle_ocr=_parse_bool(os.environ.get("ENABLE_PADDLE_OCR"), True),
+            lexicon_path=Path(os.environ.get("TELUGU_LEXICON_PATH", str(default_lexicon))).resolve(),
+            dictionary_db_path=Path(
+                os.environ.get("TELUGU_DICTIONARY_DB_PATH", str(default_dict_db))
+            ).resolve(),
         )

@@ -1,5 +1,13 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import type { BlockRole, CorrectionSuggestionItem, PageReviewPayload, ReviewBlock } from "../types/api";
+import type {
+  AutocorrectChangeItem,
+  BatchBlockEditPayload,
+  BlockRole,
+  CorrectionSuggestionItem,
+  PageAutocorrectResponse,
+  PageReviewPayload,
+  ReviewBlock,
+} from "../types/api";
 import { formatEngineLabel } from "../utils/formatters";
 import { scrollIntoViewAsync } from "../utils/scrollSync";
 
@@ -16,6 +24,12 @@ export interface SaveEditOptions {
   blockRole?: BlockRole;
 }
 
+function formatAutocorrectSource(source: string): string {
+  if (source === "correction_memory") return "Memory";
+  if (source === "sentence_context") return "Context";
+  return "Dictionary";
+}
+
 interface ReviewBlockCardProps {
   block: ReviewBlock;
   draftText: string;
@@ -26,10 +40,12 @@ interface ReviewBlockCardProps {
   remember: boolean;
   scope: "book_only" | "global_suggestion";
   correctionType: string;
+  autoCorrectChanges?: AutocorrectChangeItem[];
   primaryEngine: string | null;
   comparatorEngine: string | null;
   onSelectBlock: (blockId: string) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
+  onLookupWord?: (word: string) => void;
   onDraftChange: (blockId: string, value: string) => void;
   onRoleChange: (blockId: string, role: BlockRole) => void;
   onRememberChange: (blockId: string, checked: boolean) => void;
@@ -59,10 +75,12 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   remember,
   scope,
   correctionType,
+  autoCorrectChanges,
   primaryEngine,
   comparatorEngine,
   onSelectBlock,
   onLocateBlockOnScan,
+  onLookupWord,
   onDraftChange,
   onRoleChange,
   onRememberChange,
@@ -107,6 +125,11 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         {block.short_or_empty_flag && <span className="badge warn">! Short / Empty</span>}
         {block.suggestions.length > 0 && (
           <span className="badge">💡 {block.suggestions.length} Suggestion(s)</span>
+        )}
+        {autoCorrectChanges && autoCorrectChanges.length > 0 && (
+          <span className="badge autocorr-badge">
+            ✨ {autoCorrectChanges.length} Auto-Fix(es)
+          </span>
         )}
         {block.is_edited && <span className="badge ok">✓ Edited</span>}
         {block.latest_action === "approved" && (
@@ -230,6 +253,28 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         </div>
       )}
 
+      {autoCorrectChanges && autoCorrectChanges.length > 0 && (
+        <div className="autocorrect-preview-box" aria-label="Proposed auto-corrections">
+          <strong style={{ fontSize: "0.8rem" }}>Auto-Correct Draft Preview (review before saving)</strong>
+          <div className="badge-row">
+            {autoCorrectChanges.map((chg, idx) => (
+              <span
+                key={`${chg.original}-${chg.replacement}-${idx}`}
+                className="autocorrect-chip"
+                title={chg.reason}
+              >
+                <span className="telugu-text" lang="te">
+                  {chg.original} → <strong>{chg.replacement}</strong>
+                </span>
+                <span className="autocorrect-meta">
+                  {formatAutocorrectSource(chg.source)} · {Math.round(chg.confidence * 100)}%
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <label htmlFor={`block-input-${block.block_id}`} className="visually-hidden">
         Edit Telugu text for line {block.block_index + 1}
       </label>
@@ -242,6 +287,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         onFocus={() => onSelectBlock(block.block_id)}
         onChange={(e) => onDraftChange(block.block_id, e.target.value)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return;
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();
             if (isDirty) {
@@ -345,6 +391,34 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
             Ignore Box
           </button>
         )}
+        {onLookupWord && (
+          <button
+            type="button"
+            className="btn-compact"
+            title="Look up selected Telugu word (or first Telugu word in this line) in the Telugu Dictionary"
+            onClick={(e) => {
+              e.stopPropagation();
+              const textarea = document.getElementById(
+                `block-input-${block.block_id}`,
+              ) as HTMLTextAreaElement | null;
+              let targetWord = "";
+              if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+                targetWord = textarea.value
+                  .slice(textarea.selectionStart, textarea.selectionEnd)
+                  .trim();
+              }
+              if (!targetWord) {
+                const match = draftText.match(/[\u0C01-\u0C63\u0C78-\u0C7F]{2,}/);
+                targetWord = match ? match[0] : draftText.trim().split(/\s+/)[0] || "";
+              }
+              if (targetWord) {
+                onLookupWord(targetWord);
+              }
+            }}
+          >
+            📚 Dictionary
+          </button>
+        )}
         {block.current_text !== block.raw_text && (
           <button
             type="button"
@@ -393,6 +467,7 @@ interface ReviewEditorPanelProps {
   keyboardOpen?: boolean;
   onSelectBlock: (blockId: string) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
+  onLookupWord?: (word: string) => void;
   onSyncToScan?: () => void;
   onToggleAutoSync?: () => void;
   onToggleKeyboard?: () => void;
@@ -408,6 +483,10 @@ interface ReviewEditorPanelProps {
   onAddManualBlock?: (text: string, blockRole: BlockRole) => Promise<void>;
   onSaveDigitalText?: (text: string) => Promise<void>;
   onBatchApproveUnflagged?: () => Promise<void>;
+  onAutocorrectPage?: (
+    currentTexts: Record<string, string>,
+  ) => Promise<PageAutocorrectResponse | null>;
+  onBatchSaveAndApprovePage?: (edits: BatchBlockEditPayload[]) => Promise<void>;
   onAcceptSuggestion: (
     block: ReviewBlock,
     suggestion: CorrectionSuggestionItem,
@@ -428,6 +507,7 @@ export function ReviewEditorPanel({
   keyboardOpen = false,
   onSelectBlock,
   onLocateBlockOnScan,
+  onLookupWord,
   onSyncToScan,
   onToggleAutoSync,
   onToggleKeyboard,
@@ -437,6 +517,8 @@ export function ReviewEditorPanel({
   onAddManualBlock,
   onSaveDigitalText,
   onBatchApproveUnflagged,
+  onAutocorrectPage,
+  onBatchSaveAndApprovePage,
   onAcceptSuggestion,
   onRejectSuggestion,
   onChangePageStatus,
@@ -446,6 +528,10 @@ export function ReviewEditorPanel({
   const [rememberByBlock, setRememberByBlock] = useState<Record<string, boolean>>({});
   const [scopeByBlock, setScopeByBlock] = useState<Record<string, "book_only" | "global_suggestion">>({});
   const [typeByBlock, setTypeByBlock] = useState<Record<string, string>>({});
+  const [autoCorrectByBlock, setAutoCorrectByBlock] = useState<Record<string, AutocorrectChangeItem[]>>({});
+  const [autoCorrectSnapshot, setAutoCorrectSnapshot] = useState<Record<string, string> | null>(null);
+  const [busyAutocorrect, setBusyAutocorrect] = useState(false);
+  const [busyBatchApprove, setBusyBatchApprove] = useState(false);
   const [filterFlagged, setFilterFlagged] = useState(false);
   const [lineSearch, setLineSearch] = useState("");
   const [teluguFontScale, setTeluguFontScale] = useState(1.0);
@@ -531,6 +617,9 @@ export function ReviewEditorPanel({
   useEffect(() => {
     setUndoStack([]);
     setRedoStack([]);
+    setAutoCorrectByBlock({});
+    setAutoCorrectSnapshot(null);
+    setRememberByBlock({});
   }, [review.book_id, review.page_number, review.primary_run_id]);
 
   async function commitEdit(
@@ -541,7 +630,7 @@ export function ReviewEditorPanel({
     overrideRole?: BlockRole,
   ) {
     const prevText = block.current_text;
-    const addMem = action === "corrected" && Boolean(rememberByBlock[block.block_id]);
+    const addMem = action === "corrected" && (rememberByBlock[block.block_id] ?? true);
     const scope = scopeByBlock[block.block_id] ?? "book_only";
     const cType = typeByBlock[block.block_id] || undefined;
     const effectiveRole = overrideRole ?? roleByBlock[block.block_id] ?? block.block_role;
@@ -558,12 +647,95 @@ export function ReviewEditorPanel({
     }
 
     await onSaveEdit(block.block_id, nextText, action, undefined, opts);
-    if (addMem) {
-      setRememberByBlock((prev) => ({ ...prev, [block.block_id]: false }));
-    }
+    setAutoCorrectByBlock((prev) => {
+      if (!(block.block_id in prev)) return prev;
+      const next = { ...prev };
+      delete next[block.block_id];
+      return next;
+    });
     if (pushHistory && prevText !== nextText) {
       setUndoStack((prev) => [...prev, { blockId: block.block_id, previousText: prevText, nextText }]);
       setRedoStack([]);
+    }
+  }
+
+  const dirtyBlocks = review.blocks.filter((b) => {
+    const draftVal = drafts[b.block_id] ?? b.current_text;
+    const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
+    return draftVal !== b.current_text || roleVal !== (b.block_role ?? "paragraph");
+  });
+
+  async function handleRunAutocorrect() {
+    if (!onAutocorrectPage || review.blocks.length === 0) return;
+    setBusyAutocorrect(true);
+    try {
+      const currentTexts: Record<string, string> = {};
+      for (const b of review.blocks) {
+        currentTexts[b.block_id] = drafts[b.block_id] ?? b.current_text;
+      }
+      const res = await onAutocorrectPage(currentTexts);
+      if (!res || res.blocks.length === 0) {
+        setSyncNotice(`No auto-corrections suggested on page ${review.page_number}.`);
+        return;
+      }
+      setAutoCorrectSnapshot((prev) => prev ?? { ...currentTexts });
+      const nextDrafts = { ...currentTexts };
+      const nextChanges: Record<string, AutocorrectChangeItem[]> = {};
+      for (const prop of res.blocks) {
+        nextDrafts[prop.block_id] = prop.proposed_text;
+        nextChanges[prop.block_id] = prop.changes;
+      }
+      setDrafts(nextDrafts);
+      setAutoCorrectByBlock(nextChanges);
+      setSyncNotice(
+        `Auto-corrected ${res.changed_blocks_count} line(s) (${res.total_changes_count} fix(es)) into drafts for review.`,
+      );
+    } finally {
+      setBusyAutocorrect(false);
+    }
+  }
+
+  function handleRevertAutocorrect() {
+    if (!autoCorrectSnapshot) return;
+    setDrafts(autoCorrectSnapshot);
+    setAutoCorrectByBlock({});
+    setAutoCorrectSnapshot(null);
+    setSyncNotice("Reverted uncommitted auto-corrections.");
+  }
+
+  async function handleApproveEntirePage() {
+    if (!onBatchSaveAndApprovePage) {
+      await onChangePageStatus("approved");
+      return;
+    }
+    setBusyBatchApprove(true);
+    try {
+      const edits: BatchBlockEditPayload[] = dirtyBlocks.map((b) => {
+        const draftVal = drafts[b.block_id] ?? b.current_text;
+        const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
+        const isTextChanged = draftVal !== b.current_text;
+        const hasAutoChanges = Boolean(autoCorrectByBlock[b.block_id]?.length);
+        return {
+          block_id: b.block_id,
+          edited_text: draftVal,
+          action: roleVal === "ignore" ? "ignored" : isTextChanged ? "corrected" : "approved",
+          block_role: roleVal,
+          add_to_correction_memory: isTextChanged ? (rememberByBlock[b.block_id] ?? true) : false,
+          memory_scope: scopeByBlock[b.block_id] ?? "book_only",
+          correction_type: typeByBlock[b.block_id] || undefined,
+          review_note: hasAutoChanges ? "Auto-correct reviewed & batch-approved" : undefined,
+        };
+      });
+      await onBatchSaveAndApprovePage(edits);
+      setAutoCorrectByBlock({});
+      setAutoCorrectSnapshot(null);
+      setSyncNotice(
+        edits.length > 0
+          ? `Saved ${edits.length} edited line(s) and approved page ${review.page_number}.`
+          : `Approved page ${review.page_number}.`,
+      );
+    } finally {
+      setBusyBatchApprove(false);
     }
   }
 
@@ -832,6 +1004,28 @@ export function ReviewEditorPanel({
         </div>
 
         <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+          {onAutocorrectPage && review.page_kind !== "digital_text" && review.blocks.length > 0 && (
+            <button
+              type="button"
+              className="btn-compact autocorr-btn"
+              disabled={busyAutocorrect || busyBatchApprove}
+              title="Propose Telugu OCR fixes using Correction Memory, Telugu Dictionary, and sentence context (review before saving)"
+              onClick={() => void handleRunAutocorrect()}
+            >
+              {busyAutocorrect ? "Auto-Correcting…" : "✨ Auto-Correct Page"}
+            </button>
+          )}
+          {autoCorrectSnapshot && (
+            <button
+              type="button"
+              className="btn-compact"
+              disabled={busyBatchApprove}
+              title="Discard uncommitted auto-corrections and restore previous drafts"
+              onClick={handleRevertAutocorrect}
+            >
+              ↩ Revert Auto-Correct
+            </button>
+          )}
           {onAddManualBlock && review.page_kind !== "digital_text" && (
             <button
               type="button"
@@ -870,9 +1064,19 @@ export function ReviewEditorPanel({
           <button
             type="button"
             className="primary btn-compact"
-            onClick={() => void onChangePageStatus("approved")}
+            disabled={busyBatchApprove || busyAutocorrect}
+            title={
+              dirtyBlocks.length > 0
+                ? `Save all ${dirtyBlocks.length} edited line(s), update correction memory, and approve the entire page`
+                : "Approve all remaining lines and mark this page Approved"
+            }
+            onClick={() => void handleApproveEntirePage()}
           >
-            Approve Page
+            {busyBatchApprove
+              ? "Saving & Approving…"
+              : onBatchSaveAndApprovePage && dirtyBlocks.length > 0
+                ? `Save All (${dirtyBlocks.length}) & Approve Page`
+                : "Approve Page"}
           </button>
         </div>
       </div>
@@ -1009,14 +1213,16 @@ export function ReviewEditorPanel({
             role={roleByBlock[block.block_id] ?? block.block_role ?? "paragraph"}
             isSelected={block.block_id === selectedBlockId}
             isFlashing={block.block_id === flashingBlockId}
-            isBusy={busyBlockId === block.block_id}
-            remember={Boolean(rememberByBlock[block.block_id])}
+            isBusy={busyBlockId === block.block_id || busyBatchApprove}
+            remember={rememberByBlock[block.block_id] ?? true}
             scope={scopeByBlock[block.block_id] ?? "book_only"}
             correctionType={typeByBlock[block.block_id] ?? ""}
+            autoCorrectChanges={autoCorrectByBlock[block.block_id]}
             primaryEngine={review.primary_engine}
             comparatorEngine={review.comparator_engine}
             onSelectBlock={onSelectBlock}
             onLocateBlockOnScan={onLocateBlockOnScan}
+            onLookupWord={onLookupWord}
             onDraftChange={handleDraftChange}
             onRoleChange={handleRoleChange}
             onRememberChange={handleRememberChange}
