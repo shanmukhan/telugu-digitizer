@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutocorrectChangeItem,
   BatchBlockEditPayload,
@@ -8,8 +8,14 @@ import type {
   PageReviewPayload,
   ReviewBlock,
 } from "../types/api";
-import { formatEngineLabel } from "../utils/formatters";
+import {
+  formatCorrectionScope,
+  formatEngineLabel,
+  formatReviewStatus,
+} from "../utils/formatters";
 import { scrollIntoViewAsync } from "../utils/scrollSync";
+import { diffComparatorWords, diffTeluguGraphemes } from "../utils/teluguDiff";
+import { PinnedLineCrop } from "./PinnedLineCrop";
 
 interface UndoEntry {
   blockId: string;
@@ -30,6 +36,25 @@ function formatAutocorrectSource(source: string): string {
   return "Dictionary";
 }
 
+function extractLookupWord(textarea: HTMLTextAreaElement | null, draftText: string): string {
+  if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+    const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd).trim();
+    if (sel) return sel;
+  }
+  if (textarea && typeof textarea.selectionStart === "number") {
+    const pos = textarea.selectionStart;
+    const text = textarea.value;
+    const matches = Array.from(text.matchAll(/[\u0C00-\u0C7F]+/g));
+    for (const m of matches) {
+      if (m.index !== undefined && pos >= m.index && pos <= m.index + m[0].length) {
+        return m[0];
+      }
+    }
+  }
+  const match = draftText.match(/[\u0C01-\u0C63\u0C78-\u0C7F]{2,}/);
+  return match ? match[0] : draftText.trim().split(/\s+/)[0] || "";
+}
+
 interface ReviewBlockCardProps {
   block: ReviewBlock;
   draftText: string;
@@ -44,6 +69,7 @@ interface ReviewBlockCardProps {
   primaryEngine: string | null;
   comparatorEngine: string | null;
   onSelectBlock: (blockId: string) => void;
+  onStepBlock: (blockId: string, delta: 1 | -1) => void;
   onLocateBlockOnScan?: (blockId: string) => void;
   onLookupWord?: (word: string) => void;
   onDraftChange: (blockId: string, value: string) => void;
@@ -79,6 +105,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   primaryEngine,
   comparatorEngine,
   onSelectBlock,
+  onStepBlock,
   onLocateBlockOnScan,
   onLookupWord,
   onDraftChange,
@@ -94,7 +121,160 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
   const isFlagged =
     block.low_confidence_flag || block.disagreement_flag || block.short_or_empty_flag;
   const isIgnored = block.latest_action === "ignored" || role === "ignore";
+  const hasAutoChanges = Boolean(autoCorrectChanges && autoCorrectChanges.length > 0);
+  // Two-density pattern: only expand full inspector when selected, edited/dirty, or previewing auto-correct.
+  const isExpanded = isSelected || isDirty || hasAutoChanges;
 
+  const rawDiffParts = useMemo(() => {
+    if (!isExpanded || draftText === block.raw_text) return null;
+    return diffTeluguGraphemes(block.raw_text, draftText);
+  }, [isExpanded, block.raw_text, draftText]);
+
+  const comparatorTokens = useMemo(() => {
+    if (!isExpanded || !block.disagreement_flag || block.comparator_text === null) return null;
+    return diffComparatorWords(draftText, block.comparator_text);
+  }, [isExpanded, block.disagreement_flag, block.comparator_text, draftText]);
+
+  let statusSymbol = "○";
+  let statusTone = "neutral";
+  let statusTitle = "Pending review";
+  if (isIgnored) {
+    statusSymbol = "✕";
+    statusTone = "warn";
+    statusTitle = "Ignored in export";
+  } else if (isDirty) {
+    statusSymbol = "●";
+    statusTone = "info";
+    statusTitle = "Unsaved draft";
+  } else if (block.latest_action === "approved") {
+    statusSymbol = "✓";
+    statusTone = "ok";
+    statusTitle = "Approved";
+  } else if (block.disagreement_flag) {
+    statusSymbol = "⇄";
+    statusTone = "warn";
+    statusTitle = "Engine disagreement";
+  } else if (block.low_confidence_flag || block.short_or_empty_flag) {
+    statusSymbol = "⚠";
+    statusTone = "warn";
+    statusTitle = "Low confidence / short line";
+  } else if (block.is_edited) {
+    statusSymbol = "✓";
+    statusTone = "ok";
+    statusTitle = "Edited";
+  }
+
+  function handleTextareaKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const action = isDirty ? "corrected" : "approved";
+      void onCommitEdit(block, draftText, action, isDirty).then(() => {
+        onStepBlock(block.block_id, 1);
+      });
+      return;
+    }
+    if (e.altKey && e.key === "ArrowDown") {
+      e.preventDefault();
+      onStepBlock(block.block_id, 1);
+      return;
+    }
+    if (e.altKey && e.key === "ArrowUp") {
+      e.preventDefault();
+      onStepBlock(block.block_id, -1);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d" && onLookupWord) {
+      e.preventDefault();
+      const word = extractLookupWord(e.currentTarget, draftText);
+      if (word) onLookupWord(word);
+    }
+  }
+
+  // Compact resting row (~46px height, zero duplicated Raw OCR or 6-button clutter)
+  if (!isExpanded) {
+    return (
+      <article
+        data-block-id={block.block_id}
+        className={[
+          "block-row",
+          isFlagged ? "flagged" : "",
+          isIgnored ? "ignored" : "",
+          isFlashing ? "sync-flash" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        onClick={() => onSelectBlock(block.block_id)}
+      >
+        <div className="block-row-gutter">
+          <span className="block-row-num">{block.block_index + 1}</span>
+          <span className={`block-status-dot ${statusTone}`} title={statusTitle} aria-label={statusTitle}>
+            {statusSymbol}
+          </span>
+        </div>
+
+        <div className="block-row-main">
+          <label htmlFor={`block-input-${block.block_id}`} className="visually-hidden">
+            Edit Telugu text for line {block.block_index + 1}
+          </label>
+          <textarea
+            id={`block-input-${block.block_id}`}
+            lang="te"
+            rows={1}
+            className="block-textarea block-textarea-compact"
+            value={draftText}
+            onFocus={() => onSelectBlock(block.block_id)}
+            onChange={(e) => onDraftChange(block.block_id, e.target.value)}
+            onKeyDown={handleTextareaKeyDown}
+          />
+        </div>
+
+        <div className="block-row-trailing">
+          {role !== "paragraph" && role !== "ignore" && (
+            <span className="badge role-mini-badge">
+              {role === "heading_1" ? "H1" : role === "heading_2" ? "H2" : "Verse"}
+            </span>
+          )}
+          {block.suggestions.length > 0 && (
+            <span className="badge" title={`${block.suggestions.length} correction memory suggestion(s)`}>
+              💡 {block.suggestions.length}
+            </span>
+          )}
+          {block.latest_action !== "approved" && !isIgnored && (
+            <button
+              type="button"
+              className="btn-compact row-quick-btn"
+              aria-label={`Approve line ${block.block_index + 1}`}
+              title="Approve line"
+              disabled={isBusy}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onCommitEdit(block, draftText, "approved", false);
+              }}
+            >
+              ✓
+            </button>
+          )}
+          {onLocateBlockOnScan && (
+            <button
+              type="button"
+              className="btn-compact row-quick-btn"
+              aria-label={`Locate line ${block.block_index + 1} on scan`}
+              title="Locate line on scan"
+              onClick={(e) => {
+                e.stopPropagation();
+                onLocateBlockOnScan(block.block_id);
+              }}
+            >
+              ⌖
+            </button>
+          )}
+        </div>
+      </article>
+    );
+  }
+
+  // Expanded active line card
   return (
     <article
       data-block-id={block.block_id}
@@ -102,6 +282,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         "block-card",
         isFlagged ? "flagged" : "",
         isSelected ? "selected" : "",
+        isIgnored ? "ignored" : "",
         isFlashing ? "sync-flash" : "",
       ]
         .filter(Boolean)
@@ -123,12 +304,9 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
           <span className="badge warn">⇄ Engine Disagreement ({comparatorEngine})</span>
         )}
         {block.short_or_empty_flag && <span className="badge warn">! Short / Empty</span>}
-        {block.suggestions.length > 0 && (
-          <span className="badge">💡 {block.suggestions.length} Suggestion(s)</span>
-        )}
-        {autoCorrectChanges && autoCorrectChanges.length > 0 && (
+        {hasAutoChanges && (
           <span className="badge autocorr-badge">
-            ✨ {autoCorrectChanges.length} Auto-Fix(es)
+            ✨ {autoCorrectChanges?.length} Auto-Fix(es)
           </span>
         )}
         {block.is_edited && <span className="badge ok">✓ Edited</span>}
@@ -137,7 +315,9 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         )}
         {isIgnored && <span className="badge warn">✕ Ignored in Export</span>}
         {role !== "paragraph" && role !== "ignore" && (
-          <span className="badge">{role === "heading_1" ? "H1" : role === "heading_2" ? "H2" : "Verse"}</span>
+          <span className="badge">
+            {role === "heading_1" ? "H1" : role === "heading_2" ? "H2" : "Verse"}
+          </span>
         )}
         {onLocateBlockOnScan && (
           <button
@@ -156,31 +336,85 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         )}
       </div>
 
-      <div className="raw-ocr-box">
-        <span className="hint-text">Raw OCR (immutable): </span>
-        <span className="telugu-text" lang="te">
-          {block.raw_text}
-        </span>
-      </div>
+      {/* Show Raw OCR only when flagged or edited (with grapheme-cluster diff when modified) */}
+      {(isFlagged || draftText !== block.raw_text || block.is_edited) && (
+        <div className="raw-ocr-box">
+          <span className="hint-text">Raw OCR (immutable): </span>
+          {rawDiffParts ? (
+            <span className="telugu-text diff-inline" lang="te">
+              {rawDiffParts.map((part, idx) =>
+                part.kind === "equal" ? (
+                  <span key={idx}>{part.text}</span>
+                ) : part.kind === "del" ? (
+                  <del key={idx} className="diff-del">
+                    {part.text}
+                  </del>
+                ) : (
+                  <ins key={idx} className="diff-ins">
+                    {part.text}
+                  </ins>
+                ),
+              )}
+            </span>
+          ) : (
+            <span className="telugu-text" lang="te">
+              {block.raw_text}
+            </span>
+          )}
+        </div>
+      )}
 
       {block.disagreement_flag && block.comparator_text !== null && (
         <div className="comparator-box">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: "0.5rem",
-              alignItems: "center",
-            }}
-          >
+          <div className="comparator-row">
             <div>
               <span className="hint-text">{formatEngineLabel(comparatorEngine)} comparator: </span>
-              <span className="telugu-text" lang="te">
-                {block.comparator_text}
-              </span>
+              {comparatorTokens ? (
+                <span className="telugu-text" lang="te">
+                  {comparatorTokens.map((tok, idx) =>
+                    tok.changed ? (
+                      <span key={idx}>
+                        <button
+                          type="button"
+                          className="comparator-word-chip"
+                          title={`Click to insert "${tok.word}" into draft`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const textarea = document.getElementById(
+                              `block-input-${block.block_id}`,
+                            ) as HTMLTextAreaElement | null;
+                            if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+                              const next =
+                                draftText.slice(0, textarea.selectionStart) +
+                                tok.word +
+                                draftText.slice(textarea.selectionEnd);
+                              onDraftChange(block.block_id, next);
+                            } else {
+                              onDraftChange(block.block_id, block.comparator_text ?? "");
+                            }
+                          }}
+                        >
+                          {tok.word}
+                        </button>
+                        {tok.trailingSpace}
+                      </span>
+                    ) : (
+                      <span key={idx}>
+                        {tok.word}
+                        {tok.trailingSpace}
+                      </span>
+                    ),
+                  )}
+                </span>
+              ) : (
+                <span className="telugu-text" lang="te">
+                  {block.comparator_text}
+                </span>
+              )}
             </div>
             <button
               type="button"
+              className="btn-compact"
               onClick={() => onDraftChange(block.block_id, block.comparator_text ?? "")}
             >
               Use Comparator
@@ -190,39 +424,16 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
       )}
 
       {block.suggestions.length > 0 && (
-        <div
-          style={{
-            padding: "0.5rem",
-            border: "1px solid var(--border)",
-            borderRadius: "0.45rem",
-            background: "#faf7ef",
-            display: "flex",
-            flexDirection: "column",
-            gap: "0.45rem",
-          }}
-        >
-          <strong style={{ fontSize: "0.82rem" }}>Correction Memory Suggestions</strong>
+        <div className="suggestions-box">
+          <strong className="suggestions-title">Correction Memory Suggestions</strong>
           {block.suggestions.map((sug) => (
-            <div
-              key={sug.correction_id}
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: "0.5rem",
-                padding: "0.35rem 0.45rem",
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
-                borderRadius: "0.35rem",
-              }}
-            >
+            <div key={sug.correction_id} className="suggestion-item">
               <div>
                 <div className="telugu-text" lang="te">
                   <span>{sug.incorrect_text}</span> → <strong>{sug.corrected_text}</strong>
                 </div>
                 <div className="badge-row">
-                  <span className="badge">{sug.scope}</span>
+                  <span className="badge">{formatCorrectionScope(sug.scope)}</span>
                   <span className="badge">Match: {sug.context_match}</span>
                   <span className="badge">
                     +{sug.approved_count} / −{sug.rejected_count}
@@ -234,7 +445,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
               <div className="badge-row">
                 <button
                   type="button"
-                  className="primary"
+                  className="primary btn-compact"
                   disabled={isBusy}
                   onClick={() => void onAcceptSuggestion(block, sug)}
                 >
@@ -242,6 +453,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
                 </button>
                 <button
                   type="button"
+                  className="btn-compact"
                   disabled={isBusy}
                   onClick={() => void onRejectSuggestion(sug.correction_id)}
                 >
@@ -253,7 +465,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         </div>
       )}
 
-      {autoCorrectChanges && autoCorrectChanges.length > 0 && (
+      {hasAutoChanges && autoCorrectChanges && (
         <div className="autocorrect-preview-box" aria-label="Proposed auto-corrections">
           <strong style={{ fontSize: "0.8rem" }}>Auto-Correct Draft Preview (review before saving)</strong>
           <div className="badge-row">
@@ -283,32 +495,15 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
         lang="te"
         className="block-textarea"
         value={draftText}
-        title="Tip: Press Ctrl+Enter (or Cmd+Enter) to save correction or approve block"
+        title="Ctrl/⌘+Enter to save & advance · Alt+↑/↓ to step lines · Ctrl/⌘+D to look up word"
         onFocus={() => onSelectBlock(block.block_id)}
         onChange={(e) => onDraftChange(block.block_id, e.target.value)}
-        onKeyDown={(e) => {
-          if (e.nativeEvent.isComposing) return;
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-            e.preventDefault();
-            if (isDirty) {
-              void onCommitEdit(block, draftText, "corrected");
-            } else {
-              void onCommitEdit(block, draftText, "approved", false);
-            }
-          }
-        }}
+        onKeyDown={handleTextareaKeyDown}
       />
 
       {isDirty && (
-        <div className="badge-row" style={{ paddingBlock: "0.2rem" }}>
-          <label
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "0.35rem",
-              fontSize: "0.85rem",
-            }}
-          >
+        <div className="badge-row memory-inline-row">
+          <label className="inline-check-label">
             <input
               type="checkbox"
               checked={remember}
@@ -320,6 +515,7 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
             <>
               <select
                 aria-label="Correction memory scope"
+                className="toolbar-select"
                 value={scope}
                 onChange={(e) =>
                   onScopeChange(
@@ -328,38 +524,40 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
                   )
                 }
               >
-                <option value="book_only">Book only</option>
+                <option value="book_only">This book only</option>
                 <option value="global_suggestion">Global suggestion</option>
               </select>
               <select
                 aria-label="Correction error type"
+                className="toolbar-select"
                 value={correctionType}
                 onChange={(e) => onTypeChange(block.block_id, e.target.value)}
               >
                 <option value="">Category (optional)</option>
-                <option value="glyph_confusion">glyph_confusion</option>
-                <option value="vowel_sign">vowel_sign</option>
-                <option value="conjunct_or_virama">conjunct_or_virama</option>
-                <option value="word_boundary">word_boundary</option>
-                <option value="punctuation">punctuation</option>
-                <option value="numeral">numeral</option>
+                <option value="glyph_confusion">Glyph confusion</option>
+                <option value="vowel_sign">Vowel sign</option>
+                <option value="conjunct_or_virama">Conjunct / Virama</option>
+                <option value="word_boundary">Word boundary</option>
+                <option value="punctuation">Punctuation</option>
+                <option value="numeral">Numeral</option>
               </select>
             </>
           )}
         </div>
       )}
 
-      <div className="badge-row">
+      <div className="block-action-row">
         <button
           type="button"
-          className="primary"
+          className="primary btn-compact"
           disabled={isBusy || !isDirty}
           onClick={() => void onCommitEdit(block, draftText, "corrected")}
         >
-          {isBusy ? "Saving..." : "Save Correction"}
+          {isBusy ? "Saving…" : "Save Correction"}
         </button>
         <button
           type="button"
+          className="btn-compact"
           disabled={isBusy}
           onClick={() => void onCommitEdit(block, draftText, "approved", false)}
         >
@@ -378,39 +576,17 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
           <option value="verse">Verse / Stanza</option>
           <option value="ignore">Ignore / Noise</option>
         </select>
-        {!isIgnored && (
-          <button
-            type="button"
-            disabled={isBusy}
-            title="Mark this bounding box as margin noise or artifact so it is excluded from DOCX/TXT exports"
-            onClick={() => {
-              onRoleChange(block.block_id, "ignore");
-              void onCommitEdit(block, draftText, "ignored", false, "ignore");
-            }}
-          >
-            Ignore Box
-          </button>
-        )}
         {onLookupWord && (
           <button
             type="button"
             className="btn-compact"
-            title="Look up selected Telugu word (or first Telugu word in this line) in the Telugu Dictionary"
+            title="Look up selected Telugu word (or word at cursor) in the Telugu Dictionary (⌘D)"
             onClick={(e) => {
               e.stopPropagation();
               const textarea = document.getElementById(
                 `block-input-${block.block_id}`,
               ) as HTMLTextAreaElement | null;
-              let targetWord = "";
-              if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
-                targetWord = textarea.value
-                  .slice(textarea.selectionStart, textarea.selectionEnd)
-                  .trim();
-              }
-              if (!targetWord) {
-                const match = draftText.match(/[\u0C01-\u0C63\u0C78-\u0C7F]{2,}/);
-                targetWord = match ? match[0] : draftText.trim().split(/\s+/)[0] || "";
-              }
+              const targetWord = extractLookupWord(textarea, draftText);
               if (targetWord) {
                 onLookupWord(targetWord);
               }
@@ -419,40 +595,56 @@ const ReviewBlockCard = memo(function ReviewBlockCard({
             📚 Dictionary
           </button>
         )}
-        {block.current_text !== block.raw_text && (
-          <button
-            type="button"
-            disabled={isBusy}
-            onClick={() => {
-              onDraftChange(block.block_id, block.raw_text);
-              void onCommitEdit(block, block.raw_text, "reverted");
-            }}
-          >
-            Revert to Raw OCR
-          </button>
-        )}
-      </div>
 
-      {block.edit_history.length > 0 && (
-        <details className="edit-history-details">
-          <summary className="hint-text">
-            Revision history ({block.edit_history.length})
-          </summary>
-          <ul className="edit-history-list">
-            {block.edit_history.map((evt) => (
-              <li key={evt.edit_id}>
-                <span className="badge">{evt.action}</span>{" "}
-                <span className="telugu-text" lang="te">
-                  {evt.edited_text}
-                </span>
-                {evt.review_note && (
-                  <span className="hint-text"> — {evt.review_note}</span>
-                )}
-              </li>
-            ))}
-          </ul>
+        <details className="card-more-details">
+          <summary className="btn-compact card-more-trigger">⋯ More</summary>
+          <div className="card-more-panel">
+            {!isIgnored && (
+              <button
+                type="button"
+                className="btn-compact"
+                disabled={isBusy}
+                title="Mark this bounding box as margin noise so it is excluded from DOCX/TXT exports"
+                onClick={() => {
+                  onRoleChange(block.block_id, "ignore");
+                  void onCommitEdit(block, draftText, "ignored", false, "ignore");
+                }}
+              >
+                ✕ Ignore Box
+              </button>
+            )}
+            {block.current_text !== block.raw_text && (
+              <button
+                type="button"
+                className="btn-compact"
+                disabled={isBusy}
+                onClick={() => {
+                  onDraftChange(block.block_id, block.raw_text);
+                  void onCommitEdit(block, block.raw_text, "reverted");
+                }}
+              >
+                ↩ Revert to Raw OCR
+              </button>
+            )}
+            {block.edit_history.length > 0 && (
+              <div className="edit-history-details">
+                <strong className="hint-text">Revision history ({block.edit_history.length})</strong>
+                <ul className="edit-history-list">
+                  {block.edit_history.map((evt) => (
+                    <li key={evt.edit_id}>
+                      <span className="badge">{evt.action}</span>{" "}
+                      <span className="telugu-text" lang="te">
+                        {evt.edited_text}
+                      </span>
+                      {evt.review_note && <span className="hint-text"> — {evt.review_note}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </details>
-      )}
+      </div>
     </article>
   );
 });
@@ -475,6 +667,8 @@ interface ReviewEditorPanelProps {
   onToggleKeyboard?: () => void;
   onSelectPrimaryRun: (runId: string) => void;
   onQuickStartOcr?: () => Promise<void>;
+  onOpenFullScanMobile?: () => void;
+  onDirtyCountChange?: (count: number) => void;
   onSaveEdit: (
     blockId: string,
     editedText: string,
@@ -488,7 +682,10 @@ interface ReviewEditorPanelProps {
   onAutocorrectPage?: (
     currentTexts: Record<string, string>,
   ) => Promise<PageAutocorrectResponse | null>;
-  onBatchSaveAndApprovePage?: (edits: BatchBlockEditPayload[]) => Promise<void>;
+  onBatchSaveAndApprovePage?: (
+    edits: BatchBlockEditPayload[],
+    options?: { markPageApproved?: boolean; approveRemainingBlocks?: boolean; targetStatus?: "approved" | "needs_attention" },
+  ) => Promise<void>;
   onAcceptSuggestion: (
     block: ReviewBlock,
     suggestion: CorrectionSuggestionItem,
@@ -517,6 +714,8 @@ export function ReviewEditorPanel({
   onToggleKeyboard,
   onSelectPrimaryRun,
   onQuickStartOcr,
+  onOpenFullScanMobile,
+  onDirtyCountChange,
   onSaveEdit,
   onAddManualBlock,
   onSaveDigitalText,
@@ -570,7 +769,6 @@ export function ReviewEditorPanel({
       for (const blk of review.blocks) {
         const existingDraft = prevDrafts[blk.block_id];
         const prevServerText = prevServerTexts[blk.block_id];
-        // Preserve unsaved user typing if background polling refreshed the same page
         if (
           isSamePageContext &&
           existingDraft !== undefined &&
@@ -626,48 +824,74 @@ export function ReviewEditorPanel({
     setRememberByBlock({});
   }, [review.book_id, review.page_number, review.primary_run_id]);
 
-  async function commitEdit(
-    block: ReviewBlock,
-    nextText: string,
-    action: "corrected" | "approved" | "reverted" | "ignored",
-    pushHistory = true,
-    overrideRole?: BlockRole,
-  ) {
-    const prevText = block.current_text;
-    const addMem = action === "corrected" && (rememberByBlock[block.block_id] ?? true);
-    const scope = scopeByBlock[block.block_id] ?? "book_only";
-    const cType = typeByBlock[block.block_id] || undefined;
-    const effectiveRole = overrideRole ?? roleByBlock[block.block_id] ?? block.block_role;
-    const opts: SaveEditOptions = {
-      addToMemory: addMem,
-      memoryScope: scope,
-      correctionType: cType,
-    };
-    if (
-      (effectiveRole && effectiveRole !== "paragraph") ||
-      (block.block_role && block.block_role !== "paragraph" && effectiveRole === "paragraph")
-    ) {
-      opts.blockRole = effectiveRole;
-    }
-
-    await onSaveEdit(block.block_id, nextText, action, undefined, opts);
-    setAutoCorrectByBlock((prev) => {
-      if (!(block.block_id in prev)) return prev;
-      const next = { ...prev };
-      delete next[block.block_id];
-      return next;
-    });
-    if (pushHistory && prevText !== nextText) {
-      setUndoStack((prev) => [...prev, { blockId: block.block_id, previousText: prevText, nextText }]);
-      setRedoStack([]);
-    }
-  }
-
   const dirtyBlocks = review.blocks.filter((b) => {
     const draftVal = drafts[b.block_id] ?? b.current_text;
     const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
     return draftVal !== b.current_text || roleVal !== (b.block_role ?? "paragraph");
   });
+
+  useEffect(() => {
+    onDirtyCountChange?.(dirtyBlocks.length);
+  }, [dirtyBlocks.length, onDirtyCountChange]);
+
+  const commitEdit = useCallback(
+    async (
+      block: ReviewBlock,
+      nextText: string,
+      action: "corrected" | "approved" | "reverted" | "ignored",
+      pushHistory = true,
+      overrideRole?: BlockRole,
+    ) => {
+      const prevText = block.current_text;
+      const addMem = action === "corrected" && (rememberByBlock[block.block_id] ?? true);
+      const scope = scopeByBlock[block.block_id] ?? "book_only";
+      const cType = typeByBlock[block.block_id] || undefined;
+      const effectiveRole = overrideRole ?? roleByBlock[block.block_id] ?? block.block_role;
+      const opts: SaveEditOptions = {
+        addToMemory: addMem,
+        memoryScope: scope,
+        correctionType: cType,
+      };
+      if (
+        (effectiveRole && effectiveRole !== "paragraph") ||
+        (block.block_role && block.block_role !== "paragraph" && effectiveRole === "paragraph")
+      ) {
+        opts.blockRole = effectiveRole;
+      }
+
+      await onSaveEdit(block.block_id, nextText, action, undefined, opts);
+      setAutoCorrectByBlock((prev) => {
+        if (!(block.block_id in prev)) return prev;
+        const next = { ...prev };
+        delete next[block.block_id];
+        return next;
+      });
+      if (pushHistory && prevText !== nextText) {
+        setUndoStack((prev) => [...prev, { blockId: block.block_id, previousText: prevText, nextText }]);
+        setRedoStack([]);
+      }
+    },
+    [onSaveEdit, rememberByBlock, roleByBlock, scopeByBlock, typeByBlock],
+  );
+
+  function buildDirtyEditPayloads(): BatchBlockEditPayload[] {
+    return dirtyBlocks.map((b) => {
+      const draftVal = drafts[b.block_id] ?? b.current_text;
+      const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
+      const isTextChanged = draftVal !== b.current_text;
+      const hasAutoChanges = Boolean(autoCorrectByBlock[b.block_id]?.length);
+      return {
+        block_id: b.block_id,
+        edited_text: draftVal,
+        action: roleVal === "ignore" ? "ignored" : isTextChanged ? "corrected" : "approved",
+        block_role: roleVal,
+        add_to_correction_memory: isTextChanged ? (rememberByBlock[b.block_id] ?? true) : false,
+        memory_scope: scopeByBlock[b.block_id] ?? "book_only",
+        correction_type: typeByBlock[b.block_id] || undefined,
+        review_note: hasAutoChanges ? "Auto-correct reviewed & batch-approved" : undefined,
+      };
+    });
+  }
 
   async function handleRunAutocorrect() {
     if (!onAutocorrectPage || review.blocks.length === 0) return;
@@ -714,22 +938,7 @@ export function ReviewEditorPanel({
     }
     setBusyBatchApprove(true);
     try {
-      const edits: BatchBlockEditPayload[] = dirtyBlocks.map((b) => {
-        const draftVal = drafts[b.block_id] ?? b.current_text;
-        const roleVal = roleByBlock[b.block_id] ?? b.block_role ?? "paragraph";
-        const isTextChanged = draftVal !== b.current_text;
-        const hasAutoChanges = Boolean(autoCorrectByBlock[b.block_id]?.length);
-        return {
-          block_id: b.block_id,
-          edited_text: draftVal,
-          action: roleVal === "ignore" ? "ignored" : isTextChanged ? "corrected" : "approved",
-          block_role: roleVal,
-          add_to_correction_memory: isTextChanged ? (rememberByBlock[b.block_id] ?? true) : false,
-          memory_scope: scopeByBlock[b.block_id] ?? "book_only",
-          correction_type: typeByBlock[b.block_id] || undefined,
-          review_note: hasAutoChanges ? "Auto-correct reviewed & batch-approved" : undefined,
-        };
-      });
+      const edits = buildDirtyEditPayloads();
       await onBatchSaveAndApprovePage(edits);
       setAutoCorrectByBlock({});
       setAutoCorrectSnapshot(null);
@@ -738,6 +947,25 @@ export function ReviewEditorPanel({
           ? `Saved ${edits.length} edited line(s) and approved page ${review.page_number}.`
           : `Approved page ${review.page_number}.`,
       );
+    } finally {
+      setBusyBatchApprove(false);
+    }
+  }
+
+  async function handleFlagNeedsAttention() {
+    setBusyBatchApprove(true);
+    try {
+      const edits = buildDirtyEditPayloads();
+      if (edits.length > 0 && onBatchSaveAndApprovePage) {
+        await onBatchSaveAndApprovePage(edits, {
+          approveRemainingBlocks: false,
+          markPageApproved: false,
+          targetStatus: "needs_attention",
+        });
+      }
+      await onChangePageStatus("needs_attention");
+      setAutoCorrectByBlock({});
+      setAutoCorrectSnapshot(null);
     } finally {
       setBusyBatchApprove(false);
     }
@@ -796,6 +1024,24 @@ export function ReviewEditorPanel({
     return true;
   });
 
+  const handleStepBlock = useCallback(
+    (currentBlockId: string, delta: 1 | -1) => {
+      const idx = visibleBlocks.findIndex((b) => b.block_id === currentBlockId);
+      if (idx === -1) return;
+      const nextIdx = idx + delta;
+      if (nextIdx < 0 || nextIdx >= visibleBlocks.length) return;
+      const nextBlk = visibleBlocks[nextIdx];
+      onSelectBlock(nextBlk.block_id);
+      window.requestAnimationFrame(() => {
+        const nextArea = document.getElementById(
+          `block-input-${nextBlk.block_id}`,
+        ) as HTMLTextAreaElement | null;
+        nextArea?.focus();
+      });
+    },
+    [visibleBlocks, onSelectBlock],
+  );
+
   function handleJumpNextFlagged() {
     if (flaggedBlocks.length === 0) return;
     const currentIdx = flaggedBlocks.findIndex((b) => b.block_id === selectedBlockId);
@@ -826,6 +1072,7 @@ export function ReviewEditorPanel({
     usableRuns.find(
       (r) => r.ocr_run_id !== review.primary_run_id && ((r.progress_current ?? 0) > 0 || r.status === "completed"),
     ) ?? null;
+  const selectedBlock = review.blocks.find((b) => b.block_id === selectedBlockId) ?? null;
 
   useEffect(() => {
     if (!syncTarget) return;
@@ -865,13 +1112,20 @@ export function ReviewEditorPanel({
     return () => window.clearTimeout(timer);
   }, [flashingBlockId]);
 
+  const isDigitalPage = review.page_kind === "digital_text";
+
   return (
     <section
-      className="pane"
+      className="pane editor-pane"
       aria-label="Telugu review editor"
       onKeyDown={(e) => {
         if (e.nativeEvent.isComposing) return;
         const mod = e.metaKey || e.ctrlKey;
+        if (mod && e.shiftKey && e.key === "Enter") {
+          e.preventDefault();
+          void handleApproveEntirePage();
+          return;
+        }
         if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) {
           if (undoStack.length > 0) {
             e.preventDefault();
@@ -885,59 +1139,114 @@ export function ReviewEditorPanel({
         }
       }}
     >
-      <div className="pane-toolbar" role="toolbar" aria-label="Proofreading editor tools">
-        <strong>Proofreading Editor</strong>
-
-        {usableRuns.length > 0 && (
-          <label className="hint-text" style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-            <span>Engine</span>
-            <select
-              aria-label="Primary OCR engine run"
-              className="toolbar-select"
-              value={review.primary_run_id ?? ""}
-              onChange={(e) => onSelectPrimaryRun(e.target.value)}
-            >
-              {usableRuns.map((run) => (
-                <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
-                  {formatEngineLabel(run.engine)}
-                  {run.status === "partial"
-                    ? ` (partial ${run.progress_current ?? 0}/${run.progress_total ?? "?"})`
-                    : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+      {/* Primary compact editor toolbar */}
+      <div className="pane-toolbar editor-toolbar-primary" role="toolbar" aria-label="Proofreading editor tools">
+        {usableRuns.length > 0 && !isDigitalPage && (
+          <select
+            aria-label="Primary OCR engine run"
+            className="toolbar-select"
+            value={review.primary_run_id ?? ""}
+            onChange={(e) => onSelectPrimaryRun(e.target.value)}
+          >
+            {usableRuns.map((run) => (
+              <option key={run.ocr_run_id} value={run.ocr_run_id} title={run.model_id ?? undefined}>
+                {formatEngineLabel(run.engine)}
+                {run.status === "partial"
+                  ? ` (${run.progress_current ?? 0}/${run.progress_total ?? "?"})`
+                  : ""}
+              </option>
+            ))}
+          </select>
         )}
 
-        <button
-          type="button"
-          className="btn-compact"
-          aria-pressed={filterFlagged}
-          onClick={() => setFilterFlagged((v) => !v)}
-        >
-          Flagged Only ({flaggedCount})
-        </button>
+        {!isDigitalPage && (
+          <>
+            <button
+              type="button"
+              className="btn-compact"
+              aria-pressed={filterFlagged}
+              onClick={() => setFilterFlagged((v) => !v)}
+            >
+              Flagged Only ({flaggedCount})
+            </button>
 
-        {flaggedCount > 0 && (
+            {flaggedCount > 0 && (
+              <button
+                type="button"
+                className="btn-compact"
+                title="Jump to the next line with low confidence, disagreement, or suggestion"
+                onClick={handleJumpNextFlagged}
+              >
+                Next Issue ▾
+              </button>
+            )}
+          </>
+        )}
+
+        <div className="toolbar-group toolbar-end">
+          {onAutocorrectPage && !isDigitalPage && review.blocks.length > 0 && (
+            <button
+              type="button"
+              className="btn-compact autocorr-btn"
+              disabled={busyAutocorrect || busyBatchApprove}
+              title="Propose Telugu OCR fixes using Correction Memory, Dictionary, and sentence context"
+              onClick={() => void handleRunAutocorrect()}
+            >
+              {busyAutocorrect ? "Checking…" : "✨ Auto-Correct Page"}
+            </button>
+          )}
+          {autoCorrectSnapshot && (
+            <button
+              type="button"
+              className="btn-compact"
+              disabled={busyBatchApprove}
+              title="Discard uncommitted auto-corrections and restore previous drafts"
+              onClick={handleRevertAutocorrect}
+            >
+              ↩ Revert Auto-Correct
+            </button>
+          )}
+          <span
+            className={`badge ${
+              review.review_status === "approved"
+                ? "ok"
+                : review.review_status === "needs_attention"
+                  ? "warn"
+                  : ""
+            }`.trim()}
+            title="Current page review status"
+          >
+            {formatReviewStatus(review.review_status)}
+          </span>
           <button
             type="button"
-            className="btn-compact"
-            title="Jump to the next line with low confidence, engine disagreement, or suggestion"
-            onClick={handleJumpNextFlagged}
+            className="primary btn-compact"
+            disabled={busyBatchApprove || busyAutocorrect}
+            title="Save all edited lines and mark this page Approved (Ctrl/⌘+Shift+Enter)"
+            onClick={() => void handleApproveEntirePage()}
           >
-            Next Issue ▾
+            {busyBatchApprove
+              ? "Saving…"
+              : onBatchSaveAndApprovePage && dirtyBlocks.length > 0
+                ? `Save All (${dirtyBlocks.length}) & Approve Page`
+                : "Approve Page"}
           </button>
-        )}
+        </div>
+      </div>
 
-        <input
-          type="search"
-          lang="te"
-          className="editor-search-input"
-          aria-label="Filter lines on this page"
-          placeholder="Filter lines…"
-          value={lineSearch}
-          onChange={(e) => setLineSearch(e.target.value)}
-        />
+      {/* Slim secondary utility bar */}
+      <div className="pane-subtoolbar" role="toolbar" aria-label="Editor utilities">
+        {!isDigitalPage && (
+          <input
+            type="search"
+            lang="te"
+            className="editor-search-input"
+            aria-label="Filter lines on this page"
+            placeholder="Filter lines…"
+            value={lineSearch}
+            onChange={(e) => setLineSearch(e.target.value)}
+          />
+        )}
 
         <div className="toolbar-group" role="group" aria-label="Telugu text size">
           <button
@@ -970,14 +1279,14 @@ export function ReviewEditorPanel({
               aria-label="Sync to selected block on scan"
               onClick={onSyncToScan}
             >
-              ⌖ Sync → Scan
+              ⌖ Sync
             </button>
             {onToggleAutoSync && (
               <button
                 type="button"
                 className="btn-compact"
                 aria-pressed={autoSync}
-                title="Automatically scroll opposite pane when selecting a block"
+                title="Automatically scroll scan when selecting a line"
                 onClick={onToggleAutoSync}
               >
                 Auto-Sync
@@ -986,51 +1295,27 @@ export function ReviewEditorPanel({
           </div>
         )}
 
-        {onToggleKeyboard && (
+        <div className="toolbar-group" role="group" aria-label="Edit history">
           <button
             type="button"
             className="btn-compact"
-            aria-pressed={keyboardOpen}
-            title="Open on-screen Telugu InScript & Phonetic keyboard"
-            onClick={onToggleKeyboard}
+            disabled={undoStack.length === 0}
+            onClick={() => void handleUndo()}
           >
-            ⌨ Keyboard
-          </button>
-        )}
-
-        <div className="toolbar-group" role="group" aria-label="Edit history">
-          <button type="button" className="btn-compact" disabled={undoStack.length === 0} onClick={() => void handleUndo()}>
             Undo
           </button>
-          <button type="button" className="btn-compact" disabled={redoStack.length === 0} onClick={() => void handleRedo()}>
+          <button
+            type="button"
+            className="btn-compact"
+            disabled={redoStack.length === 0}
+            onClick={() => void handleRedo()}
+          >
             Redo
           </button>
         </div>
 
-        <div style={{ marginInlineStart: "auto", display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
-          {onAutocorrectPage && review.page_kind !== "digital_text" && review.blocks.length > 0 && (
-            <button
-              type="button"
-              className="btn-compact autocorr-btn"
-              disabled={busyAutocorrect || busyBatchApprove}
-              title="Propose Telugu OCR fixes using Correction Memory, Telugu Dictionary, and sentence context (review before saving)"
-              onClick={() => void handleRunAutocorrect()}
-            >
-              {busyAutocorrect ? "Auto-Correcting…" : "✨ Auto-Correct Page"}
-            </button>
-          )}
-          {autoCorrectSnapshot && (
-            <button
-              type="button"
-              className="btn-compact"
-              disabled={busyBatchApprove}
-              title="Discard uncommitted auto-corrections and restore previous drafts"
-              onClick={handleRevertAutocorrect}
-            >
-              ↩ Revert Auto-Correct
-            </button>
-          )}
-          {onAddManualBlock && review.page_kind !== "digital_text" && (
+        <div className="toolbar-group toolbar-end">
+          {onAddManualBlock && !isDigitalPage && (
             <button
               type="button"
               className="btn-compact"
@@ -1040,7 +1325,7 @@ export function ReviewEditorPanel({
               ＋ Add Line
             </button>
           )}
-          {onBatchApproveUnflagged && review.blocks.length > 0 && (
+          {onBatchApproveUnflagged && !isDigitalPage && review.blocks.length > 0 && (
             <button
               type="button"
               className="btn-compact"
@@ -1050,21 +1335,6 @@ export function ReviewEditorPanel({
               Approve Unflagged
             </button>
           )}
-          <select
-            aria-label="Page review status"
-            className="toolbar-select"
-            value={review.review_status}
-            onChange={(e) =>
-              void onChangePageStatus(
-                e.target.value as "not_started" | "in_review" | "approved" | "needs_attention",
-              )
-            }
-          >
-            <option value="not_started">Pending Review</option>
-            <option value="in_review">In Review</option>
-            <option value="needs_attention">Needs Attention</option>
-            <option value="approved">Approved</option>
-          </select>
           {onToggleAutoAdvance && (
             <button
               type="button"
@@ -1076,25 +1346,40 @@ export function ReviewEditorPanel({
               Auto-Next
             </button>
           )}
-          <button
-            type="button"
-            className="primary btn-compact"
-            disabled={busyBatchApprove || busyAutocorrect}
-            title={
-              dirtyBlocks.length > 0
-                ? `Save all ${dirtyBlocks.length} edited line(s), update correction memory, and approve the entire page`
-                : "Approve all remaining lines and mark this page Approved"
-            }
-            onClick={() => void handleApproveEntirePage()}
-          >
-            {busyBatchApprove
-              ? "Saving & Approving…"
-              : onBatchSaveAndApprovePage && dirtyBlocks.length > 0
-                ? `Save All (${dirtyBlocks.length}) & Approve Page`
-                : "Approve Page"}
-          </button>
+          {review.review_status !== "needs_attention" && (
+            <button
+              type="button"
+              className="btn-compact"
+              disabled={busyBatchApprove}
+              title="Save any edits and mark this page as Needs Attention"
+              onClick={() => void handleFlagNeedsAttention()}
+            >
+              ⚑ Flag Page
+            </button>
+          )}
+          {onToggleKeyboard && (
+            <button
+              type="button"
+              className="btn-compact"
+              aria-pressed={keyboardOpen}
+              title="Open on-screen Telugu InScript & Phonetic keyboard"
+              onClick={onToggleKeyboard}
+            >
+              ⌨
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Tablet/Mobile sticky synchronized line-crop preview (hidden on wide desktop via CSS) */}
+      {!isDigitalPage && selectedBlock && (
+        <PinnedLineCrop
+          bookId={review.book_id}
+          pageNumber={review.page_number}
+          block={selectedBlock}
+          onOpenFullScan={onOpenFullScanMobile}
+        />
+      )}
 
       <p className="visually-hidden" role="status" aria-live="polite">
         {syncNotice}
@@ -1102,11 +1387,11 @@ export function ReviewEditorPanel({
 
       <div
         ref={paneBodyRef}
-        className="pane-body"
+        className="pane-body editor-pane-body"
         style={{ "--telugu-scale": String(teluguFontScale) } as React.CSSProperties}
       >
         {showAddManualLine && onAddManualBlock && (
-          <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
+          <div className="panel-card manual-line-box">
             <div className="badge-row" style={{ marginBottom: "0.45rem", justifyContent: "space-between" }}>
               <strong>Insert Missed Telugu Line</strong>
               <select
@@ -1132,7 +1417,7 @@ export function ReviewEditorPanel({
             <div className="badge-row" style={{ marginTop: "0.45rem" }}>
               <button
                 type="button"
-                className="primary"
+                className="primary btn-compact"
                 disabled={!manualLineText.trim()}
                 onClick={async () => {
                   await onAddManualBlock(manualLineText.trim(), manualLineRole);
@@ -1142,18 +1427,15 @@ export function ReviewEditorPanel({
               >
                 Insert Line
               </button>
-              <button
-                type="button"
-                onClick={() => setShowAddManualLine(false)}
-              >
+              <button type="button" className="btn-compact" onClick={() => setShowAddManualLine(false)}>
                 Cancel
               </button>
             </div>
           </div>
         )}
 
-        {review.page_kind === "digital_text" && (
-          <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
+        {isDigitalPage && (
+          <div className="panel-card digital-editor-card">
             <div className="badge-row" style={{ marginBottom: "0.5rem", justifyContent: "space-between" }}>
               <span className="badge ok">Born-Digital Text Path (Not OCR)</span>
               {onSaveDigitalText && (
@@ -1171,8 +1453,8 @@ export function ReviewEditorPanel({
               <textarea
                 lang="te"
                 aria-label="Born-digital page text"
-                className="block-textarea"
-                rows={8}
+                className="block-textarea digital-textarea-full"
+                rows={14}
                 value={digitalDraft}
                 onChange={(e) => setDigitalDraft(e.target.value)}
               />
@@ -1184,15 +1466,17 @@ export function ReviewEditorPanel({
           </div>
         )}
 
-        {review.page_kind !== "digital_text" && review.blocks.length === 0 && (
-          <div className="panel-card" style={{ marginBottom: "0.75rem" }}>
+        {!isDigitalPage && review.blocks.length === 0 && (
+          <div className="panel-card empty-page-card">
             <p style={{ marginTop: 0 }}>
               <strong>No OCR text extracted for this page yet.</strong>
             </p>
             <p className="hint-text">
               {review.available_runs.length === 0
-                ? "Run OCR from the sidebar (or click below) before inspecting or exporting DOCX/TXT."
-                : selectedRun && (selectedRun.status === "partial" || selectedRun.status === "failed") && (selectedRun.progress_current ?? 0) === 0
+                ? "Run OCR from the top bar (or click below) before proofreading or exporting."
+                : selectedRun &&
+                    (selectedRun.status === "partial" || selectedRun.status === "failed") &&
+                    (selectedRun.progress_current ?? 0) === 0
                   ? `${formatEngineLabel(selectedRun.engine)} stopped before processing this page (${selectedRun.error_summary || "0 pages completed"}).`
                   : "This page appears blank or had no detected text lines in the selected OCR run."}
             </p>
@@ -1213,41 +1497,44 @@ export function ReviewEditorPanel({
                   disabled={ocrRunning}
                   onClick={() => void onQuickStartOcr()}
                 >
-                  {ocrRunning ? "OCR Running..." : "Run Selected OCR Now"}
+                  {ocrRunning ? "OCR Running…" : "Run Selected OCR Now"}
                 </button>
               )}
             </div>
           </div>
         )}
 
-        {visibleBlocks.map((block) => (
-          <ReviewBlockCard
-            key={block.block_id}
-            block={block}
-            draftText={drafts[block.block_id] ?? block.current_text}
-            role={roleByBlock[block.block_id] ?? block.block_role ?? "paragraph"}
-            isSelected={block.block_id === selectedBlockId}
-            isFlashing={block.block_id === flashingBlockId}
-            isBusy={busyBlockId === block.block_id || busyBatchApprove}
-            remember={rememberByBlock[block.block_id] ?? true}
-            scope={scopeByBlock[block.block_id] ?? "book_only"}
-            correctionType={typeByBlock[block.block_id] ?? ""}
-            autoCorrectChanges={autoCorrectByBlock[block.block_id]}
-            primaryEngine={review.primary_engine}
-            comparatorEngine={review.comparator_engine}
-            onSelectBlock={onSelectBlock}
-            onLocateBlockOnScan={onLocateBlockOnScan}
-            onLookupWord={onLookupWord}
-            onDraftChange={handleDraftChange}
-            onRoleChange={handleRoleChange}
-            onRememberChange={handleRememberChange}
-            onScopeChange={handleScopeChange}
-            onTypeChange={handleTypeChange}
-            onCommitEdit={commitEdit}
-            onAcceptSuggestion={onAcceptSuggestion}
-            onRejectSuggestion={onRejectSuggestion}
-          />
-        ))}
+        <div className="blocks-stack">
+          {visibleBlocks.map((block) => (
+            <ReviewBlockCard
+              key={block.block_id}
+              block={block}
+              draftText={drafts[block.block_id] ?? block.current_text}
+              role={roleByBlock[block.block_id] ?? block.block_role ?? "paragraph"}
+              isSelected={block.block_id === selectedBlockId}
+              isFlashing={block.block_id === flashingBlockId}
+              isBusy={busyBlockId === block.block_id || busyBatchApprove}
+              remember={rememberByBlock[block.block_id] ?? true}
+              scope={scopeByBlock[block.block_id] ?? "book_only"}
+              correctionType={typeByBlock[block.block_id] ?? ""}
+              autoCorrectChanges={autoCorrectByBlock[block.block_id]}
+              primaryEngine={review.primary_engine}
+              comparatorEngine={review.comparator_engine}
+              onSelectBlock={onSelectBlock}
+              onStepBlock={handleStepBlock}
+              onLocateBlockOnScan={onLocateBlockOnScan}
+              onLookupWord={onLookupWord}
+              onDraftChange={handleDraftChange}
+              onRoleChange={handleRoleChange}
+              onRememberChange={handleRememberChange}
+              onScopeChange={handleScopeChange}
+              onTypeChange={handleTypeChange}
+              onCommitEdit={commitEdit}
+              onAcceptSuggestion={onAcceptSuggestion}
+              onRejectSuggestion={onRejectSuggestion}
+            />
+          ))}
+        </div>
       </div>
     </section>
   );

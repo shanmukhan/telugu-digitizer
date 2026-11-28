@@ -123,6 +123,8 @@ interface OcrProgressStripProps {
   runs: BookOCRRunSummary[];
   pages: PageSummary[];
   activeView: "review" | "memory" | "export";
+  /** When true, hide the static green Ready banner once OCR is complete to maximize workspace height. */
+  hideWhenReady?: boolean;
   onQuickStartSample: () => Promise<void>;
   onQuickStartFull: () => Promise<void>;
   onResumeRun: (runId: string) => Promise<void>;
@@ -136,6 +138,7 @@ export function OcrProgressStrip({
   runs,
   pages,
   activeView,
+  hideWhenReady = false,
   onQuickStartSample,
   onQuickStartFull,
   onResumeRun,
@@ -308,6 +311,9 @@ export function OcrProgressStrip({
   }
 
   // Ready state (at least one completed run or digital-only book)
+  if (hideWhenReady) {
+    return null;
+  }
   const readyEngines = Array.from(
     new Set(completedRuns.map((r) => formatEngineLabel(r.engine))),
   ).join(" + ");

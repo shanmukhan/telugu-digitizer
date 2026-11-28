@@ -56,6 +56,39 @@ export function formatLayoutMode(mode: string): string {
   }
 }
 
+export function formatCorrectionScope(scope: string): string {
+  switch (scope) {
+    case "book_only":
+      return "This Book";
+    case "global_suggestion":
+      return "Global";
+    default:
+      return scope.replace(/_/g, " ");
+  }
+}
+
+export function formatCorrectionType(cType: string | null | undefined): string {
+  if (!cType) return "";
+  switch (cType) {
+    case "glyph_confusion":
+      return "Glyph Confusion";
+    case "vowel_sign":
+      return "Vowel Sign (గుణింతం)";
+    case "conjunct_or_virama":
+      return "Conjunct / Virama";
+    case "word_boundary":
+      return "Word Boundary";
+    case "punctuation":
+      return "Punctuation";
+    case "numeral":
+      return "Numeral";
+    case "ocr_substitution":
+      return "OCR Substitution";
+    default:
+      return cType.replace(/_/g, " ");
+  }
+}
+
 export function formatDuration(totalSeconds: number): string {
   const secs = Math.max(0, Math.floor(totalSeconds));
   if (secs < 60) {

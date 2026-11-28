@@ -40,7 +40,7 @@ describe("DictionaryPanel exact token_index spell-fix replacement", () => {
     const onBanner = vi.fn();
     render(<DictionaryPanel onStatusBanner={onBanner} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Check Telugu Text/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Check Telugu Text/i }));
     const textarea = screen.getByLabelText(/Paste or type Telugu text/i) as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: "పన పనిచేయడం పన" } });
     fireEvent.click(screen.getByRole("button", { name: /Check Spelling/i }));

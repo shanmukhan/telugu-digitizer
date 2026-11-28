@@ -36,6 +36,8 @@ function formatSourceLabel(source: string): string {
 interface DictionaryPanelProps {
   initialQuery?: string | null;
   keyboardOpen?: boolean;
+  returnToBookLabel?: string | null;
+  onReturnToBook?: () => void;
   onToggleKeyboard?: () => void;
   onStatusBanner: (kind: "info" | "success" | "error", text: string) => void;
 }
@@ -43,6 +45,8 @@ interface DictionaryPanelProps {
 export function DictionaryPanel({
   initialQuery = null,
   keyboardOpen = false,
+  returnToBookLabel = null,
+  onReturnToBook,
   onToggleKeyboard,
   onStatusBanner,
 }: DictionaryPanelProps) {
@@ -283,6 +287,17 @@ export function DictionaryPanel({
     setSubTab("custom");
   }
 
+  async function handleCopyWord(word: string) {
+    try {
+      await navigator.clipboard.writeText(word);
+      setLiveStatus(`Copied "${word}" to clipboard.`);
+      onStatusBanner("success", `Copied "${word}" to clipboard.`);
+    } catch {
+      setLiveStatus("Clipboard copy unavailable.");
+      onStatusBanner("error", "Could not copy to clipboard.");
+    }
+  }
+
   function renderResultItem(item: DictionarySearchItem) {
     const isSelected = selectedWord?.word === item.word;
     const previewDef = item.definitions[0]?.definition ?? "";
@@ -314,16 +329,23 @@ export function DictionaryPanel({
   }
 
   return (
-    <section className="panel-card dict-panel" aria-label="Standalone Telugu Dictionary">
+    <section className="panel-card dict-panel centered-stage-card" aria-label="Standalone Telugu Dictionary">
       <div className="dict-header">
         <div>
-          <h2 className="card-title" style={{ margin: 0 }}>
-            <span className="card-icon" aria-hidden="true">
-              📚
-            </span>
-            Telugu Dictionary &amp; Spelling Workbench
-          </h2>
-          <p className="hint-text" style={{ margin: "0.25rem 0 0" }}>
+          <div className="badge-row" style={{ marginBottom: "0.25rem" }}>
+            <h2 className="card-title" style={{ margin: 0 }}>
+              <span className="card-icon" aria-hidden="true">
+                📚
+              </span>
+              Telugu Dictionary &amp; Spelling Workbench
+            </h2>
+            {returnToBookLabel && onReturnToBook && (
+              <button type="button" className="btn-compact" onClick={onReturnToBook}>
+                ← {returnToBookLabel}
+              </button>
+            )}
+          </div>
+          <p className="hint-text" style={{ margin: "0.2rem 0 0" }}>
             Search classical &amp; modern Telugu words (C.P. Brown, Telugu Wiktionary, Janapada, LibreOffice te_IN), look up English meanings, check spelling, or add custom vocabulary for OCR Auto-Correct.
           </p>
         </div>
@@ -340,27 +362,45 @@ export function DictionaryPanel({
         )}
       </div>
 
-      <div className="badge-row dict-subnav" role="group" aria-label="Dictionary modes">
+      <div
+        className="badge-row dict-subnav"
+        role="tablist"
+        aria-label="Dictionary modes"
+        onKeyDown={(e) => {
+          const order: Array<"search" | "spellcheck" | "custom"> = ["search", "spellcheck", "custom"];
+          const idx = order.indexOf(subTab);
+          if (e.key === "ArrowRight") {
+            e.preventDefault();
+            setSubTab(order[(idx + 1) % order.length]);
+          } else if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            setSubTab(order[(idx - 1 + order.length) % order.length]);
+          }
+        }}
+      >
         <button
           type="button"
+          role="tab"
           className={`btn-compact ${subTab === "search" ? "primary" : ""}`.trim()}
-          aria-pressed={subTab === "search"}
+          aria-selected={subTab === "search"}
           onClick={() => setSubTab("search")}
         >
           🔍 Search Dictionary
         </button>
         <button
           type="button"
+          role="tab"
           className={`btn-compact ${subTab === "spellcheck" ? "primary" : ""}`.trim()}
-          aria-pressed={subTab === "spellcheck"}
+          aria-selected={subTab === "spellcheck"}
           onClick={() => setSubTab("spellcheck")}
         >
           ✓ Check Telugu Text
         </button>
         <button
           type="button"
+          role="tab"
           className={`btn-compact ${subTab === "custom" ? "primary" : ""}`.trim()}
-          aria-pressed={subTab === "custom"}
+          aria-selected={subTab === "custom"}
           onClick={() => setSubTab("custom")}
         >
           ⭐ Custom Words ({stats?.custom_words_count ?? customWords.length})
@@ -517,6 +557,13 @@ export function DictionaryPanel({
                         <span className={selectedWord.is_valid_word ? "badge ok" : "badge warn"}>
                           {selectedWord.is_valid_word ? "✓ Valid Telugu Word" : "Unlisted"}
                         </span>
+                        <button
+                          type="button"
+                          className="btn-compact"
+                          onClick={() => void handleCopyWord(selectedWord.word)}
+                        >
+                          📋 Copy
+                        </button>
                         {!selectedWord.is_custom && (
                           <button
                             type="button"

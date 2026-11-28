@@ -123,7 +123,7 @@ describe("DictionaryPanel", () => {
     });
 
     // Switch to Check Telugu Text
-    fireEvent.click(screen.getByRole("button", { name: "✓ Check Telugu Text" }));
+    fireEvent.click(screen.getByRole("tab", { name: "✓ Check Telugu Text" }));
     const area = screen.getByLabelText(/Paste or type Telugu text/i) as HTMLTextAreaElement;
     fireEvent.change(area, { target: { value: "తెలుగు పస్తకం" } });
     fireEvent.click(screen.getByRole("button", { name: "✓ Check Spelling" }));
@@ -135,7 +135,7 @@ describe("DictionaryPanel", () => {
     expect(area.value).toBe("తెలుగు పుస్తకం");
 
     // Switch to Custom Words and add one
-    fireEvent.click(screen.getByRole("button", { name: /Custom Words/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Custom Words/ }));
     fireEvent.change(screen.getByLabelText("Telugu Word *"), { target: { value: "ఆముక్త" } });
     fireEvent.change(screen.getByLabelText("English Meaning (optional)"), {
       target: { value: "Worn and offered" },

@@ -24,20 +24,21 @@ import { BookUploadForm } from "./components/BookUploadForm";
 import { CorrectionMemoryPanel } from "./components/CorrectionMemoryPanel";
 import { DictionaryPanel } from "./components/DictionaryPanel";
 import { ExportPanel } from "./components/ExportPanel";
-import { QuickLookupDialog } from "./components/QuickLookupDialog";
+import { ImportBookDialog } from "./components/ImportBookDialog";
+import { OcrRunnerDrawer } from "./components/OcrRunnerDrawer";
 import {
-  HeaderOcrStatusPill,
   OcrProgressStrip,
   mergeBookRunsWithLiveStatuses,
 } from "./components/OcrStatusBar";
+import { PageRail } from "./components/PageRail";
+import { QuickLookupDialog } from "./components/QuickLookupDialog";
 import { ReviewEditorPanel, type SaveEditOptions } from "./components/ReviewEditorPanel";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { SourcePageViewer } from "./components/SourcePageViewer";
-import {
-  CommitmentBar,
-  OverviewPanel,
-  WelcomeHero,
-} from "./components/StudioChrome";
+import { WelcomeHero } from "./components/StudioChrome";
 import { TeluguKeyboard } from "./components/TeluguKeyboard";
+import { ToastRegion, type ToastItem } from "./components/ToastRegion";
+import { TopNavBar, type WorkspaceView } from "./components/TopNavBar";
 import type {
   BatchBlockEditPayload,
   BlockRole,
@@ -51,7 +52,7 @@ import type {
   PageSummary,
   ReviewBlock,
 } from "./types/api";
-import { formatEngineLabel, formatPageKind, formatReviewStatus } from "./utils/formatters";
+import { formatEngineLabel, formatReviewStatus } from "./utils/formatters";
 import {
   type EditableTextElement,
   backspaceAtCursor,
@@ -59,62 +60,74 @@ import {
   isEditableTextElement,
 } from "./utils/teluguInput";
 
+function parseInitialUrlParams(): {
+  view: WorkspaceView;
+  bookId: string | null;
+  page: number;
+  q: string | null;
+} {
+  if (typeof window === "undefined") {
+    return { view: "review", bookId: null, page: 1, q: null };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const rawView = params.get("view");
+  const view: WorkspaceView =
+    rawView === "dictionary" || rawView === "memory" || rawView === "export"
+      ? rawView
+      : "review";
+  const bookId = params.get("book") || null;
+  const rawPage = Number(params.get("page"));
+  const page = Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+  const q = params.get("q");
+  return { view, bookId, page, q };
+}
+
 export function App() {
+  const initialUrl = useMemo(() => parseInitialUrlParams(), []);
+
   const [books, setBooks] = useState<BookSummary[]>([]);
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [booksLoaded, setBooksLoaded] = useState(false);
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(initialUrl.bookId);
   const [pages, setPages] = useState<PageSummary[]>([]);
-  const [selectedPageNumber, setSelectedPageNumber] = useState<number>(1);
+  const [selectedPageNumber, setSelectedPageNumber] = useState<number>(initialUrl.page);
+  const [pageJumpInput, setPageJumpInput] = useState<string>(String(initialUrl.page));
   const [runs, setRuns] = useState<BookOCRRunSummary[]>([]);
   const [liveStatuses, setLiveStatuses] = useState<Record<string, OCRRunStatus>>({});
   const [selectedPrimaryRunId, setSelectedPrimaryRunId] = useState<string | null>(null);
   const [review, setReview] = useState<PageReviewPayload | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
-  const [autoSyncBlocks, setAutoSyncBlocks] = useState(false);
+  const [dirtyBlockCount, setDirtyBlockCount] = useState<number>(0);
+
+  // Proofreading UX preferences
+  const [autoSyncBlocks, setAutoSyncBlocks] = useState(true);
   const [autoAdvancePage, setAutoAdvancePage] = useState(true);
+  const [pageRailOpen, setPageRailOpen] = useState(false);
+  const [pageFilter, setPageFilter] = useState<"all" | "pending" | "approved" | "needs_attention">("all");
+  const [mobilePane, setMobilePane] = useState<"editor" | "scan">("editor");
+
+  // Modals, drawers & overlays
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [ocrDrawerOpen, setOcrDrawerOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [quickLookupWord, setQuickLookupWord] = useState<string | null>(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const lastEditableRef = useRef<EditableTextElement | null>(null);
+  const [keyboardTargetLabel, setKeyboardTargetLabel] = useState<string | null>(null);
+
+  // Workspace view & deep-linked dictionary query
+  const [activeView, setActiveView] = useState<WorkspaceView>(initialUrl.view);
+  const [dictionaryQuery, setDictionaryQuery] = useState<string | null>(initialUrl.q);
+  const [dictionaryReturnContext, setDictionaryReturnContext] = useState<boolean>(false);
+
+  // Sync scan <-> editor scroll requests
   const [syncRequest, setSyncRequest] = useState<{
     target: "scan" | "editor";
     blockId: string;
     seq: number;
   } | null>(null);
   const syncSeqCounterRef = useRef(0);
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const lastEditableRef = useRef<EditableTextElement | null>(null);
-  const [keyboardTargetLabel, setKeyboardTargetLabel] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"review" | "dictionary" | "memory" | "export">(() => {
-    if (typeof window !== "undefined") {
-      const viewParam = new URLSearchParams(window.location.search).get("view");
-      if (viewParam === "dictionary" || viewParam === "memory" || viewParam === "export") {
-        return viewParam;
-      }
-    }
-    return "review";
-  });
-  const [dictionaryQuery, setDictionaryQuery] = useState<string | null>(() => {
-    if (typeof window !== "undefined") {
-      return new URLSearchParams(window.location.search).get("q");
-    }
-    return null;
-  });
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    if (activeView === "review") {
-      url.searchParams.delete("view");
-    } else {
-      url.searchParams.set("view", activeView);
-    }
-    if (activeView !== "dictionary") {
-      url.searchParams.delete("q");
-    }
-    window.history.replaceState({}, "", url.toString());
-  }, [activeView]);
-
-  const [uploadExpanded, setUploadExpanded] = useState(true);
-  const initializedCollapseRef = useRef(false);
-  const [pageFilter, setPageFilter] = useState<"all" | "pending" | "approved">("all");
-
+  // OCR configuration (now hosted cleanly inside OcrRunnerDrawer)
   const [usePaddle, setUsePaddle] = useState(true);
   const [useTesseract, setUseTesseract] = useState(true);
   const [capabilities, setCapabilities] = useState<HostCapabilities | null>(null);
@@ -124,11 +137,13 @@ export function App() {
   const [ocrRenderDpi, setOcrRenderDpi] = useState<number>(300);
   const [ocrForceRerun, setOcrForceRerun] = useState<boolean>(false);
   const [ocrIncludeDigital, setOcrIncludeDigital] = useState<boolean>(false);
+
+  // Busy & notification states
   const [busyUpload, setBusyUpload] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
-  const [banner, setBanner] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(
-    null,
-  );
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastSeqRef = useRef(0);
 
   const prevProgressRef = useRef<Record<string, { progress: number; status: string }>>({});
   const selectedPageNumberRef = useRef(selectedPageNumber);
@@ -137,54 +152,211 @@ export function App() {
   selectedPrimaryRunIdRef.current = selectedPrimaryRunId;
   const reviewBlocksCountRef = useRef(0);
   reviewBlocksCountRef.current = review?.blocks.length ?? 0;
+  const dirtyBlockCountRef = useRef(dirtyBlockCount);
+  dirtyBlockCountRef.current = dirtyBlockCount;
 
-  const reviewBookId = review?.book_id;
-  const reviewPageCount = review?.page_count;
+  const selectedBook = useMemo(
+    () => books.find((b) => b.book_id === selectedBookId) ?? null,
+    [books, selectedBookId],
+  );
+
+  // Sync page jump input whenever page changes
   useEffect(() => {
-    if (reviewBookId && reviewPageCount) {
+    setPageJumpInput(String(selectedPageNumber));
+  }, [selectedPageNumber]);
+
+  // Keep URL query params in sync (?view=, ?book=, ?page=, ?q=)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (activeView === "review") {
+      url.searchParams.delete("view");
+    } else {
+      url.searchParams.set("view", activeView);
+    }
+    if (selectedBookId) {
+      url.searchParams.set("book", selectedBookId);
+    } else {
+      url.searchParams.delete("book");
+    }
+    if (selectedBookId && selectedPageNumber > 1) {
+      url.searchParams.set("page", String(selectedPageNumber));
+    } else {
+      url.searchParams.delete("page");
+    }
+    if (activeView === "dictionary" && dictionaryQuery?.trim()) {
+      url.searchParams.set("q", dictionaryQuery.trim());
+    } else if (activeView !== "dictionary") {
+      url.searchParams.delete("q");
+    }
+    if (url.toString() !== window.location.href) {
+      window.history.replaceState({}, "", url.toString());
+    }
+  }, [activeView, selectedBookId, selectedPageNumber, dictionaryQuery]);
+
+  // Listen for browser Back/Forward
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPopState = () => {
+      const parsed = parseInitialUrlParams();
+      setActiveView(parsed.view);
+      if (parsed.bookId) setSelectedBookId(parsed.bookId);
+      setSelectedPageNumber(parsed.page);
+      setDictionaryQuery(parsed.q);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Warn before closing tab if unsaved line edits exist
+  useEffect(() => {
+    if (typeof window === "undefined" || dirtyBlockCount === 0) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirtyBlockCount]);
+
+  // Sync default OCR page range when book changes
+  const reviewBookId = review?.book_id;
+  const reviewPageCount = review?.page_count ?? selectedBook?.page_count;
+  useEffect(() => {
+    if (selectedBookId && reviewPageCount) {
       setOcrStartPage("1");
       setOcrEndPage(String(reviewPageCount));
     } else {
       setOcrStartPage("1");
       setOcrEndPage("");
     }
-  }, [reviewBookId, reviewPageCount]);
+  }, [selectedBookId, reviewBookId, reviewPageCount]);
 
   useEffect(() => {
     setLiveStatuses({});
     prevProgressRef.current = {};
   }, [selectedBookId]);
 
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
   const handleStatusBanner = useCallback(
     (kind: "info" | "success" | "error", text: string) => {
-      setBanner({ kind, text });
+      if (kind === "error") {
+        setErrorBanner(text);
+        return;
+      }
+      setErrorBanner(null);
+      toastSeqRef.current += 1;
+      const nextId = toastSeqRef.current;
+      setToasts((prev) => [...prev.slice(-2), { id: nextId, kind, text }]);
     },
     [],
   );
 
+  const confirmDiscardIfDirty = useCallback((actionLabel: string): boolean => {
+    if (dirtyBlockCountRef.current <= 0) return true;
+    return window.confirm(
+      `You have ${dirtyBlockCountRef.current} unsaved line edit(s) on this page. Discard them and ${actionLabel}?`,
+    );
+  }, []);
+
+  const navigateToPage = useCallback(
+    (nextPage: number, skipDirtyCheck = false) => {
+      if (!selectedBook) return;
+      const clamped = Math.max(1, Math.min(selectedBook.page_count, nextPage));
+      if (clamped === selectedPageNumberRef.current) return;
+      if (!skipDirtyCheck && !confirmDiscardIfDirty(`go to Page ${clamped}`)) return;
+      setSelectedPageNumber(clamped);
+      setSelectedBlockId(null);
+      setSyncRequest(null);
+      setDirtyBlockCount(0);
+    },
+    [confirmDiscardIfDirty, selectedBook],
+  );
+
+  const navigateToBook = useCallback(
+    (bookId: string) => {
+      if (bookId === selectedBookId) return;
+      if (!confirmDiscardIfDirty("switch books")) return;
+      setSelectedBookId(bookId);
+      setSelectedPageNumber(1);
+      setSelectedPrimaryRunId(null);
+      setSelectedBlockId(null);
+      setSyncRequest(null);
+      setDirtyBlockCount(0);
+      setActiveView("review");
+    },
+    [confirmDiscardIfDirty, selectedBookId],
+  );
+
+  // Global keyboard shortcuts ([ toggles PageRail, ? opens shortcuts, Alt+←/→ flips pages)
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if (e.isComposing) return;
+      const active = document.activeElement;
+      const inEditable =
+        isEditableTextElement(active) ||
+        (active instanceof HTMLElement &&
+          (active.tagName === "SELECT" || active.isContentEditable));
+
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        if (e.key === "ArrowRight" && activeView === "review" && selectedBook) {
+          e.preventDefault();
+          navigateToPage(selectedPageNumberRef.current + 1);
+          return;
+        }
+        if (e.key === "ArrowLeft" && activeView === "review" && selectedBook) {
+          e.preventDefault();
+          navigateToPage(selectedPageNumberRef.current - 1);
+          return;
+        }
+      }
+
+      if (inEditable || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.key === "[" && activeView === "review" && selectedBook) {
+        e.preventDefault();
+        setPageRailOpen((v) => !v);
+      } else if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen(true);
+      }
+    }
+
+    document.addEventListener("keydown", handleGlobalKeyDown);
+    return () => document.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [activeView, navigateToPage, selectedBook]);
+
   const refreshBooks = useCallback(async () => {
     const items = await listBooks();
     setBooks(items);
-    if (!initializedCollapseRef.current) {
-      initializedCollapseRef.current = true;
-      if (items.length > 0) {
-        setUploadExpanded(false);
+    setBooksLoaded(true);
+    setSelectedBookId((currentId) => {
+      if (items.length === 0) {
+        setPages([]);
+        setRuns([]);
+        setReview(null);
+        return null;
       }
-    }
-    if (items.length > 0 && (!selectedBookId || !items.some((b) => b.book_id === selectedBookId))) {
-      setSelectedBookId(items[0].book_id);
+      if (currentId && items.some((b) => b.book_id === currentId)) {
+        const matched = items.find((b) => b.book_id === currentId);
+        if (matched && selectedPageNumberRef.current > matched.page_count) {
+          setSelectedPageNumber(1);
+        }
+        return currentId;
+      }
       setSelectedPageNumber(1);
-    } else if (items.length === 0) {
-      setSelectedBookId(null);
-      setPages([]);
-      setRuns([]);
-      setReview(null);
-      setUploadExpanded(true);
-    }
-  }, [selectedBookId]);
+      return items[0].book_id;
+    });
+  }, []);
 
   const refreshBookDetail = useCallback(async (bookId: string) => {
-    const [pageList, runList] = await Promise.all([listBookPages(bookId), listBookOcrRuns(bookId)]);
+    const [pageList, runList] = await Promise.all([
+      listBookPages(bookId),
+      listBookOcrRuns(bookId),
+    ]);
     setPages(pageList);
     setRuns(runList);
   }, []);
@@ -199,7 +371,7 @@ export function App() {
 
   useEffect(() => {
     refreshBooks().catch((err) => {
-      setBanner({ kind: "error", text: err instanceof Error ? err.message : "Failed to load books." });
+      handleStatusBanner("error", err instanceof Error ? err.message : "Failed to load books.");
     });
     getHostCapabilities()
       .then((caps) => {
@@ -214,24 +386,24 @@ export function App() {
       .catch(() => {
         // Optional capabilities check; keep defaults if endpoint unavailable.
       });
-  }, [refreshBooks]);
+  }, [refreshBooks, handleStatusBanner]);
 
   useEffect(() => {
     if (!selectedBookId) return;
     refreshBookDetail(selectedBookId).catch((err) => {
-      setBanner({ kind: "error", text: err instanceof Error ? err.message : "Failed to load book." });
+      handleStatusBanner("error", err instanceof Error ? err.message : "Failed to load book.");
     });
-  }, [selectedBookId, refreshBookDetail]);
+  }, [selectedBookId, refreshBookDetail, handleStatusBanner]);
 
   useEffect(() => {
     if (!selectedBookId) return;
     refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId).catch((err) => {
-      setBanner({
-        kind: "error",
-        text: err instanceof Error ? err.message : "Failed to load page review.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof Error ? err.message : "Failed to load page review.",
+      );
     });
-  }, [selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshReview]);
+  }, [selectedBookId, selectedPageNumber, selectedPrimaryRunId, refreshReview, handleStatusBanner]);
 
   const mergedRuns = useMemo(
     () => mergeBookRunsWithLiveStatuses(runs, liveStatuses),
@@ -288,10 +460,7 @@ export function App() {
           if (becameTerminal || periodicRefresh) {
             shouldRefreshBookDetail = true;
           }
-          if (
-            becameTerminal ||
-            (advanced && reviewBlocksCountRef.current === 0)
-          ) {
+          if (becameTerminal || (advanced && reviewBlocksCountRef.current === 0)) {
             shouldRefreshCurrentPageReview = true;
           }
           if (becameTerminal && (!prevEntry || prevEntry.status !== st.status)) {
@@ -316,15 +485,14 @@ export function App() {
         if (finishedRun && !cancelled) {
           const isZeroPartial =
             finishedRun.status === "partial" && (finishedRun.progress_current ?? 0) === 0;
-          setBanner({
-            kind:
-              finishedRun.status === "failed" || isZeroPartial
-                ? "error"
-                : finishedRun.status === "partial" || finishedRun.status === "cancelled"
-                  ? "info"
-                  : "success",
-            text: `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages)${finishedRun.error_summary ? `: ${finishedRun.error_summary}` : "."}`,
-          });
+          handleStatusBanner(
+            finishedRun.status === "failed" || isZeroPartial
+              ? "error"
+              : finishedRun.status === "partial" || finishedRun.status === "cancelled"
+                ? "info"
+                : "success",
+            `${formatEngineLabel(finishedRun.engine)} ${finishedRun.status} (${finishedRun.progress_current}/${finishedRun.progress_total} pages)${finishedRun.error_summary ? `: ${finishedRun.error_summary}` : "."}`,
+          );
         }
       } catch {
         // Ignore transient polling hiccups.
@@ -342,7 +510,7 @@ export function App() {
         window.clearTimeout(timerId);
       }
     };
-  }, [activeRunIdsKey, selectedBookId, refreshBookDetail, refreshReview]);
+  }, [activeRunIdsKey, selectedBookId, refreshBookDetail, refreshReview, handleStatusBanner]);
 
   async function handleUpload(formData: FormData) {
     setBusyUpload(true);
@@ -352,33 +520,37 @@ export function App() {
       setSelectedBookId(res.book_id);
       setSelectedPageNumber(1);
       setSelectedPrimaryRunId(null);
+      setSelectedBlockId(null);
+      setDirtyBlockCount(0);
       setActiveView("review");
-      setUploadExpanded(false);
-      setBanner({
-        kind: "success",
-        text: res.duplicate
+      handleStatusBanner(
+        "success",
+        res.duplicate
           ? `Book "${res.title}" matched existing SHA-256 (${res.page_count} pages).`
-          : `Imported "${res.title}" (${res.page_count} pages at 300 DPI). Ready for OCR.`,
-      });
+          : `Imported "${res.title}" (${res.page_count} pages). Ready for OCR.`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Upload failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Upload failed.",
+      );
+      throw err;
     } finally {
       setBusyUpload(false);
     }
   }
 
-  const selectedBook = books.find((b) => b.book_id === selectedBookId) ?? null;
-
-  async function handleStartOcr(preset?: "sample_5" | "full") {
+  async function handleStartOcr(preset?: "sample_5" | "full" | "quick_tesseract") {
     if (!selectedBookId) return;
     const engines: string[] = [];
-    if (usePaddle) engines.push("paddle_ppocrv5_te");
-    if (useTesseract) engines.push("tesseract_tel_best");
+    if (preset === "quick_tesseract") {
+      engines.push("tesseract_tel_best");
+    } else {
+      if (usePaddle) engines.push("paddle_ppocrv5_te");
+      if (useTesseract) engines.push("tesseract_tel_best");
+    }
     if (engines.length === 0) {
-      setBanner({ kind: "error", text: "Select at least one OCR engine." });
+      handleStatusBanner("error", "Select at least one OCR engine.");
       return;
     }
 
@@ -390,7 +562,7 @@ export function App() {
       setOcrStartPage("1");
       setOcrEndPage(String(endSample));
       pageRange = totalPages > 0 && endSample === totalPages ? null : { start: 1, end: endSample };
-    } else if (preset === "full") {
+    } else if (preset === "full" || preset === "quick_tesseract") {
       setOcrStartPage("1");
       if (totalPages > 0) setOcrEndPage(String(totalPages));
       pageRange = null;
@@ -405,13 +577,12 @@ export function App() {
         endVal < startVal ||
         (totalPages > 0 && endVal > totalPages)
       ) {
-        setBanner({
-          kind: "error",
-          text:
-            totalPages > 0
-              ? `Enter a valid OCR page range between 1 and ${totalPages}.`
-              : "Enter a valid OCR page range.",
-        });
+        handleStatusBanner(
+          "error",
+          totalPages > 0
+            ? `Enter a valid OCR page range between 1 and ${totalPages}.`
+            : "Enter a valid OCR page range.",
+        );
         return;
       }
       pageRange =
@@ -428,7 +599,8 @@ export function App() {
         forceRerun: ocrForceRerun || undefined,
         includeDigitalTextPages: ocrIncludeDigital ? true : undefined,
       });
-      const runIdsToFetch = created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
+      const runIdsToFetch =
+        created.ocr_run_ids.length > 0 ? created.ocr_run_ids : [created.ocr_run_id];
       const fetchedStatuses = await Promise.all(runIdsToFetch.map((id) => getOcrRunStatus(id)));
       setLiveStatuses((prev) => {
         const nextMap = { ...prev };
@@ -440,21 +612,21 @@ export function App() {
       await refreshBookDetail(selectedBookId);
       if (created.reused_existing) {
         await refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
-        setBanner({ kind: "info", text: "Reused existing completed OCR run." });
+        handleStatusBanner("info", "Reused existing completed OCR run.");
       } else {
         const engineNames = engines.map((e) => formatEngineLabel(e)).join(" + ");
-        setBanner({
-          kind: "info",
-          text: `Started OCR (${engineNames}) for ${created.pages_total} scanned page(s)${
+        handleStatusBanner(
+          "info",
+          `Started OCR (${engineNames}) for ${created.pages_total} scanned page(s)${
             pageRange ? ` (pages ${pageRange.start}–${pageRange.end})` : ""
           }.`,
-        });
+        );
       }
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to start OCR.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to start OCR.",
+      );
     }
   }
 
@@ -465,15 +637,15 @@ export function App() {
       if (selectedBookId) {
         await refreshBookDetail(selectedBookId);
       }
-      setBanner({
-        kind: "info",
-        text: `Resumed ${formatEngineLabel(resumed.engine)} from ${resumed.progress_current}/${resumed.progress_total} pages.`,
-      });
+      handleStatusBanner(
+        "info",
+        `Resumed ${formatEngineLabel(resumed.engine)} from ${resumed.progress_current}/${resumed.progress_total} pages.`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Resume failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Resume failed.",
+      );
     }
   }
 
@@ -484,15 +656,15 @@ export function App() {
       if (selectedBookId) {
         await refreshBookDetail(selectedBookId);
       }
-      setBanner({
-        kind: "info",
-        text: `Cancelled ${formatEngineLabel(cancelled.engine)} (${cancelled.progress_current}/${cancelled.progress_total} pages saved; ready to resume).`,
-      });
+      handleStatusBanner(
+        "info",
+        `Cancelled ${formatEngineLabel(cancelled.engine)} (${cancelled.progress_current}/${cancelled.progress_total} pages saved; ready to resume).`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Cancel failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Cancel failed.",
+      );
     }
   }
 
@@ -516,21 +688,64 @@ export function App() {
         correction_type: options?.correctionType,
         auto_filter_noise: true,
       });
-      await Promise.all([
-        refreshBookDetail(selectedBookId),
-        refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
-      ]);
-      setBanner({
-        kind: "success",
-        text: res.correction_memory_id
-          ? `Saved "${action}" event and recorded correction memory candidate.`
-          : `Saved "${action}" event (raw OCR preserved).`,
+
+      // Optimistically patch current page review & page summary status so line saves are instant
+      setReview((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          review_status: res.page_review_status,
+          blocks: prev.blocks.map((blk) =>
+            blk.block_id !== blockId
+              ? blk
+              : {
+                  ...blk,
+                  current_text: res.current_text,
+                  block_role: res.block_role ?? blk.block_role,
+                  is_edited: res.current_text !== blk.raw_text,
+                  latest_action: res.action,
+                  edit_history: [
+                    {
+                      edit_id: res.edit_id,
+                      previous_text: res.previous_text,
+                      edited_text: res.current_text,
+                      action: res.action,
+                      reviewer_id: null,
+                      review_note: reviewNote ?? null,
+                      created_at: res.created_at,
+                    },
+                    ...blk.edit_history,
+                  ],
+                },
+          ),
+        };
       });
+      setPages((prev) =>
+        prev.map((p) =>
+          p.page_number === selectedPageNumber
+            ? { ...p, review_status: res.page_review_status }
+            : p,
+        ),
+      );
+
+      // Refresh full review only if a new memory rule was recorded so fresh suggestions surface
+      if (res.correction_memory_id) {
+        void refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
+      }
+
+      handleStatusBanner(
+        "success",
+        res.correction_memory_id
+          ? `Saved "${action}" and recorded correction memory rule.`
+          : action === "approved"
+            ? "Line approved."
+            : `Saved "${action}" (raw OCR preserved).`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to save edit.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to save edit.",
+      );
     } finally {
       setBusyBlockId(null);
     }
@@ -553,15 +768,12 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({
-        kind: "success",
-        text: "Applied suggestion to this block only and incremented approved count.",
-      });
+      handleStatusBanner("success", "Applied suggestion to this line and updated memory evidence.");
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to apply suggestion.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to apply suggestion.",
+      );
     } finally {
       setBusyBlockId(null);
     }
@@ -572,12 +784,12 @@ export function App() {
     try {
       await rejectCorrection(suggestionId, false);
       await refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId);
-      setBanner({ kind: "info", text: "Recorded suggestion rejection evidence." });
+      handleStatusBanner("info", "Recorded suggestion rejection evidence.");
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to reject suggestion.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to reject suggestion.",
+      );
     }
   }
 
@@ -596,15 +808,15 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({
-        kind: "success",
-        text: `Page ${selectedPageNumber} marked "${formatReviewStatus(reviewStatus)}".`,
-      });
+      handleStatusBanner(
+        "success",
+        `Page ${selectedPageNumber} marked "${formatReviewStatus(reviewStatus)}".`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Status update failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Status update failed.",
+      );
     }
   }
 
@@ -620,15 +832,12 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({
-        kind: "success",
-        text: `Inserted manual line on Page ${selectedPageNumber}.`,
-      });
+      handleStatusBanner("success", `Inserted manual line on Page ${selectedPageNumber}.`);
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to insert line.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to insert line.",
+      );
     }
   }
 
@@ -640,15 +849,14 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({
-        kind: "success",
-        text: `Saved born-digital text for Page ${selectedPageNumber}.`,
-      });
+      handleStatusBanner("success", `Saved born-digital text for Page ${selectedPageNumber}.`);
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Failed to save digital text.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError
+          ? `${err.code}: ${err.message}`
+          : "Failed to save digital text.",
+      );
     }
   }
 
@@ -665,65 +873,107 @@ export function App() {
         currentTexts,
       });
       if (res.changed_blocks_count === 0) {
-        setBanner({
-          kind: "info",
-          text: `No high-confidence auto-corrections found on Page ${selectedPageNumber} (scanned ${res.total_blocks_scanned} line(s) against ${res.lexicon_word_count.toLocaleString()} Telugu words & correction memory).`,
-        });
+        handleStatusBanner(
+          "info",
+          `No high-confidence auto-corrections on Page ${selectedPageNumber} (checked ${res.total_blocks_scanned} lines).`,
+        );
       } else {
-        setBanner({
-          kind: "success",
-          text: `Auto-corrected ${res.changed_blocks_count} line(s) (${res.total_changes_count} fix(es)) into drafts. Review highlighted cards and click "Save All & Approve Page".`,
-        });
+        handleStatusBanner(
+          "success",
+          `Drafted ${res.total_changes_count} fix(es) across ${res.changed_blocks_count} line(s). Review and approve.`,
+        );
       }
       return res;
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Auto-correct failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Auto-correct failed.",
+      );
       return null;
     }
   }
 
-  async function handleBatchSaveAndApprovePage(edits: BatchBlockEditPayload[]) {
+  async function handleBatchSaveAndApprovePage(
+    edits: BatchBlockEditPayload[],
+    options?: {
+      markPageApproved?: boolean;
+      approveRemainingBlocks?: boolean;
+      targetStatus?: "approved" | "needs_attention";
+    },
+  ) {
     if (!selectedBookId || !review) return;
     try {
+      if (options?.targetStatus === "needs_attention") {
+        if (edits.length > 0) {
+          await batchSavePage(selectedBookId, selectedPageNumber, {
+            primaryRunId: review.primary_run_id,
+            edits,
+            approveRemainingBlocks: false,
+            markPageApproved: false,
+          });
+        }
+        await updatePageReviewStatus(
+          selectedBookId,
+          selectedPageNumber,
+          "needs_attention",
+          review.primary_run_id,
+        );
+        await Promise.all([
+          refreshBookDetail(selectedBookId),
+          refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
+        ]);
+        setDirtyBlockCount(0);
+        handleStatusBanner(
+          "info",
+          edits.length > 0
+            ? `Saved ${edits.length} draft edit(s) and flagged Page ${selectedPageNumber} for attention.`
+            : `Flagged Page ${selectedPageNumber} as needing attention.`,
+        );
+        return;
+      }
+
       const res = await batchSavePage(selectedBookId, selectedPageNumber, {
         primaryRunId: review.primary_run_id,
         edits,
-        approveRemainingBlocks: true,
-        markPageApproved: true,
+        approveRemainingBlocks: options?.approveRemainingBlocks ?? true,
+        markPageApproved: options?.markPageApproved ?? true,
       });
       await Promise.all([
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
+      setDirtyBlockCount(0);
       const memNote =
         res.correction_memory_created_count > 0
-          ? `, added ${res.correction_memory_created_count} rule(s) to correction memory`
+          ? `, +${res.correction_memory_created_count} memory rule(s)`
           : "";
       let nextMsg = "";
       if (autoAdvancePage) {
         const nextPending =
           pages.find(
             (p) => p.page_number > selectedPageNumber && p.review_status !== "approved",
-          ) ?? pages.find((p) => p.page_number !== selectedPageNumber && p.review_status !== "approved");
+          ) ??
+          pages.find(
+            (p) => p.page_number !== selectedPageNumber && p.review_status !== "approved",
+          );
         if (nextPending) {
           setSelectedPageNumber(nextPending.page_number);
           setSelectedBlockId(null);
           setSyncRequest(null);
-          nextMsg = ` → Advancing to Page ${nextPending.page_number}.`;
+          nextMsg = ` → Page ${nextPending.page_number}`;
         }
       }
-      setBanner({
-        kind: "success",
-        text: `Page ${selectedPageNumber} approved: saved ${res.saved_edits_count} edit(s), approved ${res.approved_blocks_count} line(s)${memNote}.${nextMsg}`,
-      });
+      handleStatusBanner(
+        "success",
+        `Page ${selectedPageNumber} approved (${res.saved_edits_count} edited, ${res.approved_blocks_count} approved${memNote})${nextMsg}.`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch save & approve failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError
+          ? `${err.code}: ${err.message}`
+          : "Batch save & approve failed.",
+      );
     }
   }
 
@@ -738,7 +988,7 @@ export function App() {
         !b.short_or_empty_flag,
     );
     if (targets.length === 0) {
-      setBanner({ kind: "info", text: "All unflagged blocks on this page are already approved." });
+      handleStatusBanner("info", "All unflagged lines on this page are already approved.");
       return;
     }
     try {
@@ -758,15 +1008,15 @@ export function App() {
         refreshBookDetail(selectedBookId),
         refreshReview(selectedBookId, selectedPageNumber, selectedPrimaryRunId),
       ]);
-      setBanner({
-        kind: "success",
-        text: `Approved ${targets.length} unflagged block(s) on Page ${selectedPageNumber}.`,
-      });
+      handleStatusBanner(
+        "success",
+        `Approved ${targets.length} unflagged line(s) on Page ${selectedPageNumber}.`,
+      );
     } catch (err) {
-      setBanner({
-        kind: "error",
-        text: err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch approval failed.",
-      });
+      handleStatusBanner(
+        "error",
+        err instanceof ApiClientError ? `${err.code}: ${err.message}` : "Batch approval failed.",
+      );
     }
   }
 
@@ -774,23 +1024,10 @@ export function App() {
     () => pages.filter((p) => p.review_status === "approved").length,
     [pages],
   );
-  const filteredPages = useMemo(() => {
-    if (pageFilter === "approved") {
-      return pages.filter((p) => p.review_status === "approved");
-    }
-    if (pageFilter === "pending") {
-      return pages.filter((p) => p.review_status !== "approved");
-    }
-    return pages;
-  }, [pages, pageFilter]);
-
-  const resumableRuns = useMemo(
-    () =>
-      mergedRuns.filter(
-        (r) => (r.status === "partial" || r.status === "failed") && !activeRunIds.includes(r.ocr_run_id),
-      ),
-    [mergedRuns, activeRunIds],
-  );
+  const approvalPercent = useMemo(() => {
+    const total = selectedBook?.page_count ?? pages.length;
+    return total > 0 ? Math.round((approvedPagesCount / total) * 100) : 0;
+  }, [approvedPagesCount, pages.length, selectedBook]);
 
   const triggerSync = useCallback((target: "scan" | "editor", blockId: string) => {
     syncSeqCounterRef.current += 1;
@@ -818,6 +1055,7 @@ export function App() {
     [autoSyncBlocks, selectedBlockId, triggerSync],
   );
 
+  // Track last focused editable input for Telugu Virtual Keyboard
   useEffect(() => {
     function handleFocusIn(event: FocusEvent) {
       const el = event.target;
@@ -853,14 +1091,16 @@ export function App() {
           ? CSS.escape(selectedBlockId)
           : selectedBlockId.replace(/"/g, '\\"');
       const fallbackArea = document.querySelector<HTMLTextAreaElement>(
-        `[data-block-id="${escapedId}"] textarea.block-textarea`,
+        `[data-block-id="${escapedId}"] textarea`,
       );
       if (isEditableTextElement(fallbackArea)) {
         lastEditableRef.current = fallbackArea;
         return fallbackArea;
       }
     }
-    const firstArea = document.querySelector<HTMLTextAreaElement>("textarea.block-textarea");
+    const firstArea = document.querySelector<HTMLTextAreaElement>(
+      "textarea.block-textarea, textarea.block-textarea-compact",
+    );
     if (isEditableTextElement(firstArea)) {
       lastEditableRef.current = firstArea;
       return firstArea;
@@ -883,621 +1123,316 @@ export function App() {
     return backspaceAtCursor(target);
   }, [resolveKeyboardTarget]);
 
-  const handleImportCta = useCallback(() => {
-    setUploadExpanded(true);
-    setActiveView("review");
-    window.requestAnimationFrame(() => {
-      const input = document.querySelector<HTMLInputElement>('.sidebar input[type="file"]');
-      if (input) {
-        input.scrollIntoView({ block: "center" });
-        input.focus();
-        input.click();
+  const handleSelectView = useCallback(
+    (nextView: WorkspaceView) => {
+      if (nextView === activeView) return;
+      if (activeView === "review" && !confirmDiscardIfDirty(`switch to ${nextView}`)) return;
+      if (nextView !== "dictionary") {
+        setDictionaryReturnContext(false);
       }
-    });
-  }, []);
+      setActiveView(nextView);
+    },
+    [activeView, confirmDiscardIfDirty],
+  );
+
+  function commitSubbarPageJump() {
+    if (!selectedBook) return;
+    const parsed = Number(pageJumpInput);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= selectedBook.page_count) {
+      navigateToPage(parsed);
+    } else {
+      setPageJumpInput(String(selectedPageNumber));
+    }
+  }
 
   return (
     <div className={keyboardOpen ? "app-shell has-keyboard" : "app-shell"}>
-      <a href="#main-review" className="skip-link visually-hidden">
-        Skip to review workspace
+      <a href="#main-workspace" className="skip-link visually-hidden">
+        Skip to workspace
       </a>
 
-      <div className="app-top">
-      <CommitmentBar />
-      <header className="app-header">
-        <div className="brand-block">
-          <div className="brand-mark" aria-hidden="true">
-            <span lang="te">తె</span>
+      <TopNavBar
+        books={books}
+        selectedBook={selectedBook}
+        runs={mergedRuns}
+        activeView={activeView}
+        keyboardOpen={keyboardOpen}
+        onSelectBook={navigateToBook}
+        onSelectView={handleSelectView}
+        onOpenImport={() => setImportDialogOpen(true)}
+        onOpenOcrDrawer={() => setOcrDrawerOpen(true)}
+        onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+      />
+
+      <main id="main-workspace" className="app-main" tabIndex={-1}>
+        {errorBanner && (
+          <div className="status-banner error" role="alert">
+            <span>{errorBanner}</span>
+            <button
+              type="button"
+              className="banner-close-btn"
+              aria-label="Dismiss error"
+              onClick={() => setErrorBanner(null)}
+            >
+              ✕
+            </button>
           </div>
-          <div>
-            <h1>
-              Telugu Book Digitizer <span className="brand-badge">Local Studio</span>
-            </h1>
-            <span className="header-meta">
-              Dual-engine OCR · Human proofreading · Correction memory
-            </span>
-          </div>
-        </div>
+        )}
 
-        <div className="header-actions">
-          <HeaderOcrStatusPill book={selectedBook} runs={mergedRuns} />
+        {selectedBook && activeView !== "dictionary" && (
+          <OcrProgressStrip
+            book={selectedBook}
+            runs={mergedRuns}
+            pages={pages}
+            activeView={activeView}
+            hideWhenReady
+            onQuickStartSample={() => handleStartOcr("sample_5")}
+            onQuickStartFull={() => handleStartOcr("full")}
+            onResumeRun={handleResumeRun}
+            onCancelRun={handleCancelRun}
+            onGoToExport={() => handleSelectView("export")}
+            onGoToReview={() => handleSelectView("review")}
+          />
+        )}
 
-          <button
-            type="button"
-            className="btn-compact"
-            aria-pressed={keyboardOpen}
-            title="Toggle on-screen Telugu InScript & Phonetic keyboard"
-            onClick={() => setKeyboardOpen((v) => !v)}
-          >
-            ⌨ Telugu Keyboard
-          </button>
-
-          <button
-            type="button"
-            className="primary btn-compact header-cta"
-            title="Import a scanned Telugu PDF"
-            onClick={handleImportCta}
-          >
-            ＋ Import PDF
-          </button>
-
-          <nav className="segmented-nav" aria-label="Workspace views">
-            <button
-              type="button"
-              className={activeView === "review" ? "primary" : undefined}
-              aria-pressed={activeView === "review"}
-              onClick={() => setActiveView("review")}
-            >
-              <span aria-hidden="true">📖</span> Page Review
-            </button>
-            <button
-              type="button"
-              className={activeView === "dictionary" ? "primary" : undefined}
-              aria-pressed={activeView === "dictionary"}
-              onClick={() => setActiveView("dictionary")}
-            >
-              <span aria-hidden="true">📚</span> Dictionary
-            </button>
-            <button
-              type="button"
-              className={activeView === "memory" ? "primary" : undefined}
-              aria-pressed={activeView === "memory"}
-              onClick={() => setActiveView("memory")}
-            >
-              <span aria-hidden="true">🧠</span> Correction Memory
-            </button>
-            <button
-              type="button"
-              className={activeView === "export" ? "primary" : undefined}
-              aria-pressed={activeView === "export"}
-              disabled={!selectedBook}
-              onClick={() => setActiveView("export")}
-            >
-              <span aria-hidden="true">📄</span> Export DOCX / TXT
-            </button>
-          </nav>
-        </div>
-      </header>
-      </div>
-
-      <div className="workspace-grid">
-        <aside className="sidebar" aria-label="Library and OCR controls">
-          {uploadExpanded || books.length === 0 ? (
-            <div>
-              {books.length > 0 && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.35rem" }}>
-                  <button
-                    type="button"
-                    className="btn-compact"
-                    onClick={() => setUploadExpanded(false)}
-                  >
-                    Hide Upload Form
-                  </button>
-                </div>
-              )}
-              <BookUploadForm busy={busyUpload} onUpload={handleUpload} />
-            </div>
-          ) : (
-            <section className="panel-card panel-card-compact">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
-                <div>
-                  <strong style={{ fontSize: "0.95rem" }}>Library Import</strong>
-                  <div className="hint-text">Add another scanned Telugu PDF</div>
-                </div>
-                <button
-                  type="button"
-                  className="primary btn-compact"
-                  onClick={() => setUploadExpanded(true)}
-                >
-                  + Import PDF
-                </button>
-              </div>
-            </section>
-          )}
-
-          <section className="panel-card">
-            <h2 className="card-title">
-              <span className="card-icon" aria-hidden="true">
-                📚
-              </span>
-              Books ({books.length})
-            </h2>
-            {books.length === 0 ? (
-              <p className="hint-text">Upload a printed Telugu PDF above to begin.</p>
-            ) : (
-              <ul className="book-list">
-                {books.map((book) => {
-                  const isSel = book.book_id === selectedBookId;
-                  return (
-                    <li key={book.book_id}>
-                      <button
-                        type="button"
-                        className={`book-item-btn ${isSel ? "selected" : ""}`}
-                        onClick={() => {
-                          setSelectedBookId(book.book_id);
-                          setSelectedPageNumber(1);
-                          setSelectedPrimaryRunId(null);
-                        }}
-                      >
-                        <strong lang="te">{book.title}</strong>
-                        <span className="hint-text">
-                          {book.page_count} pages · {book.scanned_pages_count} scanned ·{" "}
-                          {book.digital_text_pages_count} digital
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-
-            {selectedBook && (
-              <div style={{ marginTop: "0.75rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
-                <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                  <span>Select another book</span>
-                  <select
-                    aria-label="Select another book"
-                    value={selectedBookId ?? ""}
-                    onChange={(e) => {
-                      const nextId = e.target.value;
-                      if (!nextId) return;
-                      setSelectedBookId(nextId);
-                      setSelectedPageNumber(1);
-                      setSelectedPrimaryRunId(null);
-                      setSelectedBlockId(null);
-                    }}
-                  >
-                    {books.map((book) => (
-                      <option key={book.book_id} value={book.book_id}>
-                        {book.title} ({book.page_count}p)
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-                  {books.length > 1 && (
-                    <button
-                      type="button"
-                      className="btn-compact"
-                      onClick={() => {
-                        const idx = books.findIndex((b) => b.book_id === selectedBookId);
-                        const nextBook = books[(idx + 1) % books.length];
-                        if (!nextBook) return;
-                        setSelectedBookId(nextBook.book_id);
-                        setSelectedPageNumber(1);
-                        setSelectedPrimaryRunId(null);
-                        setSelectedBlockId(null);
-                      }}
-                    >
-                      Switch Book →
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn-compact"
-                    onClick={() => setUploadExpanded(true)}
-                  >
-                    + Upload Another Book
-                  </button>
-                </div>
-              </div>
-            )}
-          </section>
-
-          {selectedBook && (
-            <section className="panel-card">
-              <h2 className="card-title">
-                <span className="card-icon" aria-hidden="true">
-                  ⚙️
-                </span>
-                Run OCR Engines
-              </h2>
-              <fieldset className="sidebar-fieldset">
-                <legend className="hint-text">Engines</legend>
-                <div className="checkbox-row">
-                  <input
-                    id="eng-paddle"
-                    type="checkbox"
-                    checked={usePaddle}
-                    disabled={capabilities?.engines.paddle_ppocrv5_te?.available === false}
-                    onChange={(e) => setUsePaddle(e.target.checked)}
-                  />
-                  <label htmlFor="eng-paddle">
-                    PaddleOCR PP-OCRv5{" "}
-                    <span className="hint-text">
-                      {capabilities?.engines.paddle_ppocrv5_te?.available === false
-                        ? `(${capabilities.engines.paddle_ppocrv5_te.reason ?? "Unavailable"})`
-                        : "(~90s/p CPU)"}
-                    </span>
-                  </label>
-                </div>
-                <div className="checkbox-row">
-                  <input
-                    id="eng-tess"
-                    type="checkbox"
-                    checked={useTesseract}
-                    disabled={capabilities?.engines.tesseract_tel_best?.available === false}
-                    onChange={(e) => setUseTesseract(e.target.checked)}
-                  />
-                  <label htmlFor="eng-tess">
-                    Tesseract 5 Telugu{" "}
-                    <span className="hint-text">
-                      {capabilities?.engines.tesseract_tel_best?.available === false
-                        ? `(${capabilities.engines.tesseract_tel_best.reason ?? "Unavailable"})`
-                        : "(~0.4s/p CPU)"}
-                    </span>
-                  </label>
-                </div>
-              </fieldset>
-
-              <fieldset className="sidebar-fieldset" style={{ marginTop: "0.55rem" }}>
-                <legend className="hint-text">Page Range</legend>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.45rem" }}>
-                  <label className="hint-text" htmlFor="ocr-start-page">
-                    Start page
-                    <input
-                      id="ocr-start-page"
-                      type="number"
-                      className="compact-number-input"
-                      min={1}
-                      max={selectedBook.page_count}
-                      value={ocrStartPage}
-                      onChange={(e) => setOcrStartPage(e.target.value)}
-                    />
-                  </label>
-                  <label className="hint-text" htmlFor="ocr-end-page">
-                    End page
-                    <input
-                      id="ocr-end-page"
-                      type="number"
-                      className="compact-number-input"
-                      min={1}
-                      max={selectedBook.page_count}
-                      value={ocrEndPage}
-                      placeholder={String(selectedBook.page_count)}
-                      onChange={(e) => setOcrEndPage(e.target.value)}
-                    />
-                  </label>
-                </div>
-                <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.45rem", flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className="btn-compact"
-                    onClick={() => {
-                      setOcrStartPage("1");
-                      setOcrEndPage(String(Math.min(5, selectedBook.page_count)));
-                    }}
-                  >
-                    Pages 1–5
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-compact"
-                    onClick={() => {
-                      setOcrStartPage("1");
-                      setOcrEndPage(String(selectedBook.page_count));
-                    }}
-                  >
-                    All ({selectedBook.page_count})
-                  </button>
-                </div>
-                <p className="hint-text" style={{ marginTop: "0.4rem", marginBottom: 0 }}>
-                  For large PDFs on CPU, test Pages 1–5 first or run Tesseract alone for a quick draft.
-                </p>
-              </fieldset>
-
-              <details style={{ marginTop: "0.5rem" }}>
-                <summary className="hint-text" style={{ cursor: "pointer", userSelect: "none" }}>
-                  Advanced Preprocessing &amp; DPI
-                </summary>
-                <div style={{ marginTop: "0.45rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
-                  <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
-                    <span>Scan Preprocessing</span>
-                    <select
-                      aria-label="OCR preprocessing profile"
-                      value={ocrPreprocessing}
-                      onChange={(e) =>
-                        setOcrPreprocessing(e.target.value as "none" | "deskew" | "contrast_clahe")
-                      }
-                    >
-                      <option value="none">None (Raw 300 DPI scan)</option>
-                      <option value="deskew">Auto-Deskew + Contrast</option>
-                      <option value="contrast_clahe">CLAHE Adaptive Contrast + Denoise</option>
-                    </select>
-                  </label>
-                  <label className="hint-text" style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
-                    <span>Render Resolution</span>
-                    <select
-                      aria-label="OCR render DPI"
-                      value={ocrRenderDpi}
-                      onChange={(e) => setOcrRenderDpi(Number(e.target.value))}
-                    >
-                      <option value={300}>300 DPI (Standard)</option>
-                      <option value={400}>400 DPI (Fine / Faded print)</option>
-                    </select>
-                  </label>
-                  <div className="checkbox-row">
-                    <input
-                      id="ocr-force-rerun"
-                      type="checkbox"
-                      checked={ocrForceRerun}
-                      onChange={(e) => setOcrForceRerun(e.target.checked)}
-                    />
-                    <label htmlFor="ocr-force-rerun">Force fresh OCR re-run</label>
-                  </div>
-                  <div className="checkbox-row">
-                    <input
-                      id="ocr-include-digital"
-                      type="checkbox"
-                      checked={ocrIncludeDigital}
-                      onChange={(e) => setOcrIncludeDigital(e.target.checked)}
-                    />
-                    <label htmlFor="ocr-include-digital">Include digital-text pages in visual OCR</label>
-                  </div>
-                </div>
-              </details>
-
-              <div style={{ marginTop: "0.65rem", display: "flex", flexDirection: "column", gap: "0.45rem" }}>
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={isOcrRunning}
-                  onClick={() => void handleStartOcr()}
-                >
-                  {isOcrRunning ? "OCR In Progress..." : "Run Selected OCR"}
-                </button>
-                {resumableRuns.map((r) => (
-                  <button
-                    key={r.ocr_run_id}
-                    type="button"
-                    className="btn-compact"
-                    onClick={() => void handleResumeRun(r.ocr_run_id)}
-                  >
-                    Resume {formatEngineLabel(r.engine)} ({r.progress_current ?? 0}/
-                    {r.progress_total || selectedBook.scanned_pages_count})
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {pages.length > 0 && (
-            <nav className="panel-card" aria-label="Book pages">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
-                <h2 className="card-title" style={{ margin: 0 }}>
-                  <span className="card-icon" aria-hidden="true">
-                    🗂️
-                  </span>
-                  Pages ({pages.length})
-                </h2>
-                <span className="hint-text">{approvedPagesCount} approved</span>
-              </div>
-              <div className="segmented-control" role="group" aria-label="Filter pages" style={{ marginBottom: "0.6rem" }}>
-                <button
-                  type="button"
-                  className={`btn-compact ${pageFilter === "all" ? "primary" : ""}`.trim()}
-                  aria-pressed={pageFilter === "all"}
-                  onClick={() => setPageFilter("all")}
-                >
-                  All
-                </button>
-                <button
-                  type="button"
-                  className={`btn-compact ${pageFilter === "pending" ? "primary" : ""}`.trim()}
-                  aria-pressed={pageFilter === "pending"}
-                  onClick={() => setPageFilter("pending")}
-                >
-                  Pending
-                </button>
-                <button
-                  type="button"
-                  className={`btn-compact ${pageFilter === "approved" ? "primary" : ""}`.trim()}
-                  aria-pressed={pageFilter === "approved"}
-                  onClick={() => setPageFilter("approved")}
-                >
-                  Approved
-                </button>
-              </div>
-              <ul className="page-list">
-                {filteredPages.map((p) => (
-                  <li key={p.page_id}>
-                    <button
-                      type="button"
-                      className={`page-item-btn ${p.page_number === selectedPageNumber ? "selected" : ""}`}
-                      onClick={() => {
-                        setSelectedPageNumber(p.page_number);
-                        setSelectedBlockId(null);
-                        setActiveView("review");
-                      }}
-                    >
-                      <div className="badge-row" style={{ justifyContent: "space-between", width: "100%" }}>
-                        <strong>Page {p.page_number}</strong>
-                        <span className="badge">{formatPageKind(p.page_kind)}</span>
-                      </div>
-                      <div className="badge-row">
-                        <span
-                          className={`badge ${
-                            p.review_status === "approved"
-                              ? "ok"
-                              : p.review_status === "needs_attention"
-                                ? "warn"
-                                : ""
-                          }`}
-                        >
-                          {formatReviewStatus(p.review_status)}
-                        </span>
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </nav>
-          )}
-        </aside>
-
-        <main id="main-review" className="main-stage" tabIndex={-1}>
-          {selectedBook && activeView !== "dictionary" && (
-            <OverviewPanel
-              book={selectedBook}
-              pages={pages}
-              runs={mergedRuns}
-              review={review}
-              activeView={activeView}
-              onGoToReview={() => setActiveView("review")}
-              onGoToExport={() => setActiveView("export")}
-            />
-          )}
-
-          {selectedBook && activeView !== "dictionary" && (
-            <OcrProgressStrip
-              book={selectedBook}
-              runs={mergedRuns}
-              pages={pages}
-              activeView={activeView}
-              onQuickStartSample={() => handleStartOcr("sample_5")}
-              onQuickStartFull={() => handleStartOcr("full")}
-              onResumeRun={handleResumeRun}
-              onCancelRun={handleCancelRun}
-              onGoToExport={() => setActiveView("export")}
-              onGoToReview={() => setActiveView("review")}
-            />
-          )}
-
-          {banner && (
-            <div
-              className={`status-banner ${
-                banner.kind === "error" ? "error" : banner.kind === "success" ? "success" : ""
-              }`}
-              role="status"
-              aria-live="polite"
-            >
-              <span>{banner.text}</span>
-              <button
-                type="button"
-                className="banner-close-btn"
-                aria-label="Dismiss status message"
-                onClick={() => setBanner(null)}
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
-          {activeView === "dictionary" ? (
+        {activeView === "dictionary" ? (
+          <div className="centered-view-stage">
             <DictionaryPanel
               initialQuery={dictionaryQuery}
               keyboardOpen={keyboardOpen}
+              returnToBookLabel={
+                dictionaryReturnContext && selectedBook
+                  ? `${selectedBook.title} · p.${selectedPageNumber}`
+                  : null
+              }
+              onReturnToBook={() => {
+                setDictionaryReturnContext(false);
+                setActiveView("review");
+              }}
               onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
               onStatusBanner={handleStatusBanner}
             />
-          ) : activeView === "memory" ? (
+          </div>
+        ) : activeView === "memory" ? (
+          <div className="centered-view-stage">
             <CorrectionMemoryPanel
               selectedBookId={selectedBookId}
               onStatusBanner={handleStatusBanner}
             />
-          ) : activeView === "export" && selectedBook ? (
+          </div>
+        ) : activeView === "export" && selectedBook ? (
+          <div className="centered-view-stage">
             <ExportPanel
               book={selectedBook}
               runs={mergedRuns}
+              pages={pages}
               onStatusBanner={handleStatusBanner}
-              onGoToReview={() => setActiveView("review")}
+              onGoToReview={() => handleSelectView("review")}
             />
-          ) : !review ? (
-            books.length === 0 ? (
-              <WelcomeHero onImportClick={handleImportCta} />
-            ) : (
-              <div className="panel-card">
-                <h2>Loading page…</h2>
-                <p className="hint-text">Fetching the scan and OCR lines for the selected page.</p>
+          </div>
+        ) : booksLoaded && books.length === 0 ? (
+          <div className="centered-view-stage welcome-stage">
+            <WelcomeHero
+              onImportClick={() => setImportDialogOpen(true)}
+              uploadSlot={
+                <BookUploadForm
+                  busy={busyUpload}
+                  maxUploadMb={capabilities?.max_upload_mb}
+                  maxPdfPages={capabilities?.max_pdf_pages}
+                  onUpload={handleUpload}
+                />
+              }
+            />
+          </div>
+        ) : !selectedBook || !review ? (
+          <div className="centered-view-stage">
+            <div className="panel-card">
+              <h2>Loading workspace…</h2>
+              <p className="hint-text">Fetching the scan and OCR lines for the selected page.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="proofread-shell">
+            <div className="proofread-subbar" role="toolbar" aria-label="Page navigation and progress">
+              <div className="subbar-left">
+                <button
+                  type="button"
+                  className="btn-compact"
+                  aria-pressed={pageRailOpen}
+                  aria-label="Toggle pages navigator rail"
+                  title="Toggle Pages Rail ([)"
+                  onClick={() => setPageRailOpen((v) => !v)}
+                >
+                  ☰ Pages
+                </button>
+
+                <div className="page-stepper" role="group" aria-label="Step pages">
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    disabled={selectedPageNumber <= 1}
+                    title="Previous page (Alt+←)"
+                    onClick={() => navigateToPage(selectedPageNumber - 1)}
+                  >
+                    ←
+                  </button>
+                  <form
+                    className="page-jump-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      commitSubbarPageJump();
+                    }}
+                  >
+                    <label htmlFor="subbar-page-jump" className="hint-text">
+                      Page
+                    </label>
+                    <input
+                      id="subbar-page-jump"
+                      type="number"
+                      className="page-jump-input"
+                      min={1}
+                      max={selectedBook.page_count}
+                      value={pageJumpInput}
+                      aria-label="Jump to page number"
+                      onChange={(e) => setPageJumpInput(e.target.value)}
+                      onBlur={commitSubbarPageJump}
+                    />
+                    <span className="hint-text">/ {selectedBook.page_count}</span>
+                  </form>
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    disabled={selectedPageNumber >= selectedBook.page_count}
+                    title="Next page (Alt+→)"
+                    onClick={() => navigateToPage(selectedPageNumber + 1)}
+                  >
+                    →
+                  </button>
+                </div>
               </div>
-            )
-          ) : (
-            <div className="review-split">
-              <SourcePageViewer
-                bookId={review.book_id}
-                pageNumber={review.page_number}
-                pageCount={review.page_count}
-                widthPx={review.width_px}
-                heightPx={review.height_px}
-                blocks={review.blocks}
-                selectedBlockId={selectedBlockId}
-                syncTarget={syncRequest?.target === "scan" ? syncRequest : null}
-                autoSync={autoSyncBlocks}
-                onSelectBlock={handleSelectFromScan}
-                onSyncToEditor={() => {
-                  if (selectedBlockId) {
-                    triggerSync("editor", selectedBlockId);
-                  }
-                }}
-                onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
-                onNavigatePage={(p) => {
-                  setSelectedPageNumber(p);
-                  setSelectedBlockId(null);
-                  setSyncRequest(null);
-                }}
+
+              <div className="subbar-right">
+                <div
+                  className="subbar-progress"
+                  title={`${approvedPagesCount} of ${selectedBook.page_count} pages approved (${approvalPercent}%)`}
+                >
+                  <span className="hint-text">
+                    <strong>{approvedPagesCount}</strong>/{selectedBook.page_count} approved ({approvalPercent}%)
+                  </span>
+                  <progress
+                    className="subbar-progress-bar"
+                    max={Math.max(selectedBook.page_count, 1)}
+                    value={approvedPagesCount}
+                    aria-label="Book approval progress"
+                  />
+                </div>
+
+                <div
+                  className="mobile-pane-switch"
+                  role="group"
+                  aria-label="Switch mobile pane view"
+                >
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    aria-pressed={mobilePane === "editor"}
+                    onClick={() => setMobilePane("editor")}
+                  >
+                    Editor
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-compact"
+                    aria-pressed={mobilePane === "scan"}
+                    onClick={() => setMobilePane("scan")}
+                  >
+                    Full Scan
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="proofread-body">
+              <PageRail
+                open={pageRailOpen}
+                pages={pages}
+                selectedPageNumber={selectedPageNumber}
+                pageFilter={pageFilter}
+                onChangeFilter={setPageFilter}
+                onSelectPage={(p) => navigateToPage(p)}
+                onClose={() => setPageRailOpen(false)}
               />
 
-              <ReviewEditorPanel
-                review={review}
-                selectedBlockId={selectedBlockId}
-                busyBlockId={busyBlockId}
-                ocrRunning={isOcrRunning}
-                syncTarget={syncRequest?.target === "editor" ? syncRequest : null}
-                autoSync={autoSyncBlocks}
-                autoAdvance={autoAdvancePage}
-                keyboardOpen={keyboardOpen}
-                onQuickStartOcr={() => handleStartOcr()}
-                onSelectBlock={handleSelectFromEditor}
-                onLocateBlockOnScan={(blockId) => {
-                  setSelectedBlockId(blockId);
-                  triggerSync("scan", blockId);
-                }}
-                onLookupWord={(word) => {
-                  setQuickLookupWord(word);
-                }}
-                onSyncToScan={() => {
-                  if (selectedBlockId) {
-                    triggerSync("scan", selectedBlockId);
-                  }
-                }}
-                onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
-                onToggleAutoAdvance={() => setAutoAdvancePage((v) => !v)}
-                onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
-                onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
-                onSaveEdit={handleSaveBlockEdit}
-                onAddManualBlock={handleAddManualBlock}
-                onSaveDigitalText={handleSaveDigitalText}
-                onBatchApproveUnflagged={handleBatchApproveUnflagged}
-                onAutocorrectPage={handleAutocorrectPage}
-                onBatchSaveAndApprovePage={handleBatchSaveAndApprovePage}
-                onAcceptSuggestion={handleAcceptSuggestion}
-                onRejectSuggestion={handleRejectSuggestion}
-                onChangePageStatus={handlePageStatusChange}
-              />
+              <div className="review-split" data-mobile-pane={mobilePane}>
+                <SourcePageViewer
+                  bookId={review.book_id}
+                  pageNumber={review.page_number}
+                  pageCount={review.page_count}
+                  widthPx={review.width_px}
+                  heightPx={review.height_px}
+                  blocks={review.blocks}
+                  selectedBlockId={selectedBlockId}
+                  syncTarget={syncRequest?.target === "scan" ? syncRequest : null}
+                  autoSync={autoSyncBlocks}
+                  hidePageNav
+                  onSelectBlock={handleSelectFromScan}
+                  onSyncToEditor={() => {
+                    if (selectedBlockId) {
+                      triggerSync("editor", selectedBlockId);
+                    }
+                  }}
+                  onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
+                  onNavigatePage={(p) => navigateToPage(p)}
+                />
+
+                <ReviewEditorPanel
+                  review={review}
+                  selectedBlockId={selectedBlockId}
+                  busyBlockId={busyBlockId}
+                  ocrRunning={isOcrRunning}
+                  syncTarget={syncRequest?.target === "editor" ? syncRequest : null}
+                  autoSync={autoSyncBlocks}
+                  autoAdvance={autoAdvancePage}
+                  keyboardOpen={keyboardOpen}
+                  onQuickStartOcr={async () => {
+                    setOcrDrawerOpen(true);
+                  }}
+                  onOpenFullScanMobile={() => setMobilePane("scan")}
+                  onDirtyCountChange={setDirtyBlockCount}
+                  onSelectBlock={handleSelectFromEditor}
+                  onLocateBlockOnScan={(blockId) => {
+                    setSelectedBlockId(blockId);
+                    setMobilePane("scan");
+                    triggerSync("scan", blockId);
+                  }}
+                  onLookupWord={(word) => {
+                    setQuickLookupWord(word);
+                  }}
+                  onSyncToScan={() => {
+                    if (selectedBlockId) {
+                      triggerSync("scan", selectedBlockId);
+                    }
+                  }}
+                  onToggleAutoSync={() => setAutoSyncBlocks((v) => !v)}
+                  onToggleAutoAdvance={() => setAutoAdvancePage((v) => !v)}
+                  onToggleKeyboard={() => setKeyboardOpen((v) => !v)}
+                  onSelectPrimaryRun={(runId) => setSelectedPrimaryRunId(runId)}
+                  onSaveEdit={handleSaveBlockEdit}
+                  onAddManualBlock={handleAddManualBlock}
+                  onSaveDigitalText={handleSaveDigitalText}
+                  onBatchApproveUnflagged={handleBatchApproveUnflagged}
+                  onAutocorrectPage={handleAutocorrectPage}
+                  onBatchSaveAndApprovePage={handleBatchSaveAndApprovePage}
+                  onAcceptSuggestion={handleAcceptSuggestion}
+                  onRejectSuggestion={handleRejectSuggestion}
+                  onChangePageStatus={handlePageStatusChange}
+                />
+              </div>
             </div>
-          )}
-        </main>
-      </div>
+          </div>
+        )}
+      </main>
 
       <TeluguKeyboard
         open={keyboardOpen}
@@ -1507,14 +1442,58 @@ export function App() {
         targetDescription={keyboardTargetLabel}
       />
 
+      <ImportBookDialog
+        open={importDialogOpen}
+        busy={busyUpload}
+        maxUploadMb={capabilities?.max_upload_mb}
+        maxPdfPages={capabilities?.max_pdf_pages}
+        onClose={() => setImportDialogOpen(false)}
+        onUpload={handleUpload}
+      />
+
+      {selectedBook && (
+        <OcrRunnerDrawer
+          open={ocrDrawerOpen}
+          book={selectedBook}
+          runs={mergedRuns}
+          capabilities={capabilities}
+          isOcrRunning={isOcrRunning}
+          usePaddle={usePaddle}
+          useTesseract={useTesseract}
+          ocrStartPage={ocrStartPage}
+          ocrEndPage={ocrEndPage}
+          ocrPreprocessing={ocrPreprocessing}
+          ocrRenderDpi={ocrRenderDpi}
+          ocrForceRerun={ocrForceRerun}
+          ocrIncludeDigital={ocrIncludeDigital}
+          onUsePaddleChange={setUsePaddle}
+          onUseTesseractChange={setUseTesseract}
+          onStartPageChange={setOcrStartPage}
+          onEndPageChange={setOcrEndPage}
+          onPreprocessingChange={setOcrPreprocessing}
+          onRenderDpiChange={setOcrRenderDpi}
+          onForceRerunChange={setOcrForceRerun}
+          onIncludeDigitalChange={setOcrIncludeDigital}
+          onStartOcr={handleStartOcr}
+          onResumeRun={handleResumeRun}
+          onCancelRun={handleCancelRun}
+          onClose={() => setOcrDrawerOpen(false)}
+        />
+      )}
+
       <QuickLookupDialog
         word={quickLookupWord}
         onClose={() => setQuickLookupWord(null)}
         onOpenFullDictionary={(w) => {
           setDictionaryQuery(w);
+          setDictionaryReturnContext(Boolean(selectedBook));
           setActiveView("dictionary");
         }}
       />
+
+      <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+
+      <ToastRegion toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

@@ -236,6 +236,8 @@ export async function listCorrections(params?: {
   bookId?: string | null;
   statusFilter?: string;
   query?: string;
+  limit?: number;
+  offset?: number;
 }): Promise<CorrectionMemoryRecord[]> {
   const qs = new URLSearchParams();
   if (params?.bookId) qs.set("book_id", params.bookId);
@@ -243,6 +245,8 @@ export async function listCorrections(params?: {
     qs.set("status_filter", params.statusFilter);
   }
   if (params?.query) qs.set("q", params.query);
+  if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params?.offset !== undefined) qs.set("offset", String(params.offset));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   const data = await requestJson<{ items: CorrectionMemoryRecord[] }>(
     `/api/v1/corrections${suffix}`,

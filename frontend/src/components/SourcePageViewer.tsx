@@ -29,6 +29,8 @@ interface SourcePageViewerProps {
   selectedBlockId: string | null;
   syncTarget?: { blockId: string; seq: number } | null;
   autoSync?: boolean;
+  /** When page navigation lives in the unified workspace sub-toolbar, hide duplicate Prev/Next here. */
+  hidePageNav?: boolean;
   onSelectBlock: (blockId: string) => void;
   onNavigatePage: (pageNumber: number) => void;
   onSyncToEditor?: () => void;
@@ -45,16 +47,20 @@ export function SourcePageViewer({
   selectedBlockId,
   syncTarget = null,
   autoSync = false,
+  hidePageNav = false,
   onSelectBlock,
   onNavigatePage,
   onSyncToEditor,
   onToggleAutoSync,
 }: SourcePageViewerProps) {
   const [viewMode, setViewMode] = useState<"overlay" | "pdfjs">("overlay");
-  const [zoom, setZoom] = useState(1.0);
+  const [fitMode, setFitMode] = useState(true);
+  const [containerWidth, setContainerWidth] = useState(640);
+  const [manualZoom, setManualZoom] = useState(1.0);
   const [pageJumpInput, setPageJumpInput] = useState(String(pageNumber));
   const [pdfStatus, setPdfStatus] = useState<string>("");
-  const [imageLoading, setImageLoading] = useState<boolean>(false);
+  const pageKey = `${bookId}:${pageNumber}`;
+  const [loadedImageKey, setLoadedImageKey] = useState<string>("");
   const [flashingBlockId, setFlashingBlockId] = useState<string | null>(null);
   const [syncNotice, setSyncNotice] = useState<string>("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,6 +69,8 @@ export function SourcePageViewer({
   const syncSeqRef = useRef(0);
   const lastHandledSyncSeqRef = useRef<number | null>(null);
   const cachedPdfDocRef = useRef<{ bookId: string; doc: PDFDocumentProxy } | null>(null);
+
+  const imageLoading = loadedImageKey !== pageKey;
 
   useEffect(() => {
     return () => {
@@ -75,18 +83,37 @@ export function SourcePageViewer({
 
   useEffect(() => {
     setPageJumpInput(String(pageNumber));
-    setImageLoading(true);
   }, [bookId, pageNumber]);
 
-  function handleFitToPane() {
-    const scroller = paneBodyRef.current;
-    if (!scroller) {
-      setZoom(1.0);
-      return;
+  useEffect(() => {
+    const el = paneBodyRef.current;
+    if (!el) return;
+    const measure = () => {
+      if (el.clientWidth > 0) {
+        setContainerWidth(Math.max(260, el.clientWidth - 28));
+      }
+    };
+    measure();
+    if (typeof ResizeObserver === "function") {
+      const obs = new ResizeObserver(measure);
+      obs.observe(el);
+      return () => obs.disconnect();
     }
-    const availableWidth = Math.max(320, scroller.clientWidth - 28);
-    const fitZoom = Math.min(2.5, Math.max(0.5, Number((availableWidth / 760).toFixed(2))));
-    setZoom(fitZoom);
+    return undefined;
+  }, []);
+
+  const computedFitZoom = Math.min(2.2, Math.max(0.4, Number((containerWidth / 760).toFixed(2))));
+  const effectiveZoom = fitMode ? computedFitZoom : manualZoom;
+
+  function handleFitToPane() {
+    setFitMode(true);
+    setManualZoom(computedFitZoom);
+  }
+
+  function stepZoom(delta: number) {
+    const next = Math.min(2.5, Math.max(0.4, Number((effectiveZoom + delta).toFixed(2))));
+    setFitMode(false);
+    setManualZoom(next);
   }
 
   function commitPageJump() {
@@ -102,8 +129,8 @@ export function SourcePageViewer({
 
   const naturalWidth = widthPx ?? 1200;
   const naturalHeight = heightPx ?? 1600;
-  const displayWidth = Math.round(760 * zoom);
-  const displayHeight = Math.round((760 * zoom * naturalHeight) / naturalWidth);
+  const displayWidth = Math.round(760 * effectiveZoom);
+  const displayHeight = Math.round((760 * effectiveZoom * naturalHeight) / naturalWidth);
 
   useEffect(() => {
     if (!syncTarget) return;
@@ -192,7 +219,7 @@ export function SourcePageViewer({
         if (cancelled) return;
 
         const baseViewport = page.getViewport({ scale: 1.0 });
-        const targetScale = (760 * zoom) / baseViewport.width;
+        const targetScale = (760 * effectiveZoom) / baseViewport.width;
         const viewport = page.getViewport({ scale: targetScale });
         const dpr = window.devicePixelRatio || 1;
 
@@ -228,59 +255,82 @@ export function SourcePageViewer({
         loadingTask.destroy().catch(() => {});
       }
     };
-  }, [bookId, pageNumber, viewMode, zoom]);
+  }, [bookId, pageNumber, viewMode, effectiveZoom]);
+
+  // Roving arrow-key navigation inside the single-tab-stop SVG overlay (fixes P0 30+ invisible Tab stops)
+  function handleOverlayKeyDown(e: React.KeyboardEvent<SVGSVGElement>) {
+    if (blocks.length === 0) return;
+    const currentIdx = blocks.findIndex((b) => b.block_id === selectedBlockId);
+    let nextIdx: number | null = null;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      nextIdx = currentIdx < 0 ? 0 : (currentIdx + 1) % blocks.length;
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      nextIdx = currentIdx <= 0 ? blocks.length - 1 : currentIdx - 1;
+    } else if (e.key === "Home") {
+      nextIdx = 0;
+    } else if (e.key === "End") {
+      nextIdx = blocks.length - 1;
+    }
+    if (nextIdx === null) return;
+    e.preventDefault();
+    const target = blocks[nextIdx];
+    onSelectBlock(target.block_id);
+    setSyncNotice(`Selected scan box for line ${target.block_index + 1}.`);
+  }
 
   return (
     <section className="pane" aria-label="Source page viewer">
-      <div className="pane-toolbar" role="toolbar" aria-label="Source page navigation and zoom controls">
-        <div className="toolbar-group" role="group" aria-label="Page navigation">
-          <button
-            type="button"
-            className="btn-compact"
-            aria-label="Previous page"
-            disabled={pageNumber <= 1}
-            onClick={() => onNavigatePage(pageNumber - 1)}
-          >
-            ← Prev
-          </button>
-          <form
-            className="page-jump-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              commitPageJump();
-            }}
-          >
-            <label htmlFor="viewer-page-jump" className="hint-text">
-              Page
-            </label>
-            <input
-              id="viewer-page-jump"
-              type="number"
-              className="page-jump-input"
-              aria-label="Jump to page number"
-              min={1}
-              max={pageCount}
-              value={pageJumpInput}
-              onChange={(e) => setPageJumpInput(e.target.value)}
-              onBlur={commitPageJump}
-            />
-            <span className="hint-text">/ {pageCount}</span>
-          </form>
-          <button
-            type="button"
-            className="btn-compact"
-            aria-label="Next page"
-            disabled={pageNumber >= pageCount}
-            onClick={() => onNavigatePage(pageNumber + 1)}
-          >
-            Next →
-          </button>
-        </div>
+      <div className="pane-toolbar" role="toolbar" aria-label="Source page controls">
+        {!hidePageNav && (
+          <div className="toolbar-group" role="group" aria-label="Page navigation">
+            <button
+              type="button"
+              className="btn-compact"
+              aria-label="Previous page"
+              disabled={pageNumber <= 1}
+              onClick={() => onNavigatePage(pageNumber - 1)}
+            >
+              ← Prev
+            </button>
+            <form
+              className="page-jump-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                commitPageJump();
+              }}
+            >
+              <label htmlFor="viewer-page-jump" className="hint-text">
+                Page
+              </label>
+              <input
+                id="viewer-page-jump"
+                type="number"
+                className="page-jump-input"
+                aria-label="Jump to page number"
+                min={1}
+                max={pageCount}
+                value={pageJumpInput}
+                onChange={(e) => setPageJumpInput(e.target.value)}
+                onBlur={commitPageJump}
+              />
+              <span className="hint-text">/ {pageCount}</span>
+            </form>
+            <button
+              type="button"
+              className="btn-compact"
+              aria-label="Next page"
+              disabled={pageNumber >= pageCount}
+              onClick={() => onNavigatePage(pageNumber + 1)}
+            >
+              Next →
+            </button>
+          </div>
+        )}
 
         <div className="segmented-control" role="group" aria-label="Viewer mode">
           <button
             type="button"
-            className={`btn-compact ${viewMode === "overlay" ? "primary" : ""}`.trim()}
+            className="btn-compact"
             aria-pressed={viewMode === "overlay"}
             onClick={() => setViewMode("overlay")}
           >
@@ -288,7 +338,7 @@ export function SourcePageViewer({
           </button>
           <button
             type="button"
-            className={`btn-compact ${viewMode === "pdfjs" ? "primary" : ""}`.trim()}
+            className="btn-compact"
             aria-pressed={viewMode === "pdfjs"}
             onClick={() => setViewMode("pdfjs")}
           >
@@ -306,7 +356,7 @@ export function SourcePageViewer({
               aria-label="Sync to selected block in editor"
               onClick={onSyncToEditor}
             >
-              ⌖ Sync → Editor
+              ⌖ Sync
             </button>
             {onToggleAutoSync && (
               <button
@@ -322,36 +372,32 @@ export function SourcePageViewer({
           </div>
         )}
 
-        <div className="toolbar-group" role="group" aria-label="Zoom controls" style={{ marginInlineStart: "auto" }}>
+        <div className="toolbar-group toolbar-end" role="group" aria-label="Zoom controls">
           <button
             type="button"
-            className="btn-compact"
+            className="btn-compact icon-only-btn"
             aria-label="Zoom out"
-            onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.2).toFixed(2))))}
+            onClick={() => stepZoom(-0.15)}
           >
             −
           </button>
-          <span className="hint-text" style={{ minWidth: "3rem", textAlign: "center", fontWeight: 600 }}>
-            {Math.round(zoom * 100)}%
-          </span>
+          <span className="zoom-readout">{Math.round(effectiveZoom * 100)}%</span>
           <button
             type="button"
-            className="btn-compact"
+            className="btn-compact icon-only-btn"
             aria-label="Zoom in"
-            onClick={() => setZoom((z) => Math.min(2.5, Number((z + 0.2).toFixed(2))))}
+            onClick={() => stepZoom(0.15)}
           >
             +
           </button>
           <button
             type="button"
             className="btn-compact"
+            aria-pressed={fitMode}
             title="Fit page scan to viewer width"
             onClick={handleFitToPane}
           >
             Fit
-          </button>
-          <button type="button" className="btn-compact" onClick={() => setZoom(1.0)}>
-            Reset
           </button>
         </div>
       </div>
@@ -360,25 +406,38 @@ export function SourcePageViewer({
         {syncNotice}
       </p>
 
-      <div ref={paneBodyRef} className="pane-body">
+      <div ref={paneBodyRef} className="pane-body scan-pane-body">
         {viewMode === "overlay" ? (
           <div
             ref={canvasWrapRef}
             className={`page-canvas-wrap${imageLoading ? " is-loading" : ""}`}
             style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
           >
+            {imageLoading && (
+              <div className="scan-loading-skeleton" role="status" aria-label={`Loading page ${pageNumber} scan`}>
+                <span>Rendering page {pageNumber} scan…</span>
+              </div>
+            )}
             <img
+              key={pageKey}
               src={resolveAppUrl(`/api/v1/books/${bookId}/pages/${pageNumber}/image`)}
               alt={`Scanned source page ${pageNumber}`}
-              style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
-              onLoad={() => setImageLoading(false)}
-              onError={() => setImageLoading(false)}
+              style={{
+                width: `${displayWidth}px`,
+                height: `${displayHeight}px`,
+                opacity: imageLoading ? 0 : 1,
+              }}
+              onLoad={() => setLoadedImageKey(pageKey)}
+              onError={() => setLoadedImageKey(pageKey)}
             />
-            {blocks.length > 0 && (
+            {blocks.length > 0 && !imageLoading && (
               <svg
                 className="overlay-svg"
                 viewBox={`0 0 ${naturalWidth} ${naturalHeight}`}
-                aria-label="OCR text region overlays"
+                tabIndex={0}
+                role="listbox"
+                aria-label="OCR text region overlays (use Arrow Up/Down to cycle lines)"
+                onKeyDown={handleOverlayKeyDown}
               >
                 {blocks.map((block) => {
                   const pts = block.polygon;
@@ -404,16 +463,10 @@ export function SourcePageViewer({
                       key={block.block_id}
                       points={pointsAttr}
                       className={classes}
-                      tabIndex={0}
-                      role="button"
+                      role="option"
+                      aria-selected={isSelected}
                       aria-label={`Select OCR block ${block.block_index + 1}`}
                       onClick={() => onSelectBlock(block.block_id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onSelectBlock(block.block_id);
-                        }
-                      }}
                     >
                       <title>{`Line ${block.block_index + 1}: ${block.current_text}`}</title>
                     </polygon>

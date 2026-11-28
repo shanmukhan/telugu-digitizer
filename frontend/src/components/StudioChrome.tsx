@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type {
   BookOCRRunSummary,
   BookSummary,
@@ -377,39 +377,51 @@ const FEATURES: Array<{ icon: string; title: string; text: string }> = [
 
 const PIPELINE = ["Import PDF", "Run OCR", "Review & correct", "Export DOCX / TXT"];
 
-export function WelcomeHero({ onImportClick }: { onImportClick: () => void }) {
+export function WelcomeHero({
+  onImportClick,
+  uploadSlot,
+}: {
+  onImportClick: () => void;
+  uploadSlot?: ReactNode;
+}) {
   return (
     <div className="welcome">
-      <section className="hero" aria-labelledby="hero-title">
-        <span className="hero-glyphs" aria-hidden="true" lang="te">
-          అ ఆ ఇ ఈ ఉ ఊ
-        </span>
-        <span className="pill-tag info hero-eyebrow">Local-first Telugu book digitization</span>
-        <h2 id="hero-title">
-          Turn printed Telugu books into <em>faithful, editable text</em>.
-        </h2>
-        <p className="hero-lead">
-          Import a scanned PDF, extract text with two OCR engines, proofread line-by-line against
-          the original page, and export a clean DOCX — with every machine result preserved and
-          every human correction traceable.
-        </p>
-        <div className="hero-actions">
-          <button type="button" className="primary hero-cta" onClick={onImportClick}>
-            Import your first PDF
-          </button>
-          <span className="hint-text">Stored read-only · deduplicated by SHA-256</span>
-        </div>
-        <ol className="pipeline" aria-label="How it works">
-          {PIPELINE.map((label, idx) => (
-            <li key={label}>
-              <span className="pipeline-num" aria-hidden="true">
-                {idx + 1}
-              </span>
-              {label}
-            </li>
-          ))}
-        </ol>
-      </section>
+      <div className={uploadSlot ? "welcome-split" : undefined}>
+        <section className="hero" aria-labelledby="hero-title">
+          <span className="hero-glyphs" aria-hidden="true" lang="te">
+            అ ఆ ఇ ఈ ఉ ఊ
+          </span>
+          <span className="pill-tag info hero-eyebrow">Telugu book digitization studio</span>
+          <h2 id="hero-title">
+            Turn printed Telugu books into <em>faithful, editable text</em>.
+          </h2>
+          <p className="hero-lead">
+            Import a scanned PDF, extract text with dual OCR engines, proofread line-by-line
+            against the original scan, and export validated DOCX — with raw OCR preserved and
+            every correction traceable.
+          </p>
+          {!uploadSlot && (
+            <div className="hero-actions">
+              <button type="button" className="primary hero-cta" onClick={onImportClick}>
+                Import your first PDF
+              </button>
+              <span className="hint-text">Stored read-only · deduplicated by SHA-256</span>
+            </div>
+          )}
+          <ol className="pipeline" aria-label="How it works">
+            {PIPELINE.map((label, idx) => (
+              <li key={label}>
+                <span className="pipeline-num" aria-hidden="true">
+                  {idx + 1}
+                </span>
+                {label}
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {uploadSlot && <div className="welcome-upload-col">{uploadSlot}</div>}
+      </div>
 
       <section aria-label="What makes this studio different">
         <div className="feature-grid">
