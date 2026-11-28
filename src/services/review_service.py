@@ -29,6 +29,7 @@ from src.db.models import (
     TrainingSample,
 )
 from src.evaluation.metrics import normalize_nfc
+from src.services.book_service import ensure_page_image_rendered
 from src.services.correction_service import (
     build_suggestion_index,
     create_correction_memory_entry,
@@ -419,13 +420,13 @@ def _maybe_record_training_sample(
     """When book.training_consent is True, crop the verified line region and store a TrainingSample."""
     if storage is None or book is None or not book.training_consent:
         return
-    if not verified_text.strip() or not page.image_storage_key or not storage.exists(page.image_storage_key):
+    if not verified_text.strip():
         return
     bbox = _bbox_from_block(block)
     if bbox is None or len(bbox) != 4:
         return
     try:
-        img_path = storage.resolve_key(page.image_storage_key)
+        img_path = ensure_page_image_rendered(db=None, storage=storage, book=book, page=page)
         with Image.open(img_path) as im:
             w, h = im.size
             x1 = max(0, min(int(bbox[0]), w - 1))

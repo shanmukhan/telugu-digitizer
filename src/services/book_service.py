@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,74 @@ from src.db.models import Book, BookPage
 from src.pdf.rasterizer import classify_and_extract_pdf_page
 
 LOGGER = logging.getLogger("telugu_digitizer.services.books")
+
+# Pre-render all pages synchronously only for small PDFs (<= 10 pages); larger books
+# pre-render page 1 synchronously and rasterize remaining pages lazily on demand so
+# HTTP upload completes in ~2 seconds instead of hitting reverse-proxy 502 timeouts.
+EAGER_RENDER_MAX_PAGES = 10
+
+_PAGE_RENDER_LOCKS_GUARD = threading.Lock()
+_PAGE_RENDER_LOCKS: dict[tuple[uuid.UUID, int], threading.Lock] = {}
+
+
+def _get_page_render_lock(book_id: uuid.UUID, page_number: int) -> threading.Lock:
+    key = (book_id, page_number)
+    with _PAGE_RENDER_LOCKS_GUARD:
+        lock = _PAGE_RENDER_LOCKS.get(key)
+        if lock is None:
+            if len(_PAGE_RENDER_LOCKS) > 512:
+                _PAGE_RENDER_LOCKS.clear()
+            lock = threading.Lock()
+            _PAGE_RENDER_LOCKS[key] = lock
+        return lock
+
+
+def ensure_page_image_rendered(
+    *,
+    db: Session | None,
+    storage: LocalFilesystemStorage,
+    book: Book,
+    page: BookPage,
+) -> Path:
+    """Ensure a page PNG exists on disk, lazily rasterizing from the immutable source PDF if needed."""
+    img_key = page.image_storage_key or f"pages/{book.id}/page-{page.page_number:04d}.png"
+    if storage.exists(img_key):
+        return storage.resolve_key(img_key)
+
+    if not book.source_storage_key or not storage.exists(book.source_storage_key):
+        raise AppError(
+            "PAGE_IMAGE_NOT_FOUND",
+            "Rendered page image and source PDF are missing from storage.",
+            status_code=404,
+        )
+
+    lock = _get_page_render_lock(book.id, page.page_number)
+    with lock:
+        if storage.exists(img_key):
+            return storage.resolve_key(img_key)
+
+        dpi = int(page.render_dpi or 300)
+        matrix = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+        source_pdf_path = storage.resolve_key(book.source_storage_key)
+        with pymupdf.open(source_pdf_path) as doc:
+            if page.page_number < 1 or page.page_number > doc.page_count:
+                raise AppError("PAGE_NOT_FOUND", f"Page {page.page_number} out of range.", status_code=404)
+            pdf_page = doc.load_page(page.page_number - 1)
+            pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
+            png_bytes = pix.tobytes("png")
+            width_px = int(pix.width)
+            height_px = int(pix.height)
+
+        img_path = storage.write_bytes(img_key, png_bytes, read_only=False)
+        img_sha = sha256_bytes(png_bytes)
+        page.image_storage_key = img_key
+        page.image_sha256 = img_sha
+        page.width_px = width_px
+        page.height_px = height_px
+        page.render_dpi = dpi
+        if db is not None:
+            db.commit()
+        return img_path
 
 
 def import_pdf_book(
@@ -116,16 +185,27 @@ def import_pdf_book(
             )
             db.add(book)
 
+            eager_render_all = page_count <= EAGER_RENDER_MAX_PAGES
             for zero_idx in range(page_count):
                 page_number = zero_idx + 1
                 page = doc.load_page(zero_idx)
                 page_kind, char_count, coverage, extracted_text = classify_and_extract_pdf_page(page)
                 digital_text = extracted_text if page_kind in ("digital_text", "mixed") else None
-
-                pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
-                png_bytes = pix.tobytes("png")
                 img_key = f"pages/{book_id}/page-{page_number:04d}.png"
-                storage.write_bytes(img_key, png_bytes, read_only=False)
+
+                if eager_render_all or page_number == 1:
+                    pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
+                    png_bytes = pix.tobytes("png")
+                    storage.write_bytes(img_key, png_bytes, read_only=False)
+                    img_sha: str | None = sha256_bytes(png_bytes)
+                    width_px = int(pix.width)
+                    height_px = int(pix.height)
+                else:
+                    # Defer heavy 300 DPI PNG rasterization until first page view or OCR run.
+                    rect = page.rect
+                    width_px = max(1, int(round(rect.width * dpi / 72.0)))
+                    height_px = max(1, int(round(rect.height * dpi / 72.0)))
+                    img_sha = None
 
                 db.add(
                     BookPage(
@@ -133,9 +213,9 @@ def import_pdf_book(
                         page_number=page_number,
                         page_kind=page_kind,
                         image_storage_key=img_key,
-                        image_sha256=sha256_bytes(png_bytes),
-                        width_px=int(pix.width),
-                        height_px=int(pix.height),
+                        image_sha256=img_sha,
+                        width_px=width_px,
+                        height_px=height_px,
                         render_dpi=dpi,
                         extracted_text_char_count=char_count,
                         image_coverage_ratio=coverage,

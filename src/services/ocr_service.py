@@ -300,24 +300,35 @@ class OCRJobExecutor:
             img_sha = page.image_sha256 or sha256_file(img_path)
             return img_path, page.image_storage_key, img_sha
 
-        custom_key = f"pages/{book.id}/dpi-{requested_dpi}/page-{page.page_number:04d}.png"
-        if self.storage.exists(custom_key):
-            img_path = self.storage.resolve_key(custom_key)
-            return img_path, custom_key, sha256_file(img_path)
+        target_key = (
+            page.image_storage_key
+            if (page.image_storage_key and (page.render_dpi or 300) == requested_dpi)
+            else f"pages/{book.id}/dpi-{requested_dpi}/page-{page.page_number:04d}.png"
+        )
+        if self.storage.exists(target_key):
+            img_path = self.storage.resolve_key(target_key)
+            return img_path, target_key, sha256_file(img_path)
 
         matrix = pymupdf.Matrix(requested_dpi / 72.0, requested_dpi / 72.0)
         if open_pdf_doc is not None:
             pdf_page = open_pdf_doc.load_page(page.page_number - 1)
             pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
             png_bytes = pix.tobytes("png")
+            width_px, height_px = int(pix.width), int(pix.height)
         else:
             source_pdf_path = self.storage.resolve_key(book.source_storage_key)
             with pymupdf.open(source_pdf_path) as doc:
                 pdf_page = doc.load_page(page.page_number - 1)
                 pix = pdf_page.get_pixmap(matrix=matrix, colorspace=pymupdf.csRGB, alpha=False)
                 png_bytes = pix.tobytes("png")
-        img_path = self.storage.write_bytes(custom_key, png_bytes, read_only=False)
-        return img_path, custom_key, sha256_bytes(png_bytes)
+                width_px, height_px = int(pix.width), int(pix.height)
+        img_path = self.storage.write_bytes(target_key, png_bytes, read_only=False)
+        img_sha = sha256_bytes(png_bytes)
+        if target_key == page.image_storage_key:
+            page.image_sha256 = img_sha
+            page.width_px = width_px
+            page.height_px = height_px
+        return img_path, target_key, img_sha
 
     def _apply_preprocessing_profile(
         self,

@@ -293,3 +293,40 @@ def test_page_autocorrect_and_batch_save_approve_api(autocorrect_client) -> None
     assert ("అష్టాదశవర్ధనలు", "అష్టాదశవర్ణనలు") in pairs
     assert ("పస్తకం", "పుస్తకం") in pairs
     assert ("ర్మ", "43") not in pairs
+
+
+def test_large_pdf_import_uses_lazy_page_rendering_on_demand(autocorrect_client) -> None:
+    """Books with >10 pages skip synchronous full rasterization during upload and render pages lazily on demand."""
+    client, _app, settings = autocorrect_client
+
+    doc = pymupdf.open()
+    for i in range(15):
+        page = doc.new_page(width=200.0, height=120.0)
+        page.insert_text((20, 60), f"Page {i + 1}")
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    upload = client.post(
+        "/api/v1/books",
+        files={"file": ("large_book.pdf", pdf_bytes, "application/pdf")},
+        data={"title": "Large Book Lazy Test"},
+    )
+    assert upload.status_code == 201
+    book_id = upload.json()["book_id"]
+    assert upload.json()["page_count"] == 15
+
+    pages_dir = settings.workspace_dir / "pages" / book_id
+    # Page 1 is pre-rendered; page 12 is deferred until requested (prevents 502 proxy timeout on 400+ page books).
+    assert (pages_dir / "page-0001.png").is_file()
+    assert not (pages_dir / "page-0012.png").is_file()
+
+    pages_list = client.get(f"/api/v1/books/{book_id}/pages").json()["items"]
+    assert len(pages_list) == 15
+    assert all(p["has_image"] is True for p in pages_list)
+
+    # Requesting page 12 image lazily renders & caches page-0012.png on demand.
+    img_resp = client.get(f"/api/v1/books/{book_id}/pages/12/image")
+    assert img_resp.status_code == 200
+    assert img_resp.headers["content-type"] == "image/png"
+    assert img_resp.content.startswith(b"\x89PNG")
+    assert (pages_dir / "page-0012.png").is_file()

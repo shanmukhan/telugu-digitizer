@@ -235,3 +235,15 @@ All colours are CSS custom properties in `:root` of `frontend/src/styles/app.css
   - `tests/test_ocr_providers_and_integration.py` (`test_paddle_provider_rejects_non_telugu_or_wrong_version`)
   - `tests/test_deployment_and_security.py` (rotating log file + crash recovery log verification)
   - `frontend/src/components/ReviewEditorPanel.test.tsx` (engine switch CTA)
+
+
+---
+
+## 2026-11-28 — `502 Proxy Error` on Large PDF Import (406-Page Book)
+
+- **Symptom:** Importing a 406-page PDF via `https://lahari.org/telugu/` failed in the browser with Apache `502 Proxy Error (Error reading from remote server)`, even though the book eventually appeared in the database.
+- **Root Cause:** `import_pdf_book` in `src/services/book_service.py` rasterized every page synchronously at 300 DPI to PNG during the HTTP `POST /api/v1/books` request (~16 minutes for 406 pages on Raspberry Pi 5), exceeding Apache's reverse-proxy read timeout.
+- **Fix:**
+  - Added thread-safe on-demand page rasterization (`ensure_page_image_rendered`) in `src/services/book_service.py`.
+  - For books with `> 10` pages (`EAGER_RENDER_MAX_PAGES = 10`), `import_pdf_book` classifies all pages and pre-renders only Page 1 synchronously (completing upload in ~2 seconds), deferring remaining 300 DPI PNG renders until first page view (`GET /api/v1/books/{book_id}/pages/{page_number}/image`), OCR (`src/services/ocr_service.py`), or training crop extraction (`src/services/review_service.py`).
+  - Added regression test `test_large_pdf_import_uses_lazy_page_rendering_on_demand` in `tests/test_lexicon_and_autocorrect.py` (32/32 backend tests passing against PostgreSQL).

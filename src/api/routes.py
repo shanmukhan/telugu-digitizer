@@ -65,6 +65,7 @@ from src.core.storage import LocalFilesystemStorage
 from src.db.models import Book, BookPage, DocumentExport, ModelRegistry, OCRBlock, OCRRun, ProcessingJob
 from src.services.book_service import (
     delete_book_and_artifacts,
+    ensure_page_image_rendered,
     get_book_with_counts,
     import_pdf_book,
     list_books_with_counts,
@@ -262,10 +263,13 @@ def list_book_pages(
         else set()
     )
     expected_prefix = f"pages/{book_id}/"
+    has_source_pdf = bool(book.source_storage_key and storage.exists(book.source_storage_key))
     items = []
     for p in pages:
         key = p.image_storage_key
-        if not key:
+        if has_source_pdf:
+            has_img = True
+        elif not key:
             has_img = False
         elif key.startswith(expected_prefix) and "/" not in key[len(expected_prefix) :]:
             has_img = key[len(expected_prefix) :] in existing_filenames
@@ -310,7 +314,12 @@ def get_page_image(
             status_code=404,
         )
     if not page.image_storage_key or not storage.exists(page.image_storage_key):
-        raise AppError("PAGE_IMAGE_NOT_FOUND", "Rendered page image is missing.", status_code=404)
+        book = db.get(Book, book_id)
+        if book is None:
+            raise AppError("BOOK_NOT_FOUND", f"Book {book_id} not found.", status_code=404)
+        img_path = ensure_page_image_rendered(db=db, storage=storage, book=book, page=page)
+    else:
+        img_path = storage.resolve_key(page.image_storage_key)
 
     headers = {"Cache-Control": "private, max-age=86400"}
     if page.image_sha256:
@@ -321,7 +330,7 @@ def get_page_image(
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
 
     return FileResponse(
-        path=storage.resolve_key(page.image_storage_key),
+        path=img_path,
         media_type="image/png",
         headers=headers,
     )
